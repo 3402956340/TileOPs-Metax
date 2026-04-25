@@ -246,7 +246,7 @@ def _(batch, seq_len, seq_len_kv, kv_group, topk, in_dtype, out_dtype, *inputs) 
 
 class TopkSelectorKernel(Kernel):
 
-    supported_archs: list[int] = [90]
+    supported_archs: list[int] = [80]
 
     def __init__(self,
                  batch: int,

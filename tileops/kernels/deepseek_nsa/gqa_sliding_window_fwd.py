@@ -237,7 +237,7 @@ class GqaSlidingWindowFwdKernel(Kernel):
     @property
     def autotune_configs(self) -> list[dict]:
         configs = list(itertools.product([32, 64, 128], [32, 64, 128],
-                                         [1, 2, 3], [128, 256]))
+                                         [0], [128, 256]))
         return [{'block_m': c[0], 'block_n': c[1],
                  'num_stages': c[2], 'threads': c[3]} for c in configs]
 

@@ -31,11 +31,11 @@ class DsaDecodeBenchmark(BenchmarkBase):
 
 _DSA_DECODE_BENCH_PARAMS = [
     pytest.param(
-        1, 128, 1024, 2048, 512, 64, 2048, 1, 1, 1024, None, torch.float16, False,
+        1, 128, 1024, 2048, 256, 64, 2048, 1, 1, 1024, None, torch.float16, False,
         id="single-batch-mainstream",
     ),
     pytest.param(
-        1, 128, 512, 4096, 512, 64, 1024, 1, 1, 512, None, torch.float16, False,
+        1, 128, 512, 4096, 256, 64, 1024, 1, 1, 512, None, torch.float16, False,
         id="longer-kv-lower-topk",
     ),
 ]

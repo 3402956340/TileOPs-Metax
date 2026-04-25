@@ -256,8 +256,8 @@ class MhaBwdKernel(Kernel):
     @property
     def default_config(self) -> dict:
         return {
-            "block_m": 64,
-            "block_n": 64 if self.dim <= 64 else 32,
+            "block_m": 32,
+            "block_n": 32,
             "num_stages": 1,
             "threads": 128
         }

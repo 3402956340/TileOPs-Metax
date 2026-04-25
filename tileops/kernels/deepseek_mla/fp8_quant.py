@@ -80,7 +80,7 @@ def _(batch, seq_len_kv, kv_group, index_dim, in_dtype, num_stages, block_m, *in
 
 class Fp8QuantKernel(Kernel):
 
-    supported_archs: list[int] = [90]
+    supported_archs: list[int] = [80]
 
     def __init__(self,
                  batch: int,

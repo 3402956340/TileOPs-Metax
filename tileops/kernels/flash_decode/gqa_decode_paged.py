@@ -361,8 +361,8 @@ class gqa_decode_paged_kernel(Kernel):
     @property
     def default_config(self) -> dict:
         # block_N must be <= page_size so num_blockn_in_page = page_size // block_N >= 1 (no div by zero)
-        block_N = min(128, self.page_size)
-        return {"block_H": 64, "block_N": block_N, "num_split": 16, "num_stages": 2, "threads": 128}
+        block_N = min(64, self.page_size)
+        return {"block_H": 64, "block_N": block_N, "num_split": 16, "num_stages": 0, "threads": 128}
 
     @property
     def autotune_configs(self) -> list[dict]:

@@ -314,7 +314,7 @@ class gqa_decode_kernel(Kernel):
 
     @property
     def default_config(self) -> dict:
-        return {"block_H": 64, "block_N": 128, "num_split": 16, "num_stages": 2, "threads": 128}
+        return {"block_H": 64, "block_N": 64, "num_split": 16, "num_stages": 0, "threads": 128}
 
     @property
     def autotune_configs(self) -> list[dict]:

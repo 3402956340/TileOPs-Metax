@@ -197,7 +197,7 @@ def _(
 
 
 class NSAFwdVarlenKernel(Kernel):
-    supported_archs: list[int] = [90]
+    supported_archs: list[int] = [80]
 
     def __init__(self,
                  batch: int,
@@ -233,7 +233,7 @@ class NSAFwdVarlenKernel(Kernel):
     @property
     def default_config(self) -> dict:
         return {
-            "threads": 32,
+            "threads": 64,
         }
 
     @property

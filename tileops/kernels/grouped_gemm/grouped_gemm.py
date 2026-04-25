@@ -14,7 +14,7 @@ __all__ = [
 
 # Default configs per layout variant (transpose_a, transpose_b)
 _DEFAULT_CONFIGS = {
-    (False, True): {"block_m": 64, "block_n": 256, "block_k": 64, "num_stages": 2, "threads": 128},
+    (False, True): {"block_m": 64, "block_n": 256, "block_k": 64, "num_stages": 1, "threads": 128},
     (False, False): {
         "block_m": 128,
         "block_n": 128,
@@ -29,7 +29,7 @@ _DEFAULT_CONFIGS = {
         "num_stages": 2,
         "threads": 128
     },
-    (True, True): {"block_m": 64, "block_n": 256, "block_k": 64, "num_stages": 2, "threads": 128},
+    (True, True): {"block_m": 64, "block_n": 256, "block_k": 64, "num_stages": 1, "threads": 128},
 }
 
 

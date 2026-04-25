@@ -138,10 +138,10 @@ class GemmKernel(Kernel):
         if sm_version in {80}:
             return {
                 "block_m": 128,
-                "block_n": 256,
-                "block_k": 32,
-                "num_stages": 2,
-                "threads": 128,
+                "block_n": 128,
+                "block_k": 128,
+                "num_stages": 0,
+                "threads": 256,
                 "enable_rasteration": True
             }
         if sm_version in {90}:

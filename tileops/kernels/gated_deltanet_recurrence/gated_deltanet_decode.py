@@ -85,15 +85,14 @@ def _gated_deltanet_decode_tl(
                 alpha = T.exp2(g_val * _LOG2E)
                 alpha_beta = alpha * beta_val
 
-                # Zero-init padding rows of qk_tile (rows 2..15)
-                for i, j in T.Parallel(_GEMM_M, k_tile):
-                    qk_tile[i, j] = T.cast(T.float32(0.0), dtype)
-
                 # === Pass 1: Tiled pipelined gemm for fused matvec ===
                 T.clear(acc)
                 for kt in T.Pipelined(dim_k // k_tile, num_stages=num_stages):
                     T.copy(state[bid, hid, kt * k_tile, 0], h_tile)
-                    # Fill rows 0 (k) and 1 (q) for this tile
+                    # Zero-init padding rows of qk_tile (rows 2..15)
+                    for i, j in T.Parallel(_GEMM_M, k_tile):
+                        if i >= 2:
+                            qk_tile[i, j] = T.cast(T.float32(0.0), dtype)
                     for i in T.Parallel(k_tile):
                         qk_tile[0, i] = k[bid, hid, kt * k_tile + i]
                         qk_tile[1, i] = q[bid, hid, kt * k_tile + i]

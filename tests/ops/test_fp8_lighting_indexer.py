@@ -238,7 +238,6 @@ class Fp8LightingIndexerTest(TestBase):
         assert 0 <= difference <= tolerance, \
             f"outputs is not close to outputs_ref, difference: {difference}"
 
-
 @Fp8LightingIndexerFixture
 def test_indexer(batch: int, seq_len: int, heads: int, index_dim: int, seq_len_kv: int,
                  kv_group: int, clean_logits: bool, config: Optional[dict], tune: bool) -> None:

@@ -133,7 +133,7 @@ def _(
 
 
 class MeanPoolingFwdKernel(Kernel):
-    supported_archs: list[int] = [90]
+    supported_archs: list[int] = [80]
 
     def __init__(self,
                  batch_size: int,

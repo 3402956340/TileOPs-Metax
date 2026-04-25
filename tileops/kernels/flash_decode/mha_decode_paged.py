@@ -253,9 +253,8 @@ def _mha_decode_kernel(batch, heads, seqlen_q, seqlen_kv, dim, page_size, is_cau
                 offset = 0 if sid == 0 else split_length_shared[sid - 1] // block_N
 
                 for k in T.Pipelined(loop_range, num_stages=2):
-                    k_global = k
                     #k_global += split_length_shared[sid - 1] // block_N
-                    k_global += offset
+                    k_global = k + offset
 
                     page_idx = k_global // num_blockn_in_page
                     block_idx_in_page = k_global % num_blockn_in_page
@@ -323,7 +322,7 @@ def _mha_decode_kernel(batch, heads, seqlen_q, seqlen_kv, dim, page_size, is_cau
                         lse_logsum_local[i] += T.exp2(lse_local_split[i] - lse_max_local[i])
                 for i in T.Parallel(block_M):
                     lse_logsum_local[i] = T.log2(lse_logsum_local[i]) + lse_max_local[i]
-                for k in T.Pipelined(num_split, num_stages=2):
+                for k in T.Pipelined(num_split):
                     T.copy(
                         Output_partial[bz, bx * block_M:(bx + 1) * block_M, by, k, :],
                         po_shared,
@@ -456,8 +455,8 @@ class mha_decode_paged_kernel(Kernel):
     @property
     def default_config(self) -> dict:
         return {
-            "block_M": 128,
-            "block_N": 64 if self.dim <= 128 else 32,
+            "block_M": 64,
+            "block_N": 32 if self.dim <= 128 else 32,
             "num_split": 4,
             "num_stages": 2,
             "threads": 128
@@ -468,7 +467,7 @@ class mha_decode_paged_kernel(Kernel):
         block_M = [64, 128]
         block_N = [64, 128]
         num_split = [1, 2, 4]
-        num_stages = [2, 3]
+        num_stages = [1, 2]
         threads = [128, 256]
         _configs = list(itertools.product(block_M, block_N, num_split, num_stages, threads))
 
