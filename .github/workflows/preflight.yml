@@ -6,10 +6,10 @@ permissions:
 
 on:
   push:
-    branches: [main]
+    branches: [dev]
     tags: ["v*"]
   pull_request:
-    branches: [main]
+    branches: [dev]
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
@@ -116,7 +116,7 @@ jobs:
             exit 0
           fi
 
-          if [[ "$TARGET_BRANCH" != "main" || "$IS_DRAFT" == "true" ]]; then
+          if [[ "$TARGET_BRANCH" != "dev" || "$IS_DRAFT" == "true" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -146,7 +146,7 @@ jobs:
 
   pre-commit:
     needs: [validate-commits, validate-pr-title, ci-gate]
-    if: ${{ github.repository == 'tile-ai/TileOPs' && needs.ci-gate.outputs.skip != 'true' }}
+    if: ${{ github.repository == 'MetaX-MACA/TileOPs-Metax' && needs.ci-gate.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -166,7 +166,7 @@ jobs:
 
   gitleaks:
     needs: [validate-commits, validate-pr-title, ci-gate]
-    if: ${{ github.repository == 'tile-ai/TileOPs' && needs.ci-gate.outputs.skip != 'true' }}
+    if: ${{ github.repository == 'MetaX-MACA/TileOPs-Metax' && needs.ci-gate.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -194,7 +194,7 @@ jobs:
 
   actionlint:
     needs: [validate-commits, validate-pr-title, ci-gate]
-    if: ${{ github.repository == 'tile-ai/TileOPs' && needs.ci-gate.outputs.skip != 'true' }}
+    if: ${{ github.repository == 'MetaX-MACA/TileOPs-Metax' && needs.ci-gate.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
