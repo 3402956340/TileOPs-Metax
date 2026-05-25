@@ -404,23 +404,22 @@ jobs:
           reclaim-below-gib: "10"
           cache-trim-cooldown-minutes: "120"
           cache-dirs: |
-            /data7/shared/ci-cache/triton
-            /data7/shared/ci-cache/pip
-            /data7/shared/ci-cache/wheels
-            /data7/shared/ci-cache/tilelang/tmp
+            /data/cache/triton
+            /data/cache/pip
+            /data/cache/wheels
+            /data/cache/tilelang/tmp
           atomic-cache-dirs: |
-            /data7/shared/ci-cache/tilelang/autotuner
-          df-paths: "/data7 /data7/shared/ci-cache"
+            /data/cache/tilelang/autotuner
+          df-paths: "/data /data/cache"
           # Daily runner-maintenance.yml owns the destructive autotuner
           # age-trim; per-PR runs only need sentinel-repair (still
           # unconditional) so they don't evict tuning artefacts the next
           # PR would otherwise reuse.
           skip-atomic-age-trim: "true"
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+          # Prune old venvs from /data/cache/venv (persistent volume for K8s runners).
+          # Keep 2 most recent venvs based on mtime.
+          prune-tool-cache: "true"
+          venv-cache-dir: "/data/cache/venv"
 
       - name: Resolve runtime state
         env:
@@ -450,15 +449,15 @@ jobs:
           PYPROJECT_HASH=$(python .trusted/scripts/ci_venv_hash.py .trusted/pyproject.toml)
           HASH_INPUT="$(
             {
-              echo "python=3.11"
+              echo "python=3.12"
               echo "install=PIP_NO_BUILD_ISOLATION=1 pip install -e '.[dev]'"
               echo "pyproject=${PYPROJECT_HASH}"
             } | sha256sum | cut -c1-16
           )"
           VENV_PREFIX="tileops_ci_venv"
           VENV_DIR="${VENV_PREFIX}_${HASH_INPUT}"
-          TRUSTED_VENV_PATH="${{ runner.tool_cache }}/${VENV_DIR}"
-          TRUSTED_CACHE_ROOT="/data7/shared/ci-cache"
+          TRUSTED_VENV_PATH="/data/cache/venv/${VENV_DIR}"
+          TRUSTED_CACHE_ROOT="/data/cache"
           FORK_CAN_COPY_TRUSTED_VENV="false"
 
           if [[ "$IS_FORK" == "true" ]]; then
@@ -552,7 +551,7 @@ jobs:
       - name: Validate GPU frequency
         run: |
           set -euo pipefail
-          TARGET_CLOCK_MHZ=1830
+          TARGET_CLOCK_MHZ=428
           RETRIES=5
           SLEEP_SECONDS=2
 
@@ -568,15 +567,15 @@ jobs:
           while [ "$attempt" -le "$RETRIES" ]; do
             echo "Validation attempt ${attempt}/${RETRIES}"
             mismatch=0
-            while IFS=',' read -r gpu_index gpu_name gpu_clock; do
-              gpu_index="$(echo "$gpu_index" | xargs)"
-              gpu_name="$(echo "$gpu_name" | xargs)"
-              gpu_clock="$(echo "$gpu_clock" | xargs)"
-              echo "GPU ${gpu_index} (${gpu_name}) clock: ${gpu_clock} MHz"
+            while IFS= read -r gpu_line; do
+              gpu_index=$(echo "$gpu_line" | grep -Eo 'GPU#[0-9]+' | grep -Eo '[0-9]+' | head -1)
+              gpu_name=$(echo "$gpu_line" | awk '{print $2}')
+              gpu_clock=$(mx-smi --show-clock | awk '/XCORE/ {print $(NF-1); exit}')
+              echo "GPU ${gpu_index} (${gpu_name}) XCORE clock: ${gpu_clock} MHz"
               if [[ "$gpu_clock" != "$TARGET_CLOCK_MHZ" ]]; then
                 mismatch=1
               fi
-            done < <(mx-smi --query-gpu=index,name,clocks.current.graphics --format=csv,noheader,nounits)
+            done < <(mx-smi -L 2>/dev/null | grep -E 'GPU#[0-9]+')
 
             if [[ "$mismatch" -eq 0 ]]; then
               echo "All GPUs locked at ${TARGET_CLOCK_MHZ} MHz."
@@ -632,15 +631,8 @@ jobs:
 
           python -m pip install --upgrade pip setuptools wheel --no-user
 
-          # Install test dependencies
-          pip install --no-cache-dir \
-            einops numpy "tqdm>=4.62.3" "typing_extensions>=4.10.0" \
-            cloudpickle ml_dtypes psutil Cython \
-            setuptools wheel ninja
-          pip install --no-cache-dir \
-            "pytest==9.0.2" \
-            "pytest-xdist>=3.0" \
-            "pyyaml>=6.0"
+          # Install TileLang (MACA version)
+          pip install --no-cache-dir git+https://github.com/tile-ai/tilelang-metax.git@dev
 
           if [[ "$IS_FORK" == "true" ]]; then
             FIND_LINKS_FLAG=""
@@ -648,10 +640,7 @@ jobs:
               FIND_LINKS_FLAG="--find-links ${WHEEL_DIR}"
             fi
             # shellcheck disable=SC2086
-            PIP_NO_BUILD_ISOLATION=1 PIP_CACHE_DIR="${PIP_CACHE_DIR}" pip install -e '.[dev]' ${FIND_LINKS_FLAG}
-
-            # Install TileLang (MACA version)
-            pip install --no-cache-dir git+https://github.com/tile-ai/tilelang-metax.git@1efc3ba8a7c48bc97047e562223538d2dcb2222d
+            PIP_NO_BUILD_ISOLATION=1 PIP_CACHE_DIR="${PIP_CACHE_DIR}" pip install --no-deps -e '.[dev]' ${FIND_LINKS_FLAG}
 
             # Sync libtilelang.so mtime with trusted venv so compile cache keys match.
             # TileLang cache keys include the library's mtime (kernel_cache.py); a fresh
@@ -675,13 +664,9 @@ jobs:
               echo "Warning: hash-matched trusted venv not found at ${TRUSTED_VENV_PATH}; skipping mtime sync"
             fi
           else
-            PIP_NO_BUILD_ISOLATION=1 PIP_NO_CACHE_DIR=1 pip install -e '.[dev]'
-
-            # Install TileLang (MACA version)
-            pip install --no-cache-dir git+https://github.com/tile-ai/tilelang-metax.git@1efc3ba8a7c48bc97047e562223538d2dcb2222d
-
+            PIP_NO_BUILD_ISOLATION=1 PIP_NO_CACHE_DIR=1 pip install --no-deps -e '.[dev]'
             # Export wheels (including dependencies) so fork PRs can reuse them
-            pip wheel -e '.[dev]' -w "${WHEEL_DIR}" 2>/dev/null || true
+            pip wheel --no-deps -e '.[dev]' -w "${WHEEL_DIR}" 2>/dev/null || true
           fi
 
       - name: Run tests
