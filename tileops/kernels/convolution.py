@@ -20,9 +20,9 @@ def get_shared_memory_limit_bytes() -> int:
     device = torch.cuda.current_device()
     props = torch.cuda.get_device_properties(device)
 
-    optin = getattr(props, "shared_memory_per_block_optin", None)
-    if optin is not None and optin > 0:
-        return int(optin)
+    option = getattr(props, "shared_memory_per_block_optin", None)
+    if option is not None and option > 0:
+        return int(option)
 
     base = getattr(props, "shared_memory_per_block", None)
     if base is not None and base > 0:
