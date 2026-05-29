@@ -17,26 +17,12 @@ __all__ = ["Conv1dKernel", "Conv2d1x1Kernel", "Conv2dKernel", "Conv3dKernel"]
 # ---------------------------------------------------------------------------
 
 def get_shared_memory_limit_bytes() -> int:
-    device = torch.cuda.current_device()
-    props = torch.cuda.get_device_properties(device)
-
-    option = getattr(props, "shared_memory_per_block_optin", None)
-    if option is not None and option > 0:
-        return int(option)
-
-    base = getattr(props, "shared_memory_per_block", None)
-    if base is not None and base > 0:
-        return int(base)
-
-    try:
-        from tilelang.carver.arch.driver.maca_driver import get_shared_memory_per_block
-        smem = get_shared_memory_per_block(device, format="bytes")
-        if smem is not None and smem > 0:
-            return int(smem)
-    except Exception:
-        pass
-
-    return 65536
+    if "metax" in torch.version.__version__:
+            return 65536
+    else:
+        return torch.cuda.get_device_properties(
+            torch.cuda.current_device()
+        ).shared_memory_per_block_optin
 
 
 def conv_shared_memory_bytes(
