@@ -34,6 +34,15 @@ def _normalize_collected_nodeid(nodeid: str) -> str:
     return nodeid
 
 
+def _is_valid_collected_nodeid(nodeid: str) -> bool:
+    """True when *nodeid* looks like a benchmark test and its file exists."""
+    normalized = _normalize_collected_nodeid(nodeid)
+    if not normalized.startswith("benchmarks/") or "::" not in normalized:
+        return False
+    rel_path = normalized.split("::", 1)[0]
+    return (_REPO_ROOT / rel_path).is_file()
+
+
 def _collect_nodeids(target: str) -> list[str]:
     """Return collected pytest node ids for *target* (file or directory)."""
     result = subprocess.run(
@@ -63,7 +72,14 @@ def _collect_nodeids(target: str) -> list[str]:
             continue
         if "::" not in line:
             continue
-        nodeid = _normalize_collected_nodeid(line.split()[0])
+        raw = line.split()[0]
+        nodeid = _normalize_collected_nodeid(raw)
+        if not _is_valid_collected_nodeid(nodeid):
+            print(
+                f"::warning::Ignoring non-test collect line for {target}: {raw!r}",
+                flush=True,
+            )
+            continue
         if nodeid not in seen:
             seen.add(nodeid)
             nodeids.append(nodeid)
@@ -85,28 +101,82 @@ def _run_pytest(
     return subprocess.run(cmd, cwd=_REPO_ROOT).returncode
 
 
+def _testsuite_stats(suite: ET.Element) -> tuple[int, int, int, int, float]:
+    """Return (tests, failures, errors, skipped, time) for one testsuite."""
+    if suite.get("tests") is not None:
+        return (
+            int(suite.get("tests", 0)),
+            int(suite.get("failures", 0)),
+            int(suite.get("errors", 0)),
+            int(suite.get("skipped", 0)),
+            float(suite.get("time", 0)),
+        )
+    cases = list(suite.iter("testcase"))
+    failures = sum(1 for tc in cases if tc.find("failure") is not None)
+    errors = sum(1 for tc in cases if tc.find("error") is not None)
+    skipped = sum(1 for tc in cases if tc.find("skipped") is not None)
+    time_val = sum(float(tc.get("time", 0)) for tc in cases)
+    return len(cases), failures, errors, skipped, time_val
+
+
 def _merge_junit_xml(input_files: list[Path], output: Path) -> None:
     merged = ET.Element("testsuites")
+    suites: list[ET.Element] = []
     for path in input_files:
         if not path.is_file():
             continue
         root = ET.parse(path).getroot()
         if root.tag == "testsuite":
-            merged.append(root)
+            suites.append(root)
             continue
         for child in root:
             if child.tag == "testsuite":
-                merged.append(child)
+                suites.append(child)
+
+    total_tests = 0
+    total_failures = 0
+    total_errors = 0
+    total_skipped = 0
+    total_time = 0.0
+    for suite in suites:
+        merged.append(suite)
+        tests, failures, errors, skipped, time_val = _testsuite_stats(suite)
+        total_tests += tests
+        total_failures += failures
+        total_errors += errors
+        total_skipped += skipped
+        total_time += time_val
+
+    merged.set("tests", str(total_tests))
+    merged.set("failures", str(total_failures))
+    merged.set("errors", str(total_errors))
+    merged.set("skipped", str(total_skipped))
+    merged.set("time", f"{total_time:.3f}")
+
     ET.ElementTree(merged).write(output, encoding="utf-8", xml_declaration=True)
 
 
 def _append_profile_log(source: Path, dest: Path) -> None:
+    """Append benchmark markdown; strip duplicate report headers on subsequent writes."""
     if not source.is_file():
         return
-    with dest.open("a", encoding="utf-8") as out, source.open(encoding="utf-8") as inp:
-        content = inp.read()
-        out.write(content)
-        if content and not content.endswith("\n"):
+    with source.open(encoding="utf-8") as inp:
+        content_lines = inp.readlines()
+    strip_header = dest.is_file() and dest.stat().st_size > 0
+    to_write: list[str] = []
+    skipping = strip_header
+    for line in content_lines:
+        if skipping:
+            if line.startswith("## ") and not line.startswith("## Environment"):
+                skipping = False
+            else:
+                continue
+        to_write.append(line)
+    if not to_write:
+        return
+    with dest.open("a", encoding="utf-8") as out:
+        out.writelines(to_write)
+        if not to_write[-1].endswith("\n"):
             out.write("\n")
 
 
