@@ -63,8 +63,6 @@ TILELANG_019_BENCH_NODEIDS = {
 # Nightly CI collects each node and runs it in a separate process; see
 # scripts/run_bench_two_phase.py.
 SERIAL_NODE_BENCH_PATHS = {
-    "benchmarks/ops/attention/bench_mha_decode.py",
-    "benchmarks/ops/attention/bench_mha_decode_paged.py",
     "benchmarks/ops/bench_moe_experts_nopad.py",
     "benchmarks/ops/bench_moe_fused_moe.py",
     "benchmarks/ops/bench_moe_shared_fused_moe.py",
