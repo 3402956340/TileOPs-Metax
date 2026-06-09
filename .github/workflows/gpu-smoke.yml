@@ -802,6 +802,13 @@ jobs:
     needs: [ci-prereq, gpu-smoke]
     timeout-minutes: 120
     runs-on: tileops-metax-runner
+    env:
+      TILELANG_CACHE_DIR: /data/cache/tilelang
+      TILELANG_TMP_DIR: /data/cache/tilelang/tmp
+      TRITON_CACHE_DIR: /data/cache/triton
+      PIP_CACHE_DIR: /data/cache/pip
+      WHEEL_DIR: /data/cache/wheels
+      MAX_JOBS: "64"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
