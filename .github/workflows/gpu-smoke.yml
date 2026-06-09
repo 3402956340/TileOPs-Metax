@@ -794,66 +794,27 @@ jobs:
             rm -rf "${RUNTIME_ROOT}"
           fi
 
-# =========================================================================
+  # =========================================================================
   # Phase 2 — Benchmark (exclusive GPU access for accurate profiling)
   # =========================================================================
   benchmark:
-    if: ${{ always() && github.repository == 'MetaX-MACA/TileOPs-Metax' }}
-    needs: [gpu-smoke]
+    if: ${{ always() && github.repository == 'MetaX-MACA/TileOPs-Metax' && needs.ci-prereq.outputs.skip != 'true' && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.ref == 'refs/heads/dev') && needs.gpu-smoke.result == 'success' }}
+    needs: [ci-prereq, gpu-smoke]
     timeout-minutes: 120
     runs-on: tileops-metax-runner
     steps:
-      - name: Checkout code for fork PR
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.pull_request.head.repo.full_name }}
-          ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: false
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - name: Checkout code for trusted branch
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository }}
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-          fetch-depth: 1
+      - name: Verify nightly runner environment
+        run: scripts/ci/verify_nightly_runner.sh
+        shell: bash
 
       - name: Install system dependencies
         run: |
           sudo apt-get update && sudo apt-get install -y git
-
-      - name: Checkout trusted actions (base repo)
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository }}
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          path: .trusted
-          persist-credentials: false
-          fetch-depth: 1
-          sparse-checkout: |
-            .github/actions
-            scripts/ci_venv_hash.py
-            pyproject.toml
-
-      - name: Reclaim runner disk
-        uses: ./.trusted/.github/actions/reclaim-runner-disk
-        with:
-          reclaim-below-gib: "10"
-          cache-trim-cooldown-minutes: "120"
-          cache-dirs: |
-            /data/cache/triton
-            /data/cache/pip
-            /data/cache/wheels
-            /data/cache/tilelang/tmp
-          atomic-cache-dirs: |
-            /data/cache/tilelang/autotuner
-          df-paths: "/data /data/cache"
-          skip-atomic-age-trim: "true"
-          prune-tool-cache: "true"
-          venv-cache-dir: "/data/cache/venv"
 
       - name: Resolve runtime state
         run: |
@@ -905,49 +866,6 @@ jobs:
             echo "VENV_REUSED=${VENV_REUSED}"
           } >> "$GITHUB_ENV"
 
-      - name: Validate GPU frequency
-        run: |
-          set -euo pipefail
-          TARGET_CLOCK_MHZ=428
-          RETRIES=5
-          SLEEP_SECONDS=2
-
-          if ! command -v mx-smi >/dev/null 2>&1; then
-            echo "::error::mx-smi is not available on this runner."
-            exit 1
-          fi
-
-          echo "Detected GPUs:"
-          mx-smi -L
-
-          attempt=1
-          while [ "$attempt" -le "$RETRIES" ]; do
-            echo "Validation attempt ${attempt}/${RETRIES}"
-            mismatch=0
-            while IFS= read -r gpu_line; do
-              gpu_index=$(echo "$gpu_line" | grep -Eo 'GPU#[0-9]+' | grep -Eo '[0-9]+' | head -1)
-              gpu_name=$(echo "$gpu_line" | awk '{print $2}')
-              gpu_clock=$(mx-smi --show-clock | awk '/XCORE/ {print $(NF-1); exit}')
-              echo "GPU ${gpu_index} (${gpu_name}) XCORE clock: ${gpu_clock} MHz"
-              if [[ "$gpu_clock" != "$TARGET_CLOCK_MHZ" ]]; then
-                mismatch=1
-              fi
-            done < <(mx-smi -L 2>/dev/null | grep -E 'GPU#[0-9]+')
-
-            if [[ "$mismatch" -eq 0 ]]; then
-              echo "All GPUs locked at ${TARGET_CLOCK_MHZ} MHz."
-              break
-            fi
-
-            if [[ "$attempt" -eq "$RETRIES" ]]; then
-              echo "::error::GPU frequency validation failed. Expected ${TARGET_CLOCK_MHZ} MHz on all GPUs."
-              exit 1
-            fi
-
-            sleep "$SLEEP_SECONDS"
-            attempt=$((attempt + 1))
-          done
-
       - name: Ensure venv and install dependencies
         run: |
           set -euo pipefail
@@ -971,6 +889,7 @@ jobs:
           pip install --no-cache-dir git+https://github.com/tile-ai/tilelang-metax.git@f7451dfce010234f540472d442b3f68d4f94232e
 
           PIP_NO_BUILD_ISOLATION=1 PIP_NO_CACHE_DIR=1 pip install --no-deps -e '.[dev]'
+        shell: bash
 
       - name: Run benchmark ops
         id: benchmark_tests
@@ -994,8 +913,9 @@ jobs:
             sleep 2
           done
 
+          PIP_NO_BUILD_ISOLATION=1 pip install --no-deps -e ".[dev]"
+
           export PYTHONPATH="${GITHUB_WORKSPACE}${PYTHONPATH:+:$PYTHONPATH}"
-          export TILELANG_VERBOSE=1
           echo "Runtime cache env:"
           echo "TILELANG_CACHE_DIR=${TILELANG_CACHE_DIR:-}"
           echo "TILELANG_TMP_DIR=${TILELANG_TMP_DIR:-}"
