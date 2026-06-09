@@ -453,7 +453,7 @@ class MHADecodeKernel(Kernel):
     @property
     def autotune_configs(self) -> list[dict]:
         block_M = [64, 128]
-        block_N = [64, 128]
+        block_N = [32, 64]
         num_split = [1, 2, 4]
         num_stages = [1, 2]
         threads = [128, 256]

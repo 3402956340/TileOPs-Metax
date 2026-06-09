@@ -81,6 +81,7 @@ def _sparse_mla_kernel(batch: int,
     ori_heads = heads
     indices_dtype = "int32"
     accum_dtype = "float"
+    HEAD_TILE = 32
 
     @tilelang.jit(
         out_idx=[-1],
@@ -122,10 +123,10 @@ def _sparse_mla_kernel(batch: int,
         d_tail = tail_dim
         stride_kv = kv_stride
 
-        if head_kv > 64:
-            if head_kv % 64 != 0:
-                raise ValueError('head_kv should be a multiple of 64')
-            replicate_h = head_kv // 64
+        if head_kv > HEAD_TILE:
+            if head_kv % HEAD_TILE != 0:
+                raise ValueError('head_kv should be a multiple of 32')
+            replicate_h = head_kv // HEAD_TILE
         else:
             replicate_h = 1
 
@@ -187,7 +188,7 @@ def _sparse_mla_kernel(batch: int,
                 q_i = q_start_index_s + s_i
                 max_kv_i = (q_i + 1 - stride_kv) // stride_kv
 
-                h0 = g_i * padded_h + (0 if replicate_h == 1 else (bx % replicate_h) * 64)
+                h0 = g_i * padded_h + (0 if replicate_h == 1 else (bx % replicate_h) * HEAD_TILE)
                 h1 = h0 + h_per_block
 
                 T.copy(q[b_i, s_i, h0:h1, :d], q_shared)
