@@ -4,9 +4,7 @@ import torch
 from benchmarks.benchmark_base import BenchmarkReport, _bench_results
 
 # Skip NSA benchmarks until the underlying op failures are resolved.
-collect_ignore_glob = [
-    "ops/attention/bench_deepseek_nsa*.py",
-]
+collect_ignore_glob = []
 
 TILELANG_019_BENCH_SKIP_REASON = (
     "Skipped under tilelang 0.1.9: known benchmark regressions in autodiff/"
