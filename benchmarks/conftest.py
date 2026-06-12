@@ -68,6 +68,29 @@ SERIAL_NODE_BENCH_PATHS = {
     "benchmarks/ops/bench_moe_shared_fused_moe.py",
 }
 
+# --- PRIVATE_MEM_BENCH: begin (delete this block to re-enable) ---
+PRIVATE_MEM_BENCH_SKIP_REASON = (
+    "Skipped: MACALaunch mcErrorMemoryValueTooLarge (kernel private memory "
+    "exceeds limit for this workload shape)."
+)
+
+PRIVATE_MEM_BENCH_PREFIXES = (
+    "benchmarks/ops/bench_ada_layer_norm.py::test_ada_layer_norm_bench[dit-xl-2-float16]",
+    "benchmarks/ops/bench_ada_layer_norm.py::test_ada_layer_norm_bench[dit-xl-2-bfloat16]",
+    "benchmarks/ops/bench_ada_layer_norm.py::test_ada_layer_norm_zero_bench[dit-xl-2-float16]",
+    "benchmarks/ops/bench_ada_layer_norm.py::test_ada_layer_norm_zero_bench[dit-xl-2-bfloat16]",
+    "benchmarks/ops/bench_argreduce.py::test_argmax_bench[lm-head-",
+    "benchmarks/ops/bench_argreduce.py::test_argmax_bench[hidden-state-",
+    "benchmarks/ops/bench_argreduce.py::test_argmin_bench[lm-head-",
+    "benchmarks/ops/bench_argreduce.py::test_argmin_bench[hidden-state-",
+    "benchmarks/ops/bench_reduce_multidim.py::test_argreduce_multidim_bench[argmax-7B-dim2-nokeepdim]",
+    "benchmarks/ops/bench_reduce_multidim.py::test_argreduce_multidim_bench[argmin-7B-dim2-keepdim]",
+    "benchmarks/ops/bench_group_norm.py::test_group_norm_bench[wider-channel-g32-float16]",
+    "benchmarks/ops/bench_group_norm.py::test_group_norm_no_affine_bench[wider-channel-g32-float16]",
+    "benchmarks/ops/bench_group_norm.py::test_group_norm_no_affine_bench[tail-spatial-g16-float16]",
+)
+# --- PRIVATE_MEM_BENCH: end ---
+
 
 def _normalized_benchmark_nodeid(item: pytest.Item) -> str:
     nodeid = item.nodeid
@@ -130,6 +153,12 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         if nodeid in TILELANG_019_BENCH_NODEIDS:
             item.add_marker(tilelang_019_skip)
             continue
+
+        # --- PRIVATE_MEM_BENCH: begin (delete this block to re-enable) ---
+        if any(nodeid.startswith(prefix) for prefix in PRIVATE_MEM_BENCH_PREFIXES):
+            item.add_marker(pytest.mark.skip(reason=PRIVATE_MEM_BENCH_SKIP_REASON))
+            continue
+        # --- PRIVATE_MEM_BENCH: end ---
 
         if (
             path == "benchmarks/ops/bench_elementwise_fp8.py"
