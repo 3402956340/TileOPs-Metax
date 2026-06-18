@@ -11,25 +11,11 @@ if [[ -z "${GITHUB_RUN_ID:-}" || -z "${GITHUB_RUN_ATTEMPT:-}" || -z "${GITHUB_JO
   exit 1
 fi
 
-# Install system dependencies
-sudo apt-get update && sudo apt-get install -y git
-
 RUNTIME_ROOT="${RUNNER_TEMP}/nightly-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}"
 VENV_PATH="${RUNTIME_ROOT}/venv"
 
 rm -rf "${RUNTIME_ROOT}"
 mkdir -p "${RUNTIME_ROOT}"
-
-# Add conda to PATH for python access
-export PATH="/opt/conda/bin:/usr/bin:${PATH}"
-
-# Set MACA environment variables
-export USE_MACA=ON
-
-# Clear CXX/CC to prevent cu-bridge compiler from interfering with TileLang
-# kernel compilation. Torch cpp extension may set these to cu-bridge paths,
-# which causes "__macro_mxcc.h not found" errors when TVM tries to link .so
-unset CXX CC
 
 echo "Creating run-local nightly venv at ${VENV_PATH}"
 python -m venv --system-site-packages "${VENV_PATH}"
@@ -38,11 +24,14 @@ python -m venv --system-site-packages "${VENV_PATH}"
 source "${VENV_PATH}/bin/activate"
 python -m pip install --upgrade pip setuptools wheel --no-user
 
-# Install pytest-xdist for parallel test execution (required by warmup_kernel_cache.py)
-pip install --no-cache-dir pytest-xdist
-
-# Install TileLang (MACA version)
-pip install --no-cache-dir git+https://github.com/tile-ai/tilelang-metax.git@f7451dfce010234f540472d442b3f68d4f94232e
+# Install tilelang-metax and tvm-ffi
+pip install build
+python -m build -w 3rdparty/tilelang-metax
+pip install --target=/data/cache/site-packages --no-deps 3rdparty/tilelang-metax/dist/tilelang-0.1.9+maca.gitf7451dfc-cp38-abi3-linux_x86_64.whl
+pip install --target=/data/cache/site-packages --no-deps "z3-solver>=4.13.0,<4.15.5"
+SETUPTOOLS_SCM_OVERRIDES_FOR_APACHE_TVM_FFI='{local_scheme="no-local-version"}' python -m build -w 3rdparty/tilelang-metax/3rdparty/tvm/3rdparty/tvm-ffi
+pip install --target=/data/cache/site-packages --no-deps 3rdparty/tilelang-metax/3rdparty/tvm/3rdparty/tvm-ffi/dist/apache_tvm_ffi-0.1.3.dev11-cp312-abi3-linux_x86_64.whl
+pip install --target=/data/cache/site-packages --python-version 3.10.0 --no-deps flash-linear-attention==0.4.0 -i https://repos.metax-tech.com/r/maca-pypi/simple --trusted-host repos.metax-tech.com
 
 {
   echo "RUNTIME_ROOT=${RUNTIME_ROOT}"
