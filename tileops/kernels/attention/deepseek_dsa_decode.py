@@ -1,5 +1,3 @@
-# 2026 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
-
 import functools
 import itertools
 from typing import Optional
@@ -81,10 +79,16 @@ def _sparse_mla_kernel(batch: int,
     ori_heads = heads
     indices_dtype = "int32"
     accum_dtype = "float"
-    HEAD_TILE = 32
 
     @tilelang.jit(
         out_idx=[-1],
+        compile_flags=[
+            "--use_fast_math", "-O3", "-Wno-deprecated-declarations",
+            "-U__CUDA_NO_HALF_OPERATORS__", "-U__CUDA_NO_HALF_CONVERSIONS__",
+            "-U__CUDA_NO_HALF2_OPERATORS__", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "--expt-relaxed-constexpr", "--expt-extended-lambda",
+            "--ptxas-options=-v,--register-usage-level=10", "-DNDEBUG"
+        ],
     )
     def _sparse_mla_fwd_func(block_i: int, threads: int) -> None:
         """
@@ -123,10 +127,10 @@ def _sparse_mla_kernel(batch: int,
         d_tail = tail_dim
         stride_kv = kv_stride
 
-        if head_kv > HEAD_TILE:
-            if head_kv % HEAD_TILE != 0:
-                raise ValueError('head_kv should be a multiple of 32')
-            replicate_h = head_kv // HEAD_TILE
+        if head_kv > 64:
+            if head_kv % 64 != 0:
+                raise ValueError('head_kv should be a multiple of 64')
+            replicate_h = head_kv // 64
         else:
             replicate_h = 1
 
@@ -162,25 +166,39 @@ def _sparse_mla_kernel(batch: int,
                     batch,
                     kv_group,
                     threads=threads) as (bx, by, bz):
-                q_shared = T.alloc_shared([h_per_block, d], dtype)
+                q_shared_l = T.alloc_shared([h_per_block, d // 2], dtype)
+                q_shared_r = T.alloc_shared([h_per_block, d // 2], dtype)
                 q_tail_shared = T.alloc_shared([h_per_block, d_tail], dtype)
-                kv_shared = T.alloc_shared([i_block, d], dtype)
-                k_tail_shared = T.alloc_shared([i_block, d_tail], dtype)
-                o_shared = T.alloc_shared([h_per_block, d], dtype)
-                is_kv_valid = T.alloc_fragment([i_block], "bool")
+                kv_shared_0_l = T.alloc_shared([i_block, d // 2], dtype)
+                kv_shared_0_r = T.alloc_shared([i_block, d // 2], dtype)
+                kv_shared_1_l = T.alloc_shared([i_block, d // 2], dtype)
+                kv_shared_1_r = T.alloc_shared([i_block, d // 2], dtype)
+                k_tail_shared_0 = T.alloc_shared([i_block, d_tail], dtype)
+                k_tail_shared_1 = T.alloc_shared([i_block, d_tail], dtype)
+                o_shared_l = q_shared_l
+                o_shared_r = q_shared_r
+                is_kv_valid = T.alloc_shared([i_block], "bool", scope="shared")
 
-                acc_o = T.alloc_fragment([h_per_block, d], accum_dtype)
+                acc_o_l = T.alloc_fragment([h_per_block, d // 2], accum_dtype)
+                acc_o_r = T.alloc_fragment([h_per_block, d // 2], accum_dtype)
                 acc_s = T.alloc_fragment([h_per_block, i_block], accum_dtype)
                 s_shared = T.alloc_shared([h_per_block, i_block], dtype)
                 sumexp = T.alloc_fragment([h_per_block], accum_dtype)
+                sum_exp_shared = T.alloc_shared([h_per_block], accum_dtype)
                 sumexp_i = T.alloc_fragment([h_per_block], accum_dtype)
+                alpha_shared = T.alloc_shared([h_per_block], accum_dtype, scope="shared")
                 alpha_local = T.alloc_fragment([h_per_block], accum_dtype)
                 m_i = T.alloc_fragment([h_per_block], accum_dtype)
                 m_i_prev = T.alloc_fragment([h_per_block], accum_dtype)
+                indices_local = T.alloc_local([1], indices_dtype)
 
-                T.fill(sumexp, 0)
-                T.fill(m_i, -(2**30))  # avoid -inf - inf to cause nan
-                T.fill(acc_o, 0)
+                # TODO: Multi buffer
+                bar_k_0_ready = T.alloc_barrier(arrive_count=128)
+                bar_k_1_ready = T.alloc_barrier(arrive_count=128)
+                bar_k_0_free = T.alloc_barrier(arrive_count=256)
+                bar_k_1_free = T.alloc_barrier(arrive_count=256)
+                bar_s_scale_and_s_ready = T.alloc_barrier(arrive_count=256)
+                bar_s_scale_and_s_free = T.alloc_barrier(arrive_count=256)
 
                 b_i, g_i = by, bz
                 s_i = (bx + (stride_kv - 1 if cp0 else 0)) if replicate_h == 1 else (
@@ -188,66 +206,195 @@ def _sparse_mla_kernel(batch: int,
                 q_i = q_start_index_s + s_i
                 max_kv_i = (q_i + 1 - stride_kv) // stride_kv
 
-                h0 = g_i * padded_h + (0 if replicate_h == 1 else (bx % replicate_h) * HEAD_TILE)
+                h0 = g_i * padded_h + (0 if replicate_h == 1 else (bx % replicate_h) * 64)
                 h1 = h0 + h_per_block
 
-                T.copy(q[b_i, s_i, h0:h1, :d], q_shared)
-                T.copy(q[b_i, s_i, h0:h1, d:], q_tail_shared)
+                tx = T.get_thread_binding()
 
-                for i_i in T.Pipelined(n_i, num_stages=1):
-                    for bi_i in T.Parallel(i_block):
-                        is_kv_valid[bi_i] = indices[b_i, s_i, g_i, i_i * i_block + bi_i] <= max_kv_i
-                    for bi_i, d_i in T.Parallel(i_block, d):
-                        kv_shared[bi_i, d_i] = kv[b_i, indices[b_i, s_i, g_i, i_i * i_block + bi_i], g_i, d_i]
-                    for bi_i, d_i in T.Parallel(i_block, d_tail):
-                        k_tail_shared[bi_i, d_i] = kv[b_i, indices[b_i, s_i, g_i, i_i * i_block + bi_i], g_i, d + d_i]
+                # Q -> shared copies must stay inside tx < 128 so that the copy
+                # and the subsequent T.wgmma_gemm share the same 128-thread bounds.
+                # Mixing a 384-thread copy with a 128-thread WGMMA on the same shared
+                # buffer causes TileLang 0.1.9 layout inference to fail with
+                # "no available layout found".
+                if tx < 128:
+                    T.set_max_nreg(240, 1)
+                    T.copy(q[b_i, s_i, h0:h1, 0:d // 2], q_shared_l)
+                    T.copy(q[b_i, s_i, h0:h1, d // 2:d], q_shared_r)
+                    T.copy(q[b_i, s_i, h0:h1, d:], q_tail_shared)
+                    T.fill(sumexp, 0)
+                    T.fill(m_i, -2**30)  # avoid -inf - inf to cause nan
+                    T.fill(acc_o_l, 0)
 
-                    for h_i, bi_i in T.Parallel(h_per_block, i_block):
-                        acc_s[h_i, bi_i] = T.if_then_else(is_kv_valid[bi_i], 0, -T.infinity(acc_s.dtype))
-                    T.gemm(
-                        q_shared,
-                        kv_shared,
-                        acc_s,
-                        transpose_B=True,
-                        policy=T.GemmWarpPolicy.FullRow,
-                    )
-                    T.gemm(
-                        q_tail_shared,
-                        k_tail_shared,
-                        acc_s,
-                        transpose_B=True,
-                        policy=T.GemmWarpPolicy.FullRow,
-                    )
+                    for i_i in T.serial(T.ceildiv(n_i, 2)):
 
-                    T.copy(m_i, m_i_prev)
-                    T.reduce_max(acc_s, m_i, dim=1, clear=False)
+                        # Buffer 0
+                        T.barrier_wait(bar_k_0_ready[0], (i_i & 1))
+
+                        for h_i, bi_i in T.Parallel(h_per_block, i_block):
+                            acc_s[h_i, bi_i] = T.if_then_else(is_kv_valid[bi_i], 0,
+                                                              -T.infinity(acc_s.dtype))
+                        T.wgmma_gemm(q_shared_l, kv_shared_0_l, acc_s, transpose_B=True)
+                        T.wgmma_gemm(q_shared_r, kv_shared_0_r, acc_s, transpose_B=True)
+                        T.wgmma_gemm(q_tail_shared, k_tail_shared_0, acc_s, transpose_B=True)
+
+                        T.wait_wgmma(0)
+
+                        if i_i != 0:
+                            T.barrier_arrive(bar_s_scale_and_s_free)
+                            T.barrier_wait(bar_s_scale_and_s_free, ((i_i * 2) & 1) ^ 1)
+
+                        T.copy(m_i, m_i_prev)
+                        T.reduce_max(acc_s, m_i, dim=1, clear=False)
+                        for h_i in T.Parallel(h_per_block):
+                            alpha_local[h_i] = T.exp2((m_i_prev[h_i] - m_i[h_i]) * sm_scale)
+                        for h_i, bi_i in T.Parallel(h_per_block, i_block):
+                            acc_s[h_i,
+                                  bi_i] = T.exp2(acc_s[h_i, bi_i] * sm_scale - m_i[h_i] * sm_scale)
+                        T.reduce_sum(acc_s, sumexp_i, dim=1)  # is this a accumulate operator?
+                        for h_i in T.Parallel(h_per_block):
+                            sumexp[h_i] = sumexp[h_i] * alpha_local[h_i] + sumexp_i[h_i]
+                        for h_i, d_i in T.Parallel(h_per_block, d // 2):
+                            acc_o_l[h_i, d_i] *= alpha_local[h_i]
+                        T.copy(alpha_local, alpha_shared)
+
+                        T.copy(acc_s, s_shared)
+                        T.gemm(s_shared, kv_shared_0_l, acc_o_l)
+
+                        T.barrier_arrive(bar_s_scale_and_s_ready)
+                        T.barrier_arrive(bar_k_0_free[0])
+
+                        # Buffer 1
+                        T.barrier_wait(bar_k_1_ready[0], (i_i & 1))
+
+                        for h_i, bi_i in T.Parallel(h_per_block, i_block):
+                            acc_s[h_i, bi_i] = T.if_then_else(is_kv_valid[bi_i], 0,
+                                                              -T.infinity(acc_s.dtype))
+                        T.wgmma_gemm(q_shared_l, kv_shared_1_l, acc_s, transpose_B=True)
+                        T.wgmma_gemm(q_shared_r, kv_shared_1_r, acc_s, transpose_B=True)
+                        T.wgmma_gemm(q_tail_shared, k_tail_shared_1, acc_s, transpose_B=True)
+
+                        T.wait_wgmma(0)
+
+                        T.barrier_arrive(bar_s_scale_and_s_free)
+                        T.barrier_wait(bar_s_scale_and_s_free, ((i_i * 2 + 1) & 1) ^ 1)
+
+                        T.copy(m_i, m_i_prev)
+                        T.reduce_max(acc_s, m_i, dim=1, clear=False)
+                        for h_i in T.Parallel(h_per_block):
+                            alpha_local[h_i] = T.exp2((m_i_prev[h_i] - m_i[h_i]) * sm_scale)
+                        for h_i, bi_i in T.Parallel(h_per_block, i_block):
+                            acc_s[h_i,
+                                  bi_i] = T.exp2(acc_s[h_i, bi_i] * sm_scale - m_i[h_i] * sm_scale)
+                        T.reduce_sum(acc_s, sumexp_i, dim=1)  # is this a accumulate operator?
+                        for h_i in T.Parallel(h_per_block):
+                            sumexp[h_i] = sumexp[h_i] * alpha_local[h_i] + sumexp_i[h_i]
+                        for h_i, d_i in T.Parallel(h_per_block, d // 2):
+                            acc_o_l[h_i, d_i] *= alpha_local[h_i]
+                        T.copy(alpha_local, alpha_shared)
+
+                        T.copy(acc_s, s_shared)
+                        T.gemm(s_shared, kv_shared_1_l, acc_o_l)
+
+                        T.barrier_arrive(bar_s_scale_and_s_ready)
+                        T.barrier_arrive(bar_k_1_free[0])
+
+                    # Rescale
                     for h_i in T.Parallel(h_per_block):
-                        m_i[h_i] = T.max(m_i[h_i], m_i_prev[h_i])
+                        sum_exp_shared[h_i] = sumexp[h_i]
+                    for h_i, d_i in T.Parallel(h_per_block, d // 2):
+                        acc_o_l[h_i, d_i] /= sumexp[h_i]
                     for h_i in T.Parallel(h_per_block):
-                        alpha_local[h_i] = T.exp2((m_i_prev[h_i] - m_i[h_i]) * sm_scale)
-                    for h_i, bi_i in T.Parallel(h_per_block, i_block):
-                        acc_s[h_i, bi_i] = T.exp2(acc_s[h_i, bi_i] * sm_scale - m_i[h_i] * sm_scale)
-                    T.reduce_sum(acc_s, sumexp_i, dim=1)  # is this a accumulate operator?
-                    for h_i in T.Parallel(h_per_block):
-                        sumexp[h_i] = sumexp[h_i] * alpha_local[h_i] + sumexp_i[h_i]
-                    for h_i, d_i in T.Parallel(h_per_block, d):
-                        acc_o[h_i, d_i] *= alpha_local[h_i]
+                        sumexp[h_i] = T.log2(sumexp[h_i]) + m_i[h_i] * sm_scale
+                    T.copy(acc_o_l, o_shared_l)
+                    T.copy(o_shared_l, output[b_i, s_i, h0:h1, 0:d // 2])
 
-                    T.copy(acc_s, s_shared)
-                    T.gemm(
-                        s_shared,
-                        kv_shared,
-                        acc_o,
-                        policy=T.GemmWarpPolicy.FullRow,
-                    )
+                elif tx >= 128 and tx < 256:
+                    T.set_max_nreg(168, 1)
+                    T.fill(acc_o_r, 0)
+                    for i_i in T.serial(T.ceildiv(n_i, 2)):
+                        # Buffer 0
+                        T.barrier_arrive(bar_s_scale_and_s_ready)
+                        T.barrier_wait(bar_s_scale_and_s_ready, ((i_i * 2) & 1))
+                        for h_i, d_i in T.Parallel(h_per_block, d // 2):
+                            acc_o_r[h_i, d_i] *= alpha_shared[h_i]
+                        T.gemm(s_shared, kv_shared_0_r, acc_o_r)
+                        T.barrier_arrive(bar_k_0_free[0])
+                        T.barrier_arrive(bar_s_scale_and_s_free)
 
-                # Rescale
-                for h_i, d_i in T.Parallel(h_per_block, d):
-                    acc_o[h_i, d_i] /= sumexp[h_i]
-                for h_i in T.Parallel(h_per_block):
-                    sumexp[h_i] = T.log2(sumexp[h_i]) + m_i[h_i] * sm_scale
-                T.copy(acc_o, o_shared)
-                T.copy(o_shared, output[b_i, s_i, h0:h1, :])
+                        # Buffer 1
+                        T.barrier_arrive(bar_s_scale_and_s_ready)
+                        T.barrier_wait(bar_s_scale_and_s_ready, ((i_i * 2 + 1) & 1))
+                        for h_i, d_i in T.Parallel(h_per_block, d // 2):
+                            acc_o_r[h_i, d_i] *= alpha_shared[h_i]
+                        T.gemm(s_shared, kv_shared_1_r, acc_o_r)
+                        T.barrier_arrive(bar_k_1_free[0])
+                        if i_i != T.ceildiv(n_i, 2) - 1:
+                            T.barrier_arrive(bar_s_scale_and_s_free)
+
+                    # Rescale
+                    for h_i, d_i in T.Parallel(h_per_block, d // 2):
+                        acc_o_r[h_i, d_i] /= sum_exp_shared[h_i]
+
+                    T.copy(acc_o_r, o_shared_r)
+                    T.copy(o_shared_r, output[b_i, s_i, h0:h1, d // 2:d])
+
+                elif tx >= 256:
+                    # producer
+                    T.set_max_nreg(80, 0)
+                    for i_i in T.serial(T.ceildiv(n_i, 2)):
+                        # Buffer 0
+                        T.barrier_wait(bar_k_0_free[0], ((i_i & 1) ^ 1))
+                        for r in T.serial(4):
+                            indices_local[0] = indices[b_i, s_i, g_i, (i_i * 2) * i_block + r * 16 +
+                                                       (tx - 256) // 8]
+                            is_kv_valid[r * 16 + (tx - 256) // 8] = indices_local[0] <= max_kv_i
+                            if is_kv_valid[r * 16 + (tx - 256) // 8]:
+                                with T.attr("default", "async_scope", 1):
+                                    for u in T.serial(4):
+                                        for v in T.vectorized(8):
+                                            kv_shared_0_l[r * 16 + (tx - 256) // 8,
+                                                          64 * u + (tx - 256) % 8 * 8 +
+                                                          v] = kv[b_i, indices_local[0], g_i,
+                                                                  64 * u + (tx - 256) % 8 * 8 + v]
+                                            kv_shared_0_r[r * 16 + (tx - 256) // 8,
+                                                          64 * u + (tx - 256) % 8 * 8 +
+                                                          v] = kv[b_i, indices_local[0], g_i,
+                                                                  d // 2 + 64 * u +
+                                                                  (tx - 256) % 8 * 8 + v]
+                                with T.attr("default", "async_scope", 1):
+                                    for v in T.vectorized(8):
+                                        k_tail_shared_0[r * 16 + (tx - 256) // 8,
+                                                        (tx - 256) % 8 * 8 +
+                                                        v] = kv[b_i, indices_local[0], g_i,
+                                                                d + (tx - 256) % 8 * 8 + v]
+                        T.cp_async_barrier_noinc(bar_k_0_ready[0])
+
+                        # Buffer 1
+                        T.barrier_wait(bar_k_1_free[0], ((i_i & 1) ^ 1))
+                        for r in T.serial(4):
+                            indices_local[0] = indices[b_i, s_i, g_i, (i_i * 2 + 1) * i_block +
+                                                       r * 16 + (tx - 256) // 8]
+                            is_kv_valid[r * 16 + (tx - 256) // 8] = indices_local[0] <= max_kv_i
+                            if is_kv_valid[r * 16 + (tx - 256) // 8]:
+                                with T.attr("default", "async_scope", 1):
+                                    for u in T.serial(4):
+                                        for v in T.vectorized(8):
+                                            kv_shared_1_l[r * 16 + (tx - 256) // 8,
+                                                          64 * u + (tx - 256) % 8 * 8 +
+                                                          v] = kv[b_i, indices_local[0], g_i,
+                                                                  64 * u + (tx - 256) % 8 * 8 + v]
+                                            kv_shared_1_r[r * 16 + (tx - 256) // 8,
+                                                          64 * u + (tx - 256) % 8 * 8 +
+                                                          v] = kv[b_i, indices_local[0], g_i,
+                                                                  d // 2 + 64 * u +
+                                                                  (tx - 256) % 8 * 8 + v]
+                                with T.attr("default", "async_scope", 1):
+                                    for v in T.vectorized(8):
+                                        k_tail_shared_1[r * 16 + (tx - 256) // 8,
+                                                        (tx - 256) % 8 * 8 +
+                                                        v] = kv[b_i, indices_local[0], g_i,
+                                                                d + (tx - 256) % 8 * 8 + v]
+                        T.cp_async_barrier_noinc(bar_k_1_ready[0])
 
         return _sparse_mla_fwd_main
 
@@ -314,7 +461,7 @@ class SparseMlaKernel(Kernel):
                         the first chunk of data (i.e., whether `cp_rank == 0`).
     """
 
-    supported_archs: list[int] = [80]
+    supported_archs: list[int] = [90]
 
     def __init__(self,
                  batch: int,
@@ -364,7 +511,7 @@ class SparseMlaKernel(Kernel):
         Returns:
             dict: Default kernel configuration with 'block_i' and 'threads'.
         """
-        return {"block_i": 16, "threads": 128}
+        return {"block_i": 64, "threads": 384}
 
     @property
     def autotune_configs(self) -> list[dict]:
@@ -374,8 +521,8 @@ class SparseMlaKernel(Kernel):
         Returns:
             list[dict]: A list of dictionaries containing 'block_i' and 'threads' combinations.
         """
-        block_i = [16, 32]
-        threads = [128, 256]
+        block_i = [64, 128]
+        threads = [384, 512]
         _configs = list(itertools.product(block_i, threads))
 
         return [{

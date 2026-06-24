@@ -7,8 +7,8 @@ name: Runner Maintenance
 # cooldown; this scheduled job forces the full cleanup pass on days with
 # little PR traffic.
 #
-# GPU smoke and nightly share the persistent cache tree under
-# `/data7/shared/ci-cache/*`.
+# GPU smoke and nightly share the persistent cache tree bind-mounted at
+# `/ci-cache/*` inside the runner container.
 
 on:
   schedule:
@@ -25,6 +25,8 @@ concurrency:
 jobs:
   reclaim-disk:
     if: ${{ github.repository == 'MetaX-MACA/TileOPs-Metax' }}
+    # `nightly` (not `fork`) keeps maintenance on the resident shared-cache runners; the
+    # destructive autotuner age-trim must never run against a fork pool's overlay cache.
     runs-on: tileops-metax-runner
     timeout-minutes: 60
     steps:

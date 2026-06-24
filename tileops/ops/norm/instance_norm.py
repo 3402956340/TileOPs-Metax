@@ -125,27 +125,18 @@ class InstanceNormFwdOp(Op):
         # rather than letting the kernel layer surface an opaque
         # device-mismatch failure.
         self._kernel_device = torch.device("cuda", torch.cuda.current_device())
-        # Affine-identity tensors are reused across forward calls when the
-        # caller passes weight=None / bias=None. Cached on the op instance
-        # and invalidated on (dtype, device) change of the input.
-        self._cached_unit_weight: Optional[torch.Tensor] = None
-        self._cached_zero_bias: Optional[torch.Tensor] = None
-        self._cached_affine_key: Optional[tuple] = None
-
-    def _get_affine_identity(
-        self, dtype: torch.dtype, device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return cached unit_weight / zero_bias for the given (dtype, device)."""
-        key = (dtype, device)
-        if self._cached_affine_key != key:
-            self._cached_unit_weight = torch.ones(
-                self.D_padded, dtype=dtype, device=device,
-            )
-            self._cached_zero_bias = torch.zeros(
-                self.D_padded, dtype=dtype, device=device,
-            )
-            self._cached_affine_key = key
-        return self._cached_unit_weight, self._cached_zero_bias
+        # Pre-allocate forward-time constants. The kernel binds 1D weight/bias
+        # row-broadcast inputs; per-channel affine doesn't fit that layout, so
+        # the kernel call uses identity (unit/zero) buffers and the affine is
+        # applied after. These tensors are immutable for the op's lifetime.
+        self._unit_weight = torch.ones(
+            self.D_padded, dtype=dtype, device=self._kernel_device,
+        )
+        self._zero_bias = torch.zeros(
+            self.D_padded, dtype=dtype, device=self._kernel_device,
+        )
+        self._expected_shape = (self.N, self.C, *self.spatial)
+        self._affine_shape = (1, self.C) + (1,) * len(self.spatial)
 
     @property
     def default_kernel_map(self) -> Dict[str, Kernel]:
@@ -158,57 +149,57 @@ class InstanceNormFwdOp(Op):
             (2 * self.N * self.C * self.spatial_size + 2 * self.C) * elem_bytes,
         )
 
-    def _validate_dtypes(self, x: torch.Tensor) -> None:
-        """Validate ``x.dtype`` and ``self.dtype`` against the manifest dtype union.
-
-        Manifest declares ``x.dtype`` as ``float32 | float16 | bfloat16``
-        and the configured op dtype must be drawn from the same union and
-        match the input.
-
-        Args:
-            x: Input tensor.
-
-        Raises:
-            ValueError: If ``self.dtype`` or ``x.dtype`` is outside the
-                supported union, or ``x.dtype`` does not match ``self.dtype``.
-        """
+    def _validate_dtypes(
+        self,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+    ) -> None:
         allowed = (torch.float32, torch.float16, torch.bfloat16)
         if self.dtype not in allowed:
             raise ValueError(
                 f"self.dtype must be one of {allowed}, got {self.dtype}"
             )
-        if x.dtype not in allowed:
-            raise ValueError(
-                f"x.dtype must be one of {allowed}, got {x.dtype}"
-            )
-        if x.dtype != self.dtype:
-            raise ValueError(
-                f"Expected x.dtype {self.dtype}, got {x.dtype}"
-            )
+        for name, t in (("x", x), ("weight", weight), ("bias", bias)):
+            if t.dtype != self.dtype:
+                raise ValueError(
+                    f"Expected {name}.dtype == self.dtype ({self.dtype}), "
+                    f"got {t.dtype}"
+                )
 
     def forward(
         self,
         x: torch.Tensor,
-        weight: Optional[torch.Tensor] = None,
-        bias: Optional[torch.Tensor] = None,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
     ) -> torch.Tensor:
         """Apply instance normalization.
 
         Args:
             x: Input tensor of shape ``(N, C, *spatial)`` on CUDA.
-            weight: Optional affine scale of shape ``(C,)`` on CUDA. When
-                ``None``, the affine scale defaults to all-ones (no scaling).
-            bias: Optional affine shift of shape ``(C,)`` on CUDA. When
-                ``None``, the affine shift defaults to all-zeros (no shift).
+            weight: Affine scale of shape ``(C,)`` on CUDA. Required; the
+                affine-free path is :class:`InstanceNormFwdOpNoAffine`.
+            bias: Affine shift of shape ``(C,)`` on CUDA. Required; the
+                affine-free path is :class:`InstanceNormFwdOpNoAffine`.
 
         Returns:
             Normalized tensor of the same shape as *x*.
 
         Raises:
-            ValueError: If tensors are not on CUDA, dtypes mismatch,
-                or shapes are incompatible with the configured dimensions.
+            ValueError: If any tensor is not on CUDA, dtypes mismatch, or
+                shapes are incompatible with the configured dimensions.
         """
-        self._validate_dtypes(x)
+        if not isinstance(weight, torch.Tensor):
+            raise ValueError(
+                "weight is required; use InstanceNormFwdOpNoAffine for the "
+                "affine-free path"
+            )
+        if not isinstance(bias, torch.Tensor):
+            raise ValueError(
+                "bias is required; use InstanceNormFwdOpNoAffine for the "
+                "affine-free path"
+            )
+        self._validate_dtypes(x, weight, bias)
         if not x.is_cuda:
             raise ValueError("x must be a CUDA tensor")
         if x.device != self._kernel_device:
@@ -217,65 +208,41 @@ class InstanceNormFwdOp(Op):
                 f"but x is on {x.device}. Construct a separate op instance per "
                 f"CUDA device."
             )
-        if weight is not None:
-            if not weight.is_cuda:
-                raise ValueError("weight must be a CUDA tensor")
-            if weight.device != x.device:
-                raise ValueError(
-                    f"Expected weight on {x.device}, got {weight.device}"
-                )
-            if weight.dtype != self.dtype:
-                raise ValueError(
-                    f"Expected weight.dtype {self.dtype}, got {weight.dtype}"
-                )
-            if weight.ndim != 1 or weight.shape[0] != self.C:
-                raise ValueError(
-                    f"Expected weight shape ({self.C},), got {weight.shape}"
-                )
-        if bias is not None:
-            if not bias.is_cuda:
-                raise ValueError("bias must be a CUDA tensor")
-            if bias.device != x.device:
-                raise ValueError(
-                    f"Expected bias on {x.device}, got {bias.device}"
-                )
-            if bias.dtype != self.dtype:
-                raise ValueError(
-                    f"Expected bias.dtype {self.dtype}, got {bias.dtype}"
-                )
-            if bias.ndim != 1 or bias.shape[0] != self.C:
-                raise ValueError(
-                    f"Expected bias shape ({self.C},), got {bias.shape}"
-                )
+        if tuple(x.shape) != self._expected_shape:
+            raise ValueError(
+                f"Expected x shape {self._expected_shape}, got {tuple(x.shape)}"
+            )
+        if not weight.is_cuda:
+            raise ValueError("weight must be a CUDA tensor")
+        if weight.device != x.device:
+            raise ValueError(
+                f"Expected weight on {x.device}, got {weight.device}"
+            )
+        if weight.ndim != 1 or weight.shape[0] != self.C:
+            raise ValueError(
+                f"Expected weight shape ({self.C},), got {weight.shape}"
+            )
+        if not bias.is_cuda:
+            raise ValueError("bias must be a CUDA tensor")
+        if bias.device != x.device:
+            raise ValueError(
+                f"Expected bias on {x.device}, got {bias.device}"
+            )
+        if bias.ndim != 1 or bias.shape[0] != self.C:
+            raise ValueError(
+                f"Expected bias shape ({self.C},), got {bias.shape}"
+            )
 
         orig_shape = x.shape
         x = x.contiguous()
-
-        # Reshape: (N, C, *spatial) -> (N*C, spatial_size)
         x_2d = x.reshape(self.M, self.D)
 
-        # Unit weight and zero bias for the kernel (affine applied after).
-        # Reuse cached identity tensors only on the affine-free path
-        # (weight is None or bias is None); the user-supplied path allocates
-        # fresh tensors to preserve byte-identical behavior.
-        if weight is None or bias is None:
-            unit_weight, zero_bias = self._get_affine_identity(
-                x.dtype, x.device,
-            )
-        else:
-            unit_weight = torch.ones(
-                self.D_padded, dtype=x.dtype, device=x.device,
-            )
-            zero_bias = torch.zeros(
-                self.D_padded, dtype=x.dtype, device=x.device,
-            )
-
-        # Pad to alignment
         if self.D_padded != self.D:
             x_2d = F.pad(x_2d, (0, self.D_padded - self.D))
 
-        # Run kernel: produces (x - mean) / sqrt(var + eps)
-        y_2d = self.kernel(x_2d, unit_weight, zero_bias)
+        # Kernel broadcasts 1D weight/bias row-wise; per-channel affine is
+        # applied after, so run the kernel with identity (unit/zero) buffers.
+        y_2d = self.kernel(x_2d, self._unit_weight, self._zero_bias)
 
         # Trim padding
         if self.D_padded != self.D:
@@ -284,17 +251,7 @@ class InstanceNormFwdOp(Op):
         # Reshape back: (N*C, spatial_size) -> (N, C, *spatial)
         y = y_2d.reshape(orig_shape)
 
-        # Apply per-channel affine: y = y * weight + bias when supplied.
-        # Both args default to identity (no-op) when None. The combined
-        # expression matches the user-supplied path bit-for-bit.
-        affine_shape = [1, self.C] + [1] * len(self.spatial)
-        if weight is not None and bias is not None:
-            y = y * weight.reshape(affine_shape) + bias.reshape(affine_shape)
-        elif weight is not None:
-            y = y * weight.reshape(affine_shape)
-        elif bias is not None:
-            y = y + bias.reshape(affine_shape)
-
+        y = y * weight.reshape(self._affine_shape) + bias.reshape(self._affine_shape)
         return y
 
 
@@ -322,20 +279,16 @@ class InstanceNormFwdOpNoAffine(Op):
         dtype: Data type (``torch.float32``, ``torch.float16``, or
             ``torch.bfloat16``).
         use_input_stats: Mirrors ``torch.nn.functional.instance_norm``. When
-            ``True`` (the default and only supported value), per-instance
-            statistics are computed from the input. ``False`` (the
-            running-stats / eval-mode path) is deferred and raises
-            ``NotImplementedError``.
+            ``True`` (the default), per-instance statistics are computed from
+            the input. When ``False``, the supplied ``running_mean`` and
+            ``running_var`` are used to normalize (eval-mode / inference path).
         momentum: Mirrors ``torch.nn.functional.instance_norm``. Stored on
             the op instance for API parity with PyTorch but unused on the
-            per-instance (``use_input_stats=True``) path.
+            forward path (no running-stat update on ``use_input_stats=True``;
+            no running-stat update on ``use_input_stats=False`` either).
         eps: Epsilon for numerical stability.
         kernel_map: Optional kernel override dictionary.
         tune: If ``True``, autotune tile configurations.
-
-    Raises:
-        NotImplementedError: If ``use_input_stats=False`` is requested
-            (the deferred running-stats path).
     """
 
     def __init__(
@@ -351,12 +304,6 @@ class InstanceNormFwdOpNoAffine(Op):
         kernel_map: Optional[Dict[str, Kernel]] = None,
         tune: bool = False,
     ):
-        if not use_input_stats:
-            raise NotImplementedError(
-                "use_input_stats=False (the running-stats / eval-mode path) "
-                "is not supported by InstanceNormFwdOpNoAffine; only "
-                "use_input_stats=True (per-instance statistics) is implemented."
-            )
         self.N = N
         self.C = C
         self.spatial = spatial
@@ -367,6 +314,8 @@ class InstanceNormFwdOpNoAffine(Op):
         self.spatial_size = math.prod(spatial)
         self.D = self.spatial_size
         self.M = N * C
+        # Eval-mode broadcast layout for running stats: [1, C, 1, ...] (one 1 per spatial dim).
+        self._running_stats_broadcast_shape = [1, C] + [1] * len(spatial)
         self.D_padded = align_up(self.D, ALIGNMENT)
         # Kernel launches T.ceildiv(M, block_m) programs, each copying a full
         # block_m-row tile. Pad M to a multiple of the largest candidate
@@ -389,19 +338,27 @@ class InstanceNormFwdOpNoAffine(Op):
             2 * self.N * self.C * self.spatial_size * elem_bytes,
         )
 
-    def _validate_dtypes(self, x: torch.Tensor) -> None:
-        """Validate ``x.dtype`` and ``self.dtype`` against the manifest dtype union.
+    def _validate_dtypes(
+        self,
+        x: torch.Tensor,
+        running_mean: torch.Tensor,
+        running_var: torch.Tensor,
+    ) -> None:
+        """Validate input dtypes against the manifest dtype union.
 
-        Manifest declares ``x.dtype`` as ``float32 | float16 | bfloat16``
-        and the configured op dtype must be drawn from the same union and
+        Manifest declares ``x.dtype`` as ``float32 | float16 | bfloat16``;
+        ``running_mean`` and ``running_var`` are ``float32`` only. The
+        configured op dtype must be drawn from the same union as ``x`` and
         match the input.
 
         Args:
             x: Input tensor.
+            running_mean: Per-channel running mean tensor.
+            running_var: Per-channel running variance tensor.
 
         Raises:
-            ValueError: If ``self.dtype`` or ``x.dtype`` is outside the
-                supported union, or ``x.dtype`` does not match ``self.dtype``.
+            ValueError: If any dtype is outside its supported set, or
+                ``x.dtype`` does not match ``self.dtype``.
         """
         allowed = (torch.float32, torch.float16, torch.bfloat16)
         if self.dtype not in allowed:
@@ -416,12 +373,52 @@ class InstanceNormFwdOpNoAffine(Op):
             raise ValueError(
                 f"Expected x.dtype {self.dtype}, got {x.dtype}"
             )
+        if running_mean.dtype != torch.float32:
+            raise ValueError(
+                f"Expected running_mean.dtype torch.float32, got {running_mean.dtype}"
+            )
+        if running_var.dtype != torch.float32:
+            raise ValueError(
+                f"Expected running_var.dtype torch.float32, got {running_var.dtype}"
+            )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _validate_running_stats(
+        self, name: str, t: torch.Tensor, x_device: torch.device,
+    ) -> None:
+        """Validate device, dtype, and shape of a running-stats tensor."""
+        if not t.is_cuda:
+            raise ValueError(f"{name} must be a CUDA tensor")
+        if t.device != x_device:
+            raise ValueError(
+                f"Expected {name} on {x_device}, got {t.device}"
+            )
+        if t.dtype != torch.float32:
+            raise ValueError(
+                f"Expected {name}.dtype torch.float32, got {t.dtype}"
+            )
+        if t.ndim != 1 or t.shape[0] != self.C:
+            raise ValueError(
+                f"Expected {name} shape ({self.C},), got {tuple(t.shape)}"
+            )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        running_mean: torch.Tensor,
+        running_var: torch.Tensor,
+    ) -> torch.Tensor:
         """Apply instance normalization without affine.
 
         Args:
             x: Input tensor of shape ``(N, C, *spatial)`` on CUDA.
+            running_mean: Per-channel running mean of shape ``(C,)``, dtype
+                ``torch.float32``, on the same CUDA device as ``x``. Used
+                only when ``use_input_stats=False``; ignored otherwise but
+                must still be supplied (R16: no ``Optional[Tensor]``).
+            running_var: Per-channel running variance of shape ``(C,)``,
+                dtype ``torch.float32``, on the same CUDA device as ``x``.
+                Used only when ``use_input_stats=False``; ignored otherwise
+                but must still be supplied.
 
         Returns:
             Normalized tensor of the same shape as *x*.
@@ -430,7 +427,7 @@ class InstanceNormFwdOpNoAffine(Op):
             ValueError: If tensors are not on CUDA, dtypes mismatch, or
                 shapes are incompatible with the configured dimensions.
         """
-        self._validate_dtypes(x)
+        self._validate_dtypes(x, running_mean, running_var)
         if not x.is_cuda:
             raise ValueError("x must be a CUDA tensor")
         if x.device != self._kernel_device:
@@ -444,6 +441,18 @@ class InstanceNormFwdOpNoAffine(Op):
             raise ValueError(
                 f"Expected x shape {expected_shape}, got {tuple(x.shape)}"
             )
+        self._validate_running_stats("running_mean", running_mean, x.device)
+        self._validate_running_stats("running_var", running_var, x.device)
+
+        if not self.use_input_stats:
+            # Eval-mode path: y = (x - running_mean[c]) / sqrt(running_var[c] + eps).
+            # Pure elementwise per-channel; matches torch.nn.functional.instance_norm
+            # (use_input_stats=False) numerics bit-for-bit (verified) by computing in
+            # fp32 then casting to x.dtype.
+            mean_b = running_mean.reshape(self._running_stats_broadcast_shape)
+            var_b = running_var.reshape(self._running_stats_broadcast_shape)
+            y = (x.float() - mean_b) * torch.rsqrt(var_b + self.eps)
+            return y.to(x.dtype)
 
         orig_shape = x.shape
         x = x.contiguous()

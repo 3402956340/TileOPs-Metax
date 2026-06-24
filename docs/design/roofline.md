@@ -25,6 +25,17 @@ Inputs:
 
 Bound type is whichever term dominates `sol_time` (memory-bound if `memory_time > compute_time`, else compute-bound). It depends on shape, not on the op; the roofline tool computes it per-workload and the manifest does not declare it.
 
+## 1.3 Convention
+
+Per-element FLOP rule for elementwise ops:
+
+- One basic arithmetic op (add, sub, mul, div, neg, abs, recip) counts as 1 FLOP.
+- One transcendental call (`exp`, `log`, `log1p`, `erf`, `tanh`, `sin`, `cos`, `sqrt`, `rsqrt`, etc.) counts as 1 FLOP at the convention level. Hardware-specific cost models do not feed back into the manifest.
+- One compare-and-select (`max`, `min`, `maximum`, `minimum`, single- or two-bound clamp, `relu`-style branch, `where`) counts as 1 FLOP per output element.
+- Predicate-only outputs (`eq`, `gt`, etc.) count as 1 FLOP per element.
+
+Composite ops sum their primitives — `sigmoid = neg + exp + add + recip = 4` FLOPs/elem; `silu = sigmoid + mul = 5` FLOPs/elem.
+
 ## 2. Field Specification
 
 ### 2.1 Output Contract
@@ -154,8 +165,7 @@ Codegen actions emit two sequential blocks:
 
 **Block 1 — vars resolution.**
 
-- Bind each `signature.inputs` tensor to a local: `x = self.x`. (Arbitrary-rank ops: `self.x` is bound in `forward()` before `eval_roofline()` runs.)
-- Bind each `signature.params` name: `dim = self.dim`.
+- Bind each `signature.inputs` tensor and `signature.params` name *referenced by the roofline expressions* to a local. Names declared in the manifest but unused by the roofline are not bound; ops are not required to expose them. Op-author conventions for exposing referenced names on the op instance are specified in [`.claude/domain-rules/ops-design.md`](../../.claude/domain-rules/ops-design.md).
 - Bind `elem_bytes` from whichever dtype source exists at the call site (§4.4.5): use `self.dtype.itemsize` when `eval_roofline()` runs at `__init__` (fixed-rank — no tensor yet), and `self.<first_input>.dtype.itemsize` when it runs in `forward()` (arbitrary-rank — the tensor is bound).
 - If `vars:` is present, emit one assignment per entry in YAML declaration order: `<name> = <vars[name]>`, copying the expression string verbatim. Later entries may reference earlier locals.
 - If `vars:` is absent and `shape` is fixed-rank, emit assignments from the `shape` declaration (tuple-unpack `self.x.shape`, or read `self.<dim>` if the Op stored dims at `__init__`).

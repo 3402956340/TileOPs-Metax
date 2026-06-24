@@ -5,10 +5,6 @@ Baselines:
       sglang/sgl-kernel/benchmark/bench_moe_align_block_size.py
   - sgl-kernel (optional): SGLang's production CUDA kernel; only runs when
       sgl_kernel is installed (`pip install sgl-kernel`).
-
-Usage:
-    conda run -n tileops python -m pytest benchmarks/ops/bench_moe_permute_align.py -vvs
-    conda run -n tileops python benchmarks/ops/bench_moe_permute_align.py
 """
 
 import math
@@ -200,7 +196,7 @@ def test_permute_align_bench(
     inputs = test.gen_inputs()
 
     # TileOPs
-    op = MoePermuteAlignFwdOp(numel, num_experts, block_size)
+    op = MoePermuteAlignFwdOp(total_tokens, top_k, num_experts, block_size)
     bm = MoePermuteAlignBenchmark(test, op)
 
     # Warmup: trigger JIT compilation before timed profiling

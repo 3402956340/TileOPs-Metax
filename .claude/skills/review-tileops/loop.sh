@@ -21,10 +21,17 @@ PR="${1:?usage: loop.sh <PR_NUMBER>}"
 # Constants & paths
 # ---------------------------------------------------------------------------
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=signals.sh
+source "$SKILL_DIR/signals.sh"
 REPO="tile-ai/TileOPs"
 MAX_ROUNDS=15
 POLL_INTERVAL=180
 CODEX_RETRY=3
+# Per-round hard cap on the synchronous codex invocation. Codex can wedge
+# on MCP transport failures (endless "Reconnecting 1/5 → 5/5" with no
+# exit); without this cap bash sits in waitpid forever and CODEX_RETRY=3
+# is unreachable. Worst case: 3 × 1800s ≈ 90 min before status=error.
+CODEX_TIMEOUT_SEC=1800
 # Stall safety: terminate after this many consecutive idle polls (no new
 # commits / comments). MAX_IDLE * POLL_INTERVAL must comfortably exceed
 # the longest legitimate in-progress counterpart round (codex review on a
@@ -43,8 +50,11 @@ LOOP_START_EPOCH=$(date +%s)
 #
 # - REPO_PATH is the *state root* — main checkout. Used for `.foundry/
 #   runs/`, fetches, refs, and managed worktrees so state is shared
-#   across all worktrees of one repo. `git worktree list --porcelain 2>/dev/null`
-#   always lists the main worktree first.
+#   across all worktrees of one repo. Resolved via
+#   `git rev-parse --git-common-dir`, whose parent is the main
+#   worktree regardless of which worktree we launch from. Single
+#   command — no pipe — so `set -o pipefail` cannot misfire on
+#   SIGPIPE when the repo has many linked worktrees.
 # - SOURCE_ROOT is the *source/policy root* — the repo that contains
 #   this script. Used for `loading.yaml`, `criteria.md`, `procedure.md`,
 #   and `.claude/review-checklists/` so the loop reads policy files
@@ -52,8 +62,10 @@ LOOP_START_EPOCH=$(date +%s)
 #   a loop launched from a linked worktree would mix policy files
 #   (criteria/procedure/loading from worktree branch via SKILL_DIR,
 #   checklists from main branch via REPO_PATH).
-REPO_PATH="$(git worktree list --porcelain 2>/dev/null | head -n 1 | sed 's/^worktree //')" \
-  || { echo "loop.sh: not in a git repo" >&2; exit 1; }
+GIT_COMMON_DIR="$(git -C "$SKILL_DIR" rev-parse --git-common-dir 2>/dev/null)" \
+  || { echo "loop.sh: cannot resolve repo root from \$SKILL_DIR=$SKILL_DIR" >&2; exit 1; }
+[[ "$GIT_COMMON_DIR" != /* ]] && GIT_COMMON_DIR="$SKILL_DIR/$GIT_COMMON_DIR"
+REPO_PATH="$(cd "$GIT_COMMON_DIR/.." && pwd)"
 SOURCE_ROOT="$(cd "$SKILL_DIR/../../.." && pwd)"
 
 CRITERIA_PATH="$SKILL_DIR/criteria.md"
@@ -72,6 +84,32 @@ if [[ -z "$TILEOPS_REMOTE" ]]; then
 fi
 
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+
+# Reap descendant subprocesses on signal. The full chain is
+# `loop.sh → timeout → node(codex) → codex-rust`, and node does not
+# always forward TERM to its rust child, so a one-level kill orphans
+# codex. We can't use `kill 0` (pgroup) either: foreground `review-loop`
+# shares a pgroup with the calling tmux pane, and `nohup … &` does not
+# create one — pgroup-wide TERM would kill the user's shell.
+_collect_descendants() {
+  local p=$1 c
+  for c in $(pgrep -P "$p" 2>/dev/null); do
+    printf '%s\n' "$c"
+    _collect_descendants "$c"
+  done
+}
+cleanup_and_exit() {
+  trap - TERM INT HUP EXIT
+  local pids
+  pids=$(_collect_descendants $$ | tr '\n' ' ')
+  if [[ -n "${pids// }" ]]; then
+    kill -TERM $pids 2>/dev/null || true
+    sleep 1
+    kill -KILL $pids 2>/dev/null || true
+  fi
+  exit 130
+}
+trap cleanup_and_exit TERM INT HUP
 
 # ---------------------------------------------------------------------------
 # Step A: preflight (once per loop start)
@@ -252,6 +290,8 @@ if [[ ! -f "$META" ]]; then
     last_reviewed_sha: null,
     last_issue_comment_id: 0,
     last_review_comment_id: 0,
+    last_body_hash: "",
+    last_labels_hash: "",
     last_codex_event: null,
     last_criteria_mtime: 0,
     consecutive_codex_failures: 0,
@@ -309,6 +349,9 @@ compose_prompt() {
   local last_event="$9"
   local inbox_block="${10}"
   local consecutive_rc="${11}"
+  local pr_body="${12-}"
+  local pr_labels_json="${13-[]}"
+  local trigger_reason="${14-}"
   local out="$snap.prompt.md"
 
   {
@@ -384,7 +427,29 @@ ANCHOR
     echo "- PR state: \`$pr_state\`"
     echo "- Previous reviewed sha: \`${last_sha:-(first round)}\`"
     echo "- Previous review event: \`${last_event:-(first round)}\`"
+    if [[ -n "$trigger_reason" ]]; then
+      echo "- Fresh-round trigger: \`$trigger_reason\`"
+    fi
     echo ""
+
+    # When the round fires on a body/label edit (HEAD unchanged), the
+    # snap diff is empty — surface the actual PR body and label set so
+    # the reviewer has the changed information to inspect.
+    if [[ "$trigger_reason" == "body changed" || "$trigger_reason" == "labels changed" ]]; then
+      echo "### Current PR body"
+      echo ""
+      if [[ -n "$pr_body" ]]; then
+        printf '%s\n' "$pr_body"
+      else
+        echo "_(empty)_"
+      fi
+      echo ""
+      echo "### Current labels"
+      echo ""
+      printf '%s\n' "$pr_labels_json" \
+        | jq -r 'if type=="array" then [.[].name] | sort | (if length == 0 then "_(none)_" else "- " + join("\n- ") end) else "_(none)_" end'
+      echo ""
+    fi
 
     echo "## Inputs (already prepared at the listed paths — do not re-fetch)"
     echo "- Diff: \`$diff_file\`"
@@ -436,18 +501,27 @@ run_codex_round() {
 
   local attempt=0
   while (( attempt < CODEX_RETRY )); do
+    # --kill-after: codex doesn't always honor TERM under the MCP wedge.
+    local rc=0
     if [[ "$sid" == "null" || -z "$sid" ]]; then
-      codex --dangerously-bypass-approvals-and-sandbox exec \
-        --json --output-last-message "$lastmsg" --cd "$WORKTREE_DIR" \
-        "$(cat "$prompt_file")" > "$events" 2>&1 || true
+      timeout --kill-after=30 "$CODEX_TIMEOUT_SEC" \
+        codex --dangerously-bypass-approvals-and-sandbox exec \
+          --json --output-last-message "$lastmsg" --cd "$WORKTREE_DIR" \
+          "$(cat "$prompt_file")" > "$events" 2>&1 || rc=$?
     else
       # `codex exec resume` does not accept --cd; the session already
       # remembers its cwd from the initial `exec`, but cd anyway as a
       # belt-and-suspenders for source-file lookups.
       ( cd "$WORKTREE_DIR" && \
-        codex --dangerously-bypass-approvals-and-sandbox exec resume "$sid" \
-          --json --output-last-message "$lastmsg" \
-          "$(cat "$prompt_file")" ) > "$events" 2>&1 || true
+        timeout --kill-after=30 "$CODEX_TIMEOUT_SEC" \
+          codex --dangerously-bypass-approvals-and-sandbox exec resume "$sid" \
+            --json --output-last-message "$lastmsg" \
+            "$(cat "$prompt_file")" ) > "$events" 2>&1 || rc=$?
+    fi
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+      log "codex attempt $((attempt+1)) exceeded ${CODEX_TIMEOUT_SEC}s (rc=$rc) — killed"
+    elif [[ $rc -ne 0 ]]; then
+      log "codex attempt $((attempt+1)) exited rc=$rc"
     fi
 
     if [[ -s "$lastmsg" ]]; then
@@ -484,6 +558,46 @@ latest_reviewer_review_state() {
   gh api "repos/$REPO/pulls/$PR/reviews" \
     --jq "[.[]|select(.user.login==\"$REVIEWER_LOGIN\")]|sort_by(.submitted_at)|last|.state // \"NONE\"" \
     2>/dev/null || echo NONE
+}
+
+# Re-snapshot externally observable PR signals after a round completes
+# and return the same `signature_diff_reason` token used by the idle /
+# pre-loop APPROVE guards. Empty string means nothing moved since the
+# pre-round snapshot (caller may converge); a non-empty token names the
+# fresh signal and the caller must fall through to another review pass.
+#
+# Args (positional, all from the pre-round snapshot the caller already
+# computed):
+#   $1  pre-round HEAD sha
+#   $2  pre-round body hash
+#   $3  pre-round labels hash
+#   $4  pre-round latest issue-comment id
+#   $5  pre-round latest review-comment id
+#
+# Reads $REPO, $PR, $RUN_DIR from the surrounding loop scope.
+post_approve_trigger_reason() {
+  local pre_head="$1" pre_body_hash="$2" pre_labels_hash="$3"
+  local pre_issue="$4" pre_review="$5"
+  local post_view post_head post_body post_labels_json
+  local post_body_hash post_labels_hash post_issue post_review inbox_present
+  post_view=$(gh pr view "$PR" --repo "$REPO" \
+    --json headRefOid,body,labels 2>/dev/null) || post_view='{}'
+  post_head=$(printf '%s' "$post_view" | jq -r '.headRefOid // ""')
+  post_body=$(printf '%s' "$post_view" | jq -r '.body // ""')
+  post_labels_json=$(printf '%s' "$post_view" | jq -c '.labels // []')
+  post_body_hash=$(pr_body_hash "$post_body")
+  post_labels_hash=$(pr_labels_hash "$post_labels_json")
+  post_issue=$(latest_issue_comment_id)
+  post_review=$(latest_review_comment_id)
+  inbox_present=0
+  [[ -s "$RUN_DIR/inbox.md" ]] && inbox_present=1
+  signature_diff_reason \
+    "$post_head" "$pre_head" \
+    "$post_body_hash" "$pre_body_hash" \
+    "$post_labels_hash" "$pre_labels_hash" \
+    "$post_issue" "$pre_issue" \
+    "$post_review" "$pre_review" \
+    "$inbox_present"
 }
 
 # Final convergence path: introspection + retrospective + worktree cleanup, exit 0.
@@ -580,11 +694,17 @@ while true; do
     exit 6
   fi
 
-  # External / hard-cutoff terminations come first.
-  PR_VIEW=$(gh pr view "$PR" --repo "$REPO" --json state,headRefOid,isDraft 2>/dev/null) \
+  # External / hard-cutoff terminations come first. We also fetch body
+  # and labels in the same call so the per-poll signal computation does
+  # not need an extra API round-trip (bounded GitHub API cost per tick).
+  PR_VIEW=$(gh pr view "$PR" --repo "$REPO" --json state,headRefOid,isDraft,body,labels 2>/dev/null) \
     || { log "gh pr view failed; sleeping ${POLL_INTERVAL}s"; sleep "$POLL_INTERVAL"; continue; }
   PR_STATE=$(printf '%s' "$PR_VIEW" | jq -r .state)
   HEAD_SHA=$(printf '%s' "$PR_VIEW" | jq -r .headRefOid)
+  PR_BODY=$(printf '%s' "$PR_VIEW" | jq -r '.body // ""')
+  PR_LABELS_JSON=$(printf '%s' "$PR_VIEW" | jq -c '.labels // []')
+  BODY_HASH=$(pr_body_hash "$PR_BODY")
+  LABELS_HASH=$(pr_labels_hash "$PR_LABELS_JSON")
 
   if [[ "$PR_STATE" == "MERGED" || "$PR_STATE" == "CLOSED" ]]; then
     log "PR is $PR_STATE — exiting"
@@ -606,52 +726,48 @@ while true; do
   # comments default to 0 since the legacy field never tracked them.
   LAST_ISSUE_ID_PREV=$(jq -r '.last_issue_comment_id // .last_human_comment_id // 0' "$META")
   LAST_REVIEW_ID_PREV=$(jq -r '.last_review_comment_id // 0' "$META")
+  LAST_BODY_HASH_PREV=$(jq -r '.last_body_hash // ""' "$META")
+  LAST_LABELS_HASH_PREV=$(jq -r '.last_labels_hash // ""' "$META")
   LATEST_ISSUE_ID=$(latest_issue_comment_id)
   LATEST_REVIEW_ID=$(latest_review_comment_id)
 
-  # Trigger policy: a fresh codex round fires only on a HEAD change or an
-  # explicit human prompt in inbox.md. Comment-only deltas (replies,
-  # discussion on a previous blocker) are absorbed — the tracked comment
-  # ids advance so the loop stops re-firing, but no new review runs.
-  #
-  # Why not re-review on comment changes: when a human pushes back on a
-  # blocker without changing code, re-running the full review on the same
-  # SHA tends to mine *new* nits the prior round didn't flag, drifting
-  # away from the original disagreement and looking to the developer like
-  # the bot is hunting for something to complain about. If the human
-  # genuinely wants a fresh pass on unchanged code, they write to
-  # inbox.md (the existing per-round guidance channel).
+  # Trigger policy: a fresh codex round fires when any externally
+  # observable PR signal has materially changed — HEAD sha, PR body,
+  # label set, non-reviewer issue/review comments, or an explicit
+  # inbox.md prompt. `signature_diff_reason` returns a stable short
+  # token naming which signal fired (used both in log lines and for
+  # AC-4 operator visibility); empty string means nothing changed and
+  # the loop sleeps.
   INBOX_PRESENT=0
   [[ -s "$RUN_DIR/inbox.md" ]] && INBOX_PRESENT=1
   HEAD_UNCHANGED=0
   [[ "$HEAD_SHA" == "$LAST_SHA" ]] && HEAD_UNCHANGED=1
-  COMMENTS_CHANGED=0
-  if [[ "$LATEST_ISSUE_ID" != "$LAST_ISSUE_ID_PREV" \
-        || "$LATEST_REVIEW_ID" != "$LAST_REVIEW_ID_PREV" ]]; then
-    COMMENTS_CHANGED=1
-  fi
+  TRIGGER_REASON=$(signature_diff_reason \
+    "$HEAD_SHA" "${LAST_SHA:-}" \
+    "$BODY_HASH" "$LAST_BODY_HASH_PREV" \
+    "$LABELS_HASH" "$LAST_LABELS_HASH_PREV" \
+    "$LATEST_ISSUE_ID" "$LAST_ISSUE_ID_PREV" \
+    "$LATEST_REVIEW_ID" "$LAST_REVIEW_ID_PREV" \
+    "$INBOX_PRESENT")
 
   # Resume / restart: if local meta says we approved last time, converge
-  # only if GitHub still shows APPROVED, HEAD has not moved, *and* no new
-  # human comments have arrived since the approval. New commits auto-
-  # dismiss approvals (state goes DISMISSED), but comments do not — and
-  # at the convergence boundary the loop is about to exit, so a comment
-  # that landed during the prior round's codex window would be silently
-  # lost forever if we converged without checking. The trigger policy in
-  # the idle path (HEAD-only, no comment trigger) does NOT apply here:
-  # idle keeps the loop alive so a future commit can still be reviewed,
-  # whereas convergence is terminal. Falling through on comment changes
-  # gives the human's late-arriving feedback exactly one re-review pass
-  # before the loop exits.
+  # only if GitHub still shows APPROVED *and* no externally observable
+  # signal has changed since the approval. `TRIGGER_REASON` (computed
+  # above from the same signature_diff_reason helper used by the idle
+  # path) is the single source of truth for "is this round fresh" — any
+  # non-empty value means some signal (HEAD, body, labels, non-reviewer
+  # comments, inbox) moved and the loop must run a fresh review pass
+  # instead of converging. New commits auto-dismiss approvals (state
+  # goes DISMISSED), but body / label / comment edits do not — and at
+  # the convergence boundary the loop is about to exit, so any of those
+  # late-arriving signals would be silently lost forever if we converged
+  # without re-evaluating the trigger signature.
   if [[ "$LAST_EVENT" == "APPROVE" ]]; then
     GH_REVIEW_STATE=$(latest_reviewer_review_state)
-    if [[ "$GH_REVIEW_STATE" == "APPROVED" \
-          && "$HEAD_UNCHANGED" -eq 1 \
-          && "$COMMENTS_CHANGED" -eq 0 \
-          && "$INBOX_PRESENT" -eq 0 ]]; then
+    if [[ "$GH_REVIEW_STATE" == "APPROVED" && -z "$TRIGGER_REASON" ]]; then
       converge_and_exit
     fi
-    log "prior APPROVE no longer current (gh=$GH_REVIEW_STATE, head_changed=$([[ "$HEAD_UNCHANGED" -eq 0 ]] && echo y || echo n), comments_changed=$([[ "$COMMENTS_CHANGED" -eq 1 ]] && echo y || echo n), inbox=$([[ "$INBOX_PRESENT" -eq 1 ]] && echo y || echo n)) — re-reviewing current head"
+    log "prior APPROVE no longer current (gh=$GH_REVIEW_STATE, trigger='${TRIGGER_REASON:-none}') — re-reviewing current head"
     jq '.last_codex_event="DISMISSED" | .last_reviewed_sha=null' \
       "$META" > "$META.tmp" && mv "$META.tmp" "$META"
     LAST_EVENT="DISMISSED"
@@ -659,29 +775,26 @@ while true; do
     HEAD_UNCHANGED=0
   fi
 
-  # Idle path: HEAD unchanged AND no inbox prompt. Absorb any comment-id
-  # advances and sleep. ROUND==0 (first poll, never reviewed) always
-  # falls through to a fresh round.
-  #
-  # Comment activity does NOT count toward the stall counter — an active
-  # discussion (replies flowing back and forth without a push) is engaged
-  # work, not a dead PR. The stall counter is meant to catch a truly
-  # quiet counterpart, so reset it whenever comments advance even though
-  # we're not running codex this poll.
-  if [[ "$ROUND" -gt 0 && "$HEAD_UNCHANGED" -eq 1 && "$INBOX_PRESENT" -eq 0 ]]; then
-    if [[ "$COMMENTS_CHANGED" -eq 1 ]]; then
-      jq --argjson iid "$LATEST_ISSUE_ID" --argjson rid "$LATEST_REVIEW_ID" \
-         '.last_issue_comment_id=$iid | .last_review_comment_id=$rid
-          | .consecutive_idle=0' \
-         "$META" > "$META.tmp" && mv "$META.tmp" "$META"
-      log "comment-only update on unchanged HEAD ${HEAD_SHA:0:7} — absorbed; not re-reviewing (write inbox.md to force a round)"
-      sleep "$POLL_INTERVAL"
-      continue
-    fi
+  # Idle path: HEAD unchanged, no inbox prompt, AND no other observable
+  # signal changed (body / labels / non-reviewer comments). ROUND==0
+  # (first poll, never reviewed) always falls through to a fresh round.
+  # When any of the additional signals changed, TRIGGER_REASON is
+  # non-empty and we drop through to run a real round — the operator
+  # log line below names which signal fired (AC-4).
+  if [[ "$ROUND" -gt 0 && "$HEAD_UNCHANGED" -eq 1 \
+        && "$INBOX_PRESENT" -eq 0 && -z "$TRIGGER_REASON" ]]; then
     CONSECUTIVE_IDLE=$(jq -r '.consecutive_idle // 0' "$META")
     NEW_IDLE=$((CONSECUTIVE_IDLE + 1))
-    jq --argjson n "$NEW_IDLE" '.consecutive_idle=$n' "$META" \
-      > "$META.tmp" && mv "$META.tmp" "$META"
+    # Seed body/label baselines from current values if absent. Without
+    # this, an idling loop on an upgraded or freshly-tracked PR keeps
+    # last_body_hash / last_labels_hash anchored at "" forever, so the
+    # signature_diff_reason empty-prev guard suppresses every later
+    # body/label edit.
+    jq --argjson n "$NEW_IDLE" --arg bh "$BODY_HASH" --arg lh "$LABELS_HASH" \
+      '.consecutive_idle=$n
+       | .last_body_hash   = (if .last_body_hash   == "" then $bh else .last_body_hash   end)
+       | .last_labels_hash = (if .last_labels_hash == "" then $lh else .last_labels_hash end)' \
+      "$META" > "$META.tmp" && mv "$META.tmp" "$META"
     if (( NEW_IDLE >= MAX_IDLE )); then
       log "idle for $NEW_IDLE consecutive polls (MAX_IDLE=$MAX_IDLE) — stalled, exiting"
       set_meta_status "stalled"
@@ -696,6 +809,16 @@ while true; do
   NEXT_ROUND=$((ROUND + 1))
   N=$(printf '%02d' "$NEXT_ROUND")
   SNAP="$RUN_DIR/rounds/round-$N"
+  # AC-4: name which signal fired this round so operators can tell
+  # idle-trigger reasons apart in the loop log. ROUND==0 has no prior
+  # state to diff against; report "first round" instead of an empty
+  # token.
+  if [[ "$ROUND" -eq 0 ]]; then
+    FIRED_REASON="first round"
+  else
+    FIRED_REASON="${TRIGGER_REASON:-head changed}"
+  fi
+  log "round $NEXT_ROUND — fired by '$FIRED_REASON' since prior_sha=${LAST_SHA:0:7} (head=${HEAD_SHA:0:7})"
   log "round $NEXT_ROUND — gathering inputs (head=${HEAD_SHA:0:7})"
 
   # Move the worktree forward to this round's HEAD so Codex reads source from
@@ -767,7 +890,7 @@ while true; do
   CONSECUTIVE_RC=$(jq -r '.consecutive_request_changes // 0' "$META")
   compose_prompt "$SNAP" "$NEXT_ROUND" "$INCLUDE_CRITERIA" "$INCLUDE_PROCEDURE" \
     "$DIFF_FILE" "$PR_STATE" "$HEAD_SHA" "$LAST_SHA" "$LAST_EVENT" "$INBOX_BLOCK" \
-    "$CONSECUTIVE_RC"
+    "$CONSECUTIVE_RC" "$PR_BODY" "$PR_LABELS_JSON" "${FIRED_REASON:-${TRIGGER_REASON:-}}"
 
   # Convergence Rule 1 — same-SHA APPROVE skip. If a prior round in
   # this loop run already APPROVED the current HEAD, reuse that
@@ -782,10 +905,12 @@ while true; do
     NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     jq --argjson r "$NEXT_ROUND" --arg sha "$HEAD_SHA" --arg now "$NOW" \
        --argjson iid "$LATEST_ISSUE_ID" --argjson rid "$LATEST_REVIEW_ID" \
+       --arg bh "$BODY_HASH" --arg lh "$LABELS_HASH" \
        --arg ev "$EVENT" \
        --argjson cm "$CRITERIA_MTIME" \
        '.round=$r | .last_reviewed_sha=$sha
         | .last_issue_comment_id=$iid | .last_review_comment_id=$rid
+        | .last_body_hash=$bh | .last_labels_hash=$lh
         | .last_codex_event=$ev | .last_criteria_mtime=$cm
         | .consecutive_request_changes=0
         | .consecutive_codex_failures=0
@@ -801,15 +926,18 @@ while true; do
       bash "$SKILL_DIR/round-post.sh" 2>&1 || true
     log "round $NEXT_ROUND done (codex skipped) — event=$EVENT blockers=$BLOCKERS sha=${HEAD_SHA:0:7}"
     if [[ "$EVENT" == "APPROVE" ]]; then
-      POST_HEAD_SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid)
-      POST_ISSUE_ID=$(latest_issue_comment_id)
-      POST_REVIEW_ID=$(latest_review_comment_id)
-      if [[ "$POST_HEAD_SHA" == "$HEAD_SHA" \
-            && "$POST_ISSUE_ID" == "$LATEST_ISSUE_ID" \
-            && "$POST_REVIEW_ID" == "$LATEST_REVIEW_ID" \
-            && ! -s "$RUN_DIR/inbox.md" ]]; then
+      # Re-snapshot HEAD + body + labels + non-reviewer comments + inbox
+      # via the same signature helper the idle / pre-loop APPROVE guards
+      # use. Any non-empty token means a signal moved while round-pre
+      # was running and we must not converge — convergence is terminal,
+      # so a body / label / comment edit dropped here is lost forever.
+      POST_TRIGGER=$(post_approve_trigger_reason \
+        "$HEAD_SHA" "$BODY_HASH" "$LABELS_HASH" \
+        "$LATEST_ISSUE_ID" "$LATEST_REVIEW_ID")
+      if [[ -z "$POST_TRIGGER" ]]; then
         converge_and_exit
       fi
+      log "Rule-1 APPROVE skip produced but state moved during round-pre (trigger=$POST_TRIGGER) — falling through"
     fi
     sleep "$POLL_INTERVAL"
     continue
@@ -838,10 +966,12 @@ while true; do
   fi
   jq --argjson r "$NEXT_ROUND" --arg sha "$HEAD_SHA" --arg now "$NOW" \
      --argjson iid "$LATEST_ISSUE_ID" --argjson rid "$LATEST_REVIEW_ID" \
+     --arg bh "$BODY_HASH" --arg lh "$LABELS_HASH" \
      --arg ev "$EVENT" \
      --argjson cm "$CRITERIA_MTIME" --argjson rc "$NEW_RC" \
      '.round=$r | .last_reviewed_sha=$sha
       | .last_issue_comment_id=$iid | .last_review_comment_id=$rid
+      | .last_body_hash=$bh | .last_labels_hash=$lh
       | .last_codex_event=$ev | .last_criteria_mtime=$cm
       | .consecutive_request_changes=$rc
       | .consecutive_codex_failures=0
@@ -898,16 +1028,18 @@ while true; do
   # keeps the loop alive (a future commit will trigger), convergence is
   # terminal (one re-review pass to absorb late feedback before exit).
   if [[ "$EVENT" == "APPROVE" ]]; then
-    POST_HEAD_SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid)
-    POST_ISSUE_ID=$(latest_issue_comment_id)
-    POST_REVIEW_ID=$(latest_review_comment_id)
-    if [[ "$POST_HEAD_SHA" == "$HEAD_SHA" \
-          && "$POST_ISSUE_ID" == "$LATEST_ISSUE_ID" \
-          && "$POST_REVIEW_ID" == "$LATEST_REVIEW_ID" \
-          && ! -s "$RUN_DIR/inbox.md" ]]; then
+    # Re-snapshot HEAD + body + labels + non-reviewer comments + inbox
+    # via the same signature helper the idle / pre-loop APPROVE guards
+    # use. Any non-empty token means a signal moved during the codex
+    # review and we must not converge — convergence is terminal, so a
+    # body / label / comment edit dropped here is lost forever.
+    POST_TRIGGER=$(post_approve_trigger_reason \
+      "$HEAD_SHA" "$BODY_HASH" "$LABELS_HASH" \
+      "$LATEST_ISSUE_ID" "$LATEST_REVIEW_ID")
+    if [[ -z "$POST_TRIGGER" ]]; then
       converge_and_exit
     fi
-    log "APPROVE produced but state moved during review (head_changed=$([[ "$POST_HEAD_SHA" != "$HEAD_SHA" ]] && echo y || echo n), issue_comments_changed=$([[ "$POST_ISSUE_ID" != "$LATEST_ISSUE_ID" ]] && echo y || echo n), review_comments_changed=$([[ "$POST_REVIEW_ID" != "$LATEST_REVIEW_ID" ]] && echo y || echo n), inbox=$([[ -s "$RUN_DIR/inbox.md" ]] && echo y || echo n)) — falling through"
+    log "APPROVE produced but state moved during review (trigger=$POST_TRIGGER) — falling through"
   fi
 
   sleep "$POLL_INTERVAL"

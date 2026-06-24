@@ -159,7 +159,7 @@ LogSumExpFwdOp:
 SumFwdOp:
   ref_api: "torch.sum"
   family: reduction
-  status: spec-only  # dim=None not yet implemented; update when impl lands
+  status: implemented
 
   signature:
     inputs:
@@ -211,7 +211,7 @@ SumFwdOp:
 MeanFwdOp:
   ref_api: "torch.mean"
   family: reduction
-  status: spec-only  # dim=None not yet implemented; update when impl lands
+  status: implemented
 
   signature:
     inputs:
@@ -259,7 +259,7 @@ MeanFwdOp:
 AmaxFwdOp:
   ref_api: "torch.amax"
   family: reduction
-  status: spec-only  # dim=None not yet implemented; update when impl lands
+  status: implemented
 
   signature:
     inputs:
@@ -303,7 +303,7 @@ AmaxFwdOp:
 AminFwdOp:
   ref_api: "torch.amin"
   family: reduction
-  status: spec-only  # dim=None not yet implemented; update when impl lands
+  status: implemented
 
   signature:
     inputs:
@@ -404,7 +404,7 @@ ProdFwdOp:
 VarFwdOp:
   ref_api: "torch.var"
   family: reduction
-  status: spec-only  # dim=None not yet implemented; update when impl lands
+  status: implemented
 
   signature:
     inputs:
@@ -449,7 +449,7 @@ VarFwdOp:
 StdFwdOp:
   ref_api: "torch.std"
   family: reduction
-  status: spec-only  # dim=None not yet implemented; update when impl lands
+  status: implemented
 
   signature:
     inputs:
@@ -494,7 +494,7 @@ StdFwdOp:
 VarMeanFwdOp:
   ref_api: "torch.var_mean"
   family: reduction
-  status: spec-only  # dim=None not yet implemented; update when impl lands
+  status: implemented
 
   signature:
     inputs:
@@ -636,11 +636,11 @@ ArgminFwdOp:
 AllFwdOp:
   ref_api: "torch.all"
   family: reduction
-  status: spec-only  # dim=None not yet implemented; update when impl lands
+  status: implemented
 
   signature:
     inputs:
-      x: {dtype: "float16 | bfloat16 | float32 | bool"}
+      x: {dtype: "float16 | bfloat16 | float32 | bool | int32 | int64 | complex64 | complex128"}
     outputs:
       output: {dtype: "bool"}
     params:
@@ -682,11 +682,11 @@ AllFwdOp:
 AnyFwdOp:
   ref_api: "torch.any"
   family: reduction
-  status: spec-only  # dim=None not yet implemented; update when impl lands
+  status: implemented
 
   signature:
     inputs:
-      x: {dtype: "float16 | bfloat16 | float32 | bool"}
+      x: {dtype: "float16 | bfloat16 | float32 | bool | int32 | int64 | complex64 | complex128"}
     outputs:
       output: {dtype: "bool"}
     params:
@@ -728,11 +728,11 @@ AnyFwdOp:
 CountNonzeroFwdOp:
   ref_api: "torch.count_nonzero"
   family: reduction
-  status: spec-only  # dim=None not yet implemented; update when impl lands
+  status: implemented
 
   signature:
     inputs:
-      x: {dtype: "float16 | bfloat16 | float32"}
+      x: {dtype: "float16 | bfloat16 | float32 | bool | int32 | int64 | complex64 | complex128"}
     outputs:
       output: {dtype: "int64"}
     params:

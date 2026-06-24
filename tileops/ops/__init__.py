@@ -4,7 +4,9 @@ from .attention import (
     GroupedQueryAttentionDecodePagedWithKVCacheFwdOp,
     GroupedQueryAttentionDecodeWithKVCacheFwdOp,
     GroupedQueryAttentionFwdOp,
+    GroupedQueryAttentionPrefillFP8TensorCoreFwdOp,
     GroupedQueryAttentionPrefillFwdOp,
+    GroupedQueryAttentionPrefillPagedWithFP8KVCacheFwdOp,
     GroupedQueryAttentionPrefillPagedWithKVCacheFwdOp,
     GroupedQueryAttentionPrefillVarlenFwdOp,
     GroupedQueryAttentionPrefillWithKVCacheFwdOp,
@@ -20,7 +22,14 @@ from .attention import (
     NSAFwdVarlenOp,
     NSATopkVarlenOp,
 )
-from .convolution import Conv1dBiasFwdOp, Conv1dFwdOp, Conv2dOp, Conv3dOp
+from .convolution import (
+    Conv1dBiasFwdOp,
+    Conv1dFwdOp,
+    Conv2dBiasFwdOp,
+    Conv2dFwdOp,
+    Conv3dBiasFwdOp,
+    Conv3dFwdOp,
+)
 from .da_cumsum import DaCumsumFwdOp
 from .deltanet import DeltaNetBwdOp, DeltaNetFwdOp, DeltaNetOp
 from .deltanet_recurrence import DeltaNetDecodeOp
@@ -39,6 +48,7 @@ from .gated_linear_attn import GLADecodeOp
 from .gemm import GemmOp
 from .gla import GLABwdOp, GLAFwdOp
 from .grouped_gemm import GroupedGemmOp
+from .mamba2_fwd import Mamba2FwdOp
 from .mhc import MHCPostOp, MHCPreOp
 from .moe import MoePermuteAlignFwdOp
 from .norm import (
@@ -54,7 +64,7 @@ from .norm import (
     RMSNormFwdOp,
 )
 from .op_base import Op
-from .pool import AvgPool1dOp, AvgPool2dOp, AvgPool3dOp
+from .pool import AvgPool1dFwdOp, AvgPool2dFwdOp, AvgPool3dFwdOp
 
 # --- Reduction ops (uncomment as sub-category PRs land) ---
 from .reduction import (
@@ -98,17 +108,19 @@ from .topk_selector import TopkSelectorOp
 
 __all__ = [
     "BinaryOp",
-    "AvgPool1dOp",
-    "AvgPool2dOp",
-    "AvgPool3dOp",
+    "AvgPool1dFwdOp",
+    "AvgPool2dFwdOp",
+    "AvgPool3dFwdOp",
     "AdaLayerNormFwdOp",
     "AdaLayerNormZeroFwdOp",
     "BatchNormBwdOp",
     "BatchNormFwdOp",
     "Conv1dBiasFwdOp",
     "Conv1dFwdOp",
-    "Conv2dOp",
-    "Conv3dOp",
+    "Conv2dBiasFwdOp",
+    "Conv2dFwdOp",
+    "Conv3dBiasFwdOp",
+    "Conv3dFwdOp",
     "DaCumsumFwdOp",
     "DeepSeekSparseAttentionDecodeWithKVCacheFwdOp",
     "DropoutOp",
@@ -136,7 +148,9 @@ __all__ = [
     "GroupedQueryAttentionDecodePagedWithKVCacheFwdOp",
     "GroupedQueryAttentionDecodeWithKVCacheFwdOp",
     "GroupedQueryAttentionFwdOp",
+    "GroupedQueryAttentionPrefillFP8TensorCoreFwdOp",
     "GroupedQueryAttentionPrefillFwdOp",
+    "GroupedQueryAttentionPrefillPagedWithFP8KVCacheFwdOp",
     "GroupedQueryAttentionPrefillPagedWithKVCacheFwdOp",
     "GroupedQueryAttentionPrefillVarlenFwdOp",
     "GroupedQueryAttentionPrefillWithKVCacheFwdOp",
@@ -158,6 +172,7 @@ __all__ = [
     "Op",
     "MoePermuteAlignFwdOp",
     "RMSNormFwdOp",
+    "Mamba2FwdOp",
     "SSDChunkScanFwdOp",
     "SSDChunkStateFwdOp",
     "SSDDecodeOp",

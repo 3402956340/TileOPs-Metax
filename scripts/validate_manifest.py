@@ -34,13 +34,16 @@ from pathlib import Path
 
 import yaml
 
-from tileops.manifest.shape_rules import (
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tileops.manifest.shape_rules import (  # noqa: E402
     dim_range_validity,
     dim_uniqueness,
     reduced_axes,
 )
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_DIR = REPO_ROOT / "tileops" / "manifest"
 
 # Valid torch dtype base names (without same_as references)
@@ -278,6 +281,29 @@ def check_l0(
                         errors.append(
                             f"[schema] {op_name}: params.{pname} missing 'type'"
                         )
+
+        # Surface invariant: every op produces at least one output, and every
+        # op has at least one construction handle — either a tensor input or
+        # a manifest-declared param. ``inputs: {}`` is permitted (generative
+        # ops synthesize the output from params alone); an op with neither
+        # inputs nor params has no surface the validator or codegen can act
+        # on.
+        raw_inputs = sig.get("inputs")
+        raw_outputs = sig.get("outputs")
+        raw_params = sig.get("params")
+        inputs_count = len(raw_inputs) if isinstance(raw_inputs, dict) else 0
+        outputs_count = len(raw_outputs) if isinstance(raw_outputs, dict) else 0
+        params_count = len(raw_params) if isinstance(raw_params, dict) else 0
+        if outputs_count < 1:
+            errors.append(
+                f"[schema] {op_name}: signature.outputs must declare at "
+                f"least one tensor"
+            )
+        if inputs_count < 1 and params_count < 1:
+            errors.append(
+                f"[schema] {op_name}: signature must declare at least one "
+                f"input tensor or one param (both are empty)"
+            )
 
         # dtype_combos must be a list of dicts if present (R4)
         if "dtype_combos" in sig:
@@ -572,7 +598,9 @@ def check_l1_signature(
     if init_params is None:
         init_params = []
 
-    # 1. forward() order check: manifest inputs + forward-visible params, in order
+    # forward() order check: manifest inputs + forward-visible params, in
+    # order. Empty manifest inputs collapses to a forward-visible-params
+    # equality check (no inputs to align).
     expected = list(manifest_inputs.keys()) + [
         name for name in manifest_params.keys() if name in forward_params
     ]
@@ -704,6 +732,36 @@ def _get_forward_params(cls) -> list[str] | None:
         return None
 
 
+_POSITIONAL_KINDS = (
+    inspect.Parameter.POSITIONAL_ONLY,
+    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+)
+
+
+def _forward_positional_params(cls) -> list[str] | None:
+    """Get positional parameter names of cls.forward(), excluding 'self'.
+
+    Only POSITIONAL_ONLY / POSITIONAL_OR_KEYWORD count. KEYWORD_ONLY
+    params (those after ``*``) are not part of the positional tuple
+    that manifest ``signature.inputs`` aligns against. Shared by check_l1
+    and the C4 forward-signature parity check so they stay in lockstep.
+    """
+    try:
+        sig = inspect.signature(cls.forward)
+        return [
+            p for p, v in sig.parameters.items()
+            if p != "self" and v.kind in _POSITIONAL_KINDS
+        ]
+    except (ValueError, TypeError) as exc:
+        # Stash exception text so callers that surface diagnostics can
+        # report ``exc.__class__.__name__: exc`` without changing the
+        # ``None`` return contract for "not inspectable".
+        _forward_positional_params._last_error = (  # type: ignore[attr-defined]
+            f"{exc.__class__.__name__}: {exc}"
+        )
+        return None
+
+
 def _get_init_params(cls) -> list[str]:
     """Get explicit parameter names of cls.__init__(), excluding 'self'.
 
@@ -760,6 +818,15 @@ def check_l1(
     sig = entry.get("signature", {})
     source = entry.get("source", {})
     op_file = source.get("op", "")
+    if not op_file:
+        if entry.get("status") == "spec-only":
+            if warnings is not None:
+                warnings.append(
+                    f"[signature] {op_name}: skipped because status is spec-only "
+                    "and source.op is null"
+                )
+            return []
+        return [f"[signature] {op_name}: missing source.op"]
 
     result = _resolve_op_class(op_file, op_name)
 
@@ -3309,29 +3376,24 @@ def check_c4_forward_signature_parity(
         return errors
     expected = list(manifest_inputs.keys())
 
-    try:
-        py_sig = inspect.signature(cls.forward)
-    except (ValueError, TypeError) as exc:
+    positional = _forward_positional_params(cls)
+    if positional is None:
         if warnings is not None:
-            warnings.append(
-                f"[forward] {op_name}: inspect.signature(forward) raised "
-                f"{exc.__class__.__name__}: {exc}"
+            detail = getattr(
+                _forward_positional_params, "_last_error", None
             )
+            if detail:
+                warnings.append(
+                    f"[forward] {op_name}: inspect.signature(forward) "
+                    f"raised {detail}"
+                )
+                # Clear so a later call site sees only its own failure.
+                _forward_positional_params._last_error = None  # type: ignore[attr-defined]
+            else:
+                warnings.append(
+                    f"[forward] {op_name}: inspect.signature(forward) failed"
+                )
         return errors
-
-    # Only POSITIONAL_ONLY / POSITIONAL_OR_KEYWORD count as positional.
-    # KEYWORD_ONLY params (those after ``*``) are not part of the
-    # positional tuple manifest ``signature.inputs`` describes.
-    positional: list[str] = []
-    for pname, p in py_sig.parameters.items():
-        if pname == "self":
-            continue
-        if p.kind not in (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        ):
-            continue
-        positional.append(pname)
 
     actual_prefix = positional[: len(expected)]
     if actual_prefix != expected:

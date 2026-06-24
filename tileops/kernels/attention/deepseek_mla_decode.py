@@ -404,7 +404,6 @@ def _mla_decode_ws_kernel(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, dty
                 m_i_prev = T.alloc_fragment([block_H], accum_dtype)
 
                 # TODO: Multi buffer
-                bar_q = T.alloc_barrier(arrive_count=384)
                 bar_k_0_ready = T.alloc_barrier(arrive_count=128)
                 bar_k_1_ready = T.alloc_barrier(arrive_count=128)
                 bar_k_0_free = T.alloc_barrier(arrive_count=256)
@@ -417,29 +416,31 @@ def _mla_decode_ws_kernel(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, dty
 
                 tx = T.get_thread_binding()
 
-                T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, 0:dim // 2],
-                       Q_shared_l)
-                T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, dim // 2:dim],
-                       Q_shared_r)
-                T.copy(Q_pe[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, :], Q_tail_shared)
-
-                T.barrier_arrive(bar_q)
-
+                # Q/Q_pe -> shared copies must stay inside tx < 128 so that the copy
+                # and the subsequent T.wgmma_gemm share the same 128-thread bounds.
+                # Mixing a 384-thread copy with a 128-thread WGMMA on the same shared
+                # buffer causes TileLang 0.1.9 layout inference to fail with
+                # "no available layout found".
                 if tx < 128:
                     T.set_max_nreg(240, 1)
+                    T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, 0:dim // 2],
+                           Q_shared_l)
+                    T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, dim // 2:dim],
+                           Q_shared_r)
+                    T.copy(Q_pe[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, :],
+                           Q_tail_shared)
                     T.fill(sumexp, 0)
                     T.fill(m_i, -2**30)  # avoid -inf - inf to cause nan
                     T.fill(acc_o_l, 0)
-                    T.barrier_wait(bar_q, 0)
 
                     for i_i in T.serial(T.ceildiv(NI, 2)):
                         # Buffer 0
                         T.barrier_wait(bar_k_0_ready[0], (i_i & 1))
 
                         T.clear(acc_s)
-                        T.gemm(Q_shared_l, KV_shared_0_l, acc_s, transpose_B=True, wg_wait=-1)
-                        T.gemm(Q_shared_r, KV_shared_0_r, acc_s, transpose_B=True, wg_wait=-1)
-                        T.gemm(Q_tail_shared, K_tail_shared_0, acc_s, transpose_B=True, wg_wait=-1)
+                        T.wgmma_gemm(Q_shared_l, KV_shared_0_l, acc_s, transpose_B=True)
+                        T.wgmma_gemm(Q_shared_r, KV_shared_0_r, acc_s, transpose_B=True)
+                        T.wgmma_gemm(Q_tail_shared, K_tail_shared_0, acc_s, transpose_B=True)
 
                         T.wait_wgmma(0)
 
@@ -471,9 +472,9 @@ def _mla_decode_ws_kernel(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, dty
                         T.barrier_wait(bar_k_1_ready[0], (i_i & 1))
 
                         T.clear(acc_s)
-                        T.gemm(Q_shared_l, KV_shared_1_l, acc_s, transpose_B=True, wg_wait=-1)
-                        T.gemm(Q_shared_r, KV_shared_1_r, acc_s, transpose_B=True, wg_wait=-1)
-                        T.gemm(Q_tail_shared, K_tail_shared_1, acc_s, transpose_B=True, wg_wait=-1)
+                        T.wgmma_gemm(Q_shared_l, KV_shared_1_l, acc_s, transpose_B=True)
+                        T.wgmma_gemm(Q_shared_r, KV_shared_1_r, acc_s, transpose_B=True)
+                        T.wgmma_gemm(Q_tail_shared, K_tail_shared_1, acc_s, transpose_B=True)
 
                         T.wait_wgmma(0)
 
@@ -629,7 +630,6 @@ def _mla_decode_ws_kernel(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, dty
                 m_i_prev = T.alloc_fragment([block_H], accum_dtype)
 
                 # TODO: Multi buffer
-                bar_q = T.alloc_barrier(arrive_count=384)
                 bar_k_0_ready = T.alloc_barrier(arrive_count=128)
                 bar_k_1_ready = T.alloc_barrier(arrive_count=128)
                 bar_k_0_free = T.alloc_barrier(arrive_count=256)
@@ -642,29 +642,31 @@ def _mla_decode_ws_kernel(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, dty
 
                 tx = T.get_thread_binding()
 
-                T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, 0:dim // 2],
-                       Q_shared_l)
-                T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, dim // 2:dim],
-                       Q_shared_r)
-                T.copy(Q_pe[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, :], Q_tail_shared)
-
-                T.barrier_arrive(bar_q)
-
+                # Q/Q_pe -> shared copies must stay inside tx < 128 so that the copy
+                # and the subsequent T.wgmma_gemm share the same 128-thread bounds.
+                # Mixing a 384-thread copy with a 128-thread WGMMA on the same shared
+                # buffer causes TileLang 0.1.9 layout inference to fail with
+                # "no available layout found".
                 if tx < 128:
                     T.set_max_nreg(240, 1)
+                    T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, 0:dim // 2],
+                           Q_shared_l)
+                    T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, dim // 2:dim],
+                           Q_shared_r)
+                    T.copy(Q_pe[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, :],
+                           Q_tail_shared)
                     T.fill(sumexp, 0)
                     T.fill(m_i, -2**30)  # avoid -inf - inf to cause nan
                     T.fill(acc_o_l, 0)
-                    T.barrier_wait(bar_q, 0)
 
                     for i_i in T.serial(T.ceildiv(NI, 2)):
                         # Buffer 0
                         T.barrier_wait(bar_k_0_ready[0], (i_i & 1))
 
                         T.clear(acc_s)
-                        T.gemm(Q_shared_l, KV_shared_0_l, acc_s, transpose_B=True, wg_wait=-1)
-                        T.gemm(Q_shared_r, KV_shared_0_r, acc_s, transpose_B=True, wg_wait=-1)
-                        T.gemm(Q_tail_shared, K_tail_shared_0, acc_s, transpose_B=True, wg_wait=-1)
+                        T.wgmma_gemm(Q_shared_l, KV_shared_0_l, acc_s, transpose_B=True)
+                        T.wgmma_gemm(Q_shared_r, KV_shared_0_r, acc_s, transpose_B=True)
+                        T.wgmma_gemm(Q_tail_shared, K_tail_shared_0, acc_s, transpose_B=True)
 
                         T.wait_wgmma(0)
 
@@ -696,9 +698,9 @@ def _mla_decode_ws_kernel(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, dty
                         T.barrier_wait(bar_k_1_ready[0], (i_i & 1))
 
                         T.clear(acc_s)
-                        T.gemm(Q_shared_l, KV_shared_1_l, acc_s, transpose_B=True, wg_wait=-1)
-                        T.gemm(Q_shared_r, KV_shared_1_r, acc_s, transpose_B=True, wg_wait=-1)
-                        T.gemm(Q_tail_shared, K_tail_shared_1, acc_s, transpose_B=True, wg_wait=-1)
+                        T.wgmma_gemm(Q_shared_l, KV_shared_1_l, acc_s, transpose_B=True)
+                        T.wgmma_gemm(Q_shared_r, KV_shared_1_r, acc_s, transpose_B=True)
+                        T.wgmma_gemm(Q_tail_shared, K_tail_shared_1, acc_s, transpose_B=True)
 
                         T.wait_wgmma(0)
 
