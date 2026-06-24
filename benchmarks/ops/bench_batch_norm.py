@@ -1,9 +1,6 @@
 """Benchmark for BatchNormFwdOp and BatchNormBwdOp.
 
 Compares TileOPs vs PyTorch cuDNN batch norm on common ResNet-style shapes.
-
-Run:
-    conda run -n tileops python -m pytest benchmarks/ops/bench_batch_norm.py -vvs
 """
 
 import math
@@ -149,7 +146,7 @@ def test_batch_norm_fwd_bench(N, C, spatial, dtype, training, tune):
     # Manifest input order: (x, running_mean, running_var, weight, bias).
     inputs = (x, running_mean, running_var, weight, bias)
 
-    op = BatchNormFwdOp(N, C, *spatial, dtype=dtype, training=training, tune=tune)
+    op = BatchNormFwdOp(N, C, tuple(spatial), dtype=dtype, training=training, tune=tune)
 
     test = BatchNormFwdTest(N, C, spatial, dtype, training)
     bm = BatchNormFwdBenchmark(test, op)

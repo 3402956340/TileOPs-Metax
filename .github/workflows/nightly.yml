@@ -22,7 +22,6 @@ env:
   TILELANG_TMP_DIR: /data/cache/tilelang/tmp
   TRITON_CACHE_DIR: /data/cache/triton
   PIP_CACHE_DIR: /data/cache/pip
-  WHEEL_DIR: /data/cache/wheels
   MAX_JOBS: "64"
   USE_MACA: ON
   CCACHE_DIR: /data/cache/ccache
@@ -54,31 +53,17 @@ jobs:
         run: scripts/ci/verify_nightly_runner.sh
         shell: bash
 
-      - name: Set up run-local venv
-        run: scripts/ci/setup_nightly_venv.sh
+      - name: Install TileOPs (image-baked stack, --no-deps)
+        run: bash scripts/ci/install_tileops.sh
         shell: bash
 
       - name: Warm kernel compilation cache
         continue-on-error: true
         run: |
           set -euo pipefail
-          # shellcheck source=/dev/null
-          source "${VENV_PATH}/bin/activate"
-
-          PIP_NO_BUILD_ISOLATION=1 pip install -e ".[dev]"
-
           export PYTHONPATH="${GITHUB_WORKSPACE}${PYTHONPATH:+:$PYTHONPATH}"
           echo "Starting kernel cache warmup..."
           python scripts/warmup_kernel_cache.py --max-workers 64 -n 4
-        shell: bash
-
-      - name: Cleanup run-local venv
-        if: ${{ always() }}
-        run: |
-          set -euo pipefail
-          if [[ -n "${RUNTIME_ROOT:-}" && "${RUNTIME_ROOT}" == "${RUNNER_TEMP}/nightly-"* ]]; then
-            rm -rf "${RUNTIME_ROOT}"
-          fi
         shell: bash
 
   # =========================================================================
@@ -89,6 +74,10 @@ jobs:
     needs: [cache-warmup]
     timeout-minutes: 120
     runs-on: tileops-metax-runner
+    env:
+      # Keep the long benchmark suite from fragmenting CUDA allocator segments
+      # before late large MoE input tensors allocate 14-21 GiB weight blocks.
+      PYTORCH_ALLOC_CONF: expandable_segments:True
     steps:
       - name: Install dependencies for runner (MetaX)
         run: |
@@ -107,8 +96,8 @@ jobs:
         run: scripts/ci/verify_nightly_runner.sh
         shell: bash
 
-      - name: Set up run-local venv
-        run: scripts/ci/setup_nightly_venv.sh
+      - name: Install TileOPs (image-baked stack, --no-deps)
+        run: bash scripts/ci/install_tileops.sh
         shell: bash
 
       - name: Run benchmark ops
@@ -116,10 +105,6 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          # shellcheck source=/dev/null
-          source "${VENV_PATH}/bin/activate"
-
-          PIP_NO_BUILD_ISOLATION=1 pip install -e ".[dev]"
 
           export PYTHONPATH="${GITHUB_WORKSPACE}${PYTHONPATH:+:$PYTHONPATH}"
           echo "Runtime cache env:"
@@ -128,28 +113,8 @@ jobs:
           echo "TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-}"
 
           set -o pipefail
-          python -m pytest benchmarks/ops \
-            --ignore=benchmarks/ops/attention \
-            --ignore=benchmarks/ops/bench_ada_layer_norm.py \
-            --ignore=benchmarks/ops/bench_argreduce.py \
-            --ignore=benchmarks/ops/bench_gemm.py \
-            --ignore=benchmarks/ops/bench_group_norm.py \
-            --ignore=benchmarks/ops/bench_independent_elementwise.py \
-            --ignore=benchmarks/ops/bench_mamba.py \
-            --ignore=benchmarks/ops/bench_mhc_post.py \
-            --ignore=benchmarks/ops/bench_mhc_pre.py \
-            --ignore=benchmarks/ops/bench_moe_experts_nopad.py \
-            --ignore=benchmarks/ops/bench_moe_fused_moe.py \
-            --ignore=benchmarks/ops/bench_moe_fused_topk.py \
-            --ignore=benchmarks/ops/bench_moe_kernel_breakdown.py \
-            --ignore=benchmarks/ops/bench_moe_permute_align.py \
-            --ignore=benchmarks/ops/bench_moe_permute_nopad.py \
-            --ignore=benchmarks/ops/bench_moe_permute.py \
-            --ignore=benchmarks/ops/bench_moe_shared_fused_moe.py \
-            --ignore=benchmarks/ops/bench_moe_unpermute.py \
-            --ignore=benchmarks/ops/bench_reduce_multidim.py \
-            --durations=0 --durations-min=1 \
-            --junit-xml=bench_results.xml | tee tileops_benchmarks.log
+          python3 -m pip install -q -c constraints.txt pytest-timeout
+          python3 -m pytest -q benchmarks/ops --timeout=900 --timeout-method=thread --junit-xml=bench_results.xml | tee tileops_benchmarks.log
 
           if [ -f profile_run.log ]; then
             { echo; echo "===== profile_run.log summary ====="; cat profile_run.log; } >> tileops_benchmarks.log
@@ -172,15 +137,6 @@ jobs:
       - name: Fail benchmark job if pytest failed
         if: ${{ always() && steps.benchmark_tests.outcome == 'failure' }}
         run: exit 1
-        shell: bash
-
-      - name: Cleanup run-local venv
-        if: ${{ always() }}
-        run: |
-          set -euo pipefail
-          if [[ -n "${RUNTIME_ROOT:-}" && "${RUNTIME_ROOT}" == "${RUNNER_TEMP}/nightly-"* ]]; then
-            rm -rf "${RUNTIME_ROOT}"
-          fi
         shell: bash
 
   # =========================================================================
@@ -209,8 +165,8 @@ jobs:
         run: scripts/ci/verify_nightly_runner.sh
         shell: bash
 
-      - name: Set up run-local venv
-        run: scripts/ci/setup_nightly_venv.sh
+      - name: Install TileOPs (image-baked stack, --no-deps)
+        run: bash scripts/ci/install_tileops.sh
         shell: bash
 
       - name: Run full op tests
@@ -218,10 +174,6 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          # shellcheck source=/dev/null
-          source "${VENV_PATH}/bin/activate"
-
-          PIP_NO_BUILD_ISOLATION=1 pip install -e ".[dev]"
 
           export PYTHONPATH="${GITHUB_WORKSPACE}${PYTHONPATH:+:$PYTHONPATH}"
           echo "Runtime cache env:"
@@ -230,19 +182,8 @@ jobs:
           echo "TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-}"
 
           set -o pipefail
-          python -m pytest tests/ \
-            --ignore=tests/ops/attention \
-            --ignore=tests/ops/test_argreduce.py \
-            --ignore=tests/ops/test_deltanet_chunkwise_bwd.py \
-            --ignore=tests/ops/test_fused_add_layer_norm.py \
-            --ignore=tests/ops/test_gated_deltanet_chunkwise_bwd.py \
-            --ignore=tests/ops/test_gemm.py \
-            --ignore=tests/ops/test_gla_chunkwise_bwd.py \
-            --ignore=tests/ops/test_moe_fused_moe.py \
-            --ignore=tests/ops/test_topk_selector.py \
-            --ignore=tests/test_validate_manifest.py \
-            --durations=0 --durations-min=1 \
-            -v --tb=short --junit-xml=test_results.xml | tee tileops_op_test.log
+          python3 -m pip install -q -c constraints.txt pytest-timeout
+          python3 -m pytest tests/ -v --tb=short --timeout=900 --timeout-method=thread --junit-xml=test_results.xml | tee tileops_op_test.log
         shell: bash
 
       - name: Download benchmark artifacts
@@ -319,10 +260,7 @@ jobs:
         if: ${{ always() }}
         run: |
           set -euo pipefail
-          # shellcheck source=/dev/null
-          source "${VENV_PATH}/bin/activate"
 
-          pip install --no-deps -e . 2>/dev/null
           export PYTHONPATH="${GITHUB_WORKSPACE}${PYTHONPATH:+:$PYTHONPATH}"
 
           HISTORY_ARGS=()
@@ -330,7 +268,7 @@ jobs:
             HISTORY_ARGS=(--history .perf_history/perf_history.json)
           fi
 
-          python scripts/nightly_report.py \
+          python3 scripts/nightly_report.py \
             --test-xml test_results.xml \
             --bench-xml bench_results.xml \
             "${HISTORY_ARGS[@]}" \
@@ -370,14 +308,74 @@ jobs:
         run: exit 1
         shell: bash
 
-      - name: Cleanup run-local venv
-        if: ${{ always() }}
+  # =========================================================================
+  # Phase 3b — Publish benchmark data to the nightly-bench orphan branch
+  # Consumed by tile-ai/TileOPs.github.io to render the docs Benchmarks page.
+  # Runs on a github-hosted runner (no GPU needed) and uses the default token
+  # to force-push the day's XML snapshot, mirroring the manifest-stats pattern.
+  # =========================================================================
+  publish-bench-data:
+    if: ${{ always() && github.repository == 'tile-ai/TileOPs' && (github.event_name == 'schedule' || github.ref == 'refs/heads/main') }}
+    needs: [op_test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download benchmark artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tileops_benchmark_${{ github.run_id }}
+          path: _bench
+        continue-on-error: true
+
+      - name: Download op test artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tileops_op_test_${{ github.run_id }}
+          path: _optest
+        continue-on-error: true
+
+      - name: Assemble publish payload
+        id: assemble
         run: |
           set -euo pipefail
-          if [[ -n "${RUNTIME_ROOT:-}" && "${RUNTIME_ROOT}" == "${RUNNER_TEMP}/nightly-"* ]]; then
-            rm -rf "${RUNTIME_ROOT}"
+          mkdir -p _publish
+          ok=1
+          if [ -f _bench/bench_results.xml ]; then
+            cp _bench/bench_results.xml _publish/bench_results.xml
+          else
+            echo "::warning::bench_results.xml missing; skipping nightly-bench publish"
+            ok=0
           fi
+          if [ -f _optest/test_results.xml ]; then
+            cp _optest/test_results.xml _publish/test_results.xml
+          else
+            echo "::warning::test_results.xml missing; page will render without test status"
+          fi
+          if [ "$ok" -eq 1 ]; then
+            run_date="$(date -u +%Y-%m-%d)"
+            printf '{\n  "commit": "%s",\n  "date": "%s",\n  "gpu": "NVIDIA H200",\n  "run_id": "%s"\n}\n' \
+              "${GITHUB_SHA}" "${run_date}" "${GITHUB_RUN_ID}" > _publish/meta.json
+          fi
+          echo "ok=${ok}" >> "$GITHUB_OUTPUT"
         shell: bash
+
+      - name: Publish to nightly-bench branch
+        if: ${{ steps.assemble.outputs.ok == '1' }}
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: nightly-bench
+          publish_dir: _publish
+          force_orphan: true
+          commit_message: "chore(bench): nightly benchmark data from ${{ github.sha }}"
+          user_name: "github-actions[bot]"
+          user_email: "41898282+github-actions[bot]@users.noreply.github.com"
 
   # =========================================================================
   # Phase 4 — Packaging and smoke test
@@ -396,19 +394,17 @@ jobs:
         run: scripts/ci/verify_nightly_runner.sh
         shell: bash
 
-      - name: Set up run-local venv
-        run: scripts/ci/setup_nightly_venv.sh
+      - name: Install TileOPs (image-baked stack, --no-deps)
+        run: bash scripts/ci/install_tileops.sh
         shell: bash
 
       - name: Build and test wheel package
         run: |
           set -euo pipefail
           exec > >(tee packaging.log) 2>&1
-          # shellcheck source=/dev/null
-          source "${VENV_PATH}/bin/activate"
 
           # Validate GPU frequency
-          TARGET_CLOCK_MHZ=1830
+          TARGET_CLOCK_MHZ=1500
           RETRIES=5
           for i in $(seq 1 "${RETRIES}"); do
             gpu_clock=$(nvidia-smi --query-gpu=clocks.current.graphics --format=csv,noheader,nounits | xargs)
@@ -421,17 +417,17 @@ jobs:
             sleep 2
           done
 
-          pip install build pytest
+          python3 -m pip install -c constraints.txt build pytest pytest-timeout
 
           echo "=== Build wheel package ==="
-          python -m build --wheel
+          python3 -m build --wheel
           echo "=== Build artifacts ==="
           ls -lh dist/*.whl
 
           echo "=== Install built wheel ==="
-          pip install dist/*.whl
+          python3 -m pip install dist/*.whl
 
-          TMP_TEST_DIR="$(mktemp -d "${RUNTIME_ROOT}/packaging-test.XXXXXX")"
+          TMP_TEST_DIR="$(mktemp -d "${RUNNER_TEMP}/packaging-test.XXXXXX")"
           cp -r tests "${TMP_TEST_DIR}/tests"
           cp pyproject.toml "${TMP_TEST_DIR}/"
           cd "${TMP_TEST_DIR}"
@@ -442,7 +438,8 @@ jobs:
           echo "TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-}"
 
           echo "=== Run pytest packaging ==="
-          python -m pytest -q tests/ops -m "packaging" \
+          python3 -m pytest -q tests/ops -m "packaging" \
+            --timeout=900 --timeout-method=thread \
             --junit-xml="${GITHUB_WORKSPACE}/packaging_smoke.xml"
         shell: bash
 
@@ -472,12 +469,3 @@ jobs:
         with:
           files: dist/*.whl
           fail_on_unmatched_files: true
-
-      - name: Cleanup run-local venv
-        if: ${{ always() }}
-        run: |
-          set -euo pipefail
-          if [[ -n "${RUNTIME_ROOT:-}" && "${RUNTIME_ROOT}" == "${RUNNER_TEMP}/nightly-"* ]]; then
-            rm -rf "${RUNTIME_ROOT}"
-          fi
-        shell: bash

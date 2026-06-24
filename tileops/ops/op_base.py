@@ -52,6 +52,23 @@ class Op(ABC):
     # manifest `static_dims`. Default empty = no committed axes.
     _static_axes: frozenset[tuple[int, int]] = frozenset()
 
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        """Auto-install manifest-derived methods on concrete subclasses.
+
+        Synthesizes ``_validate_dtypes`` (per docs/design/ops-design.md
+        §Step 5) and ``eval_roofline`` (per docs/design/roofline.md §4.4)
+        from the subclass's manifest entry. Each codegen pass is a no-op
+        when the subclass does not advertise manifest metadata, supplies
+        its own override, or is marked ``status: spec-only``. Codegen
+        modules are lazy-imported to avoid a circular import at ``Op``
+        definition time.
+        """
+        super().__init_subclass__(**kwargs)
+        from tileops.ops._dtype_codegen import maybe_install_validator
+        from tileops.ops._roofline_codegen import maybe_install_eval_roofline
+        maybe_install_validator(cls)
+        maybe_install_eval_roofline(cls)
+
     @property
     @abstractmethod
     def default_kernel_map(self) -> dict[str, Kernel]:
@@ -150,7 +167,9 @@ class Op(ABC):
         """
         default_map = self.default_kernel_map
         if default_map is None or len(default_map) == 0:
-            raise ValueError("default_kernel_map must be non-empty")
+            # Composite op: store override verbatim; sub-ops enforce arch-compat themselves.
+            self.kernel_map = dict(candidate_map) if candidate_map else {}
+            return
         resolved: dict[str, Kernel] = {}
         current_arch = get_sm_version()
         for name, default_kernel in default_map.items():

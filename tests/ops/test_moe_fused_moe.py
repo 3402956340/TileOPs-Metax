@@ -3,7 +3,6 @@
 Covers:
   - Qwen3 config: softmax, renormalize=False/True
   - Kimi K2 config: sigmoid, correction_bias, routed_scaling_factor=2.827
-  - layout="nopad" vs layout="padded" numerical agreement
   - expert_map local filtering (EP simulation without All-to-All)
   - vLLM correctness (optional, skipped when vLLM is not installed)
   - correction_bias routing precision (weights from original sigmoid, not biased)
@@ -14,7 +13,12 @@ import torch
 import torch.nn.functional as F
 
 from tests.test_base import FixtureBase
-from tileops.ops.moe import FusedMoe, FusedTopKOp
+from tileops.ops.moe import (
+    FusedMoe,
+    FusedMoeFwdCbFwdOp,
+    FusedMoeFwdOp,
+    FusedTopKOp,
+)
 
 # ---------------------------------------------------------------------------
 # vLLM optional import
@@ -139,17 +143,10 @@ def test_fused_moe_qwen3(
         num_tokens=num_tokens, num_experts=num_experts, top_k=top_k,
         hidden_size=hidden_size, ffn_size=ffn_size,
         scoring_func=scoring_func, renormalize=renormalize,
-        layout="nopad", dtype=dtype,
-    )
-    op_padded = FusedMoe(
-        num_tokens=num_tokens, num_experts=num_experts, top_k=top_k,
-        hidden_size=hidden_size, ffn_size=ffn_size,
-        scoring_func=scoring_func, renormalize=renormalize,
-        layout="padded", dtype=dtype,
+        dtype=dtype,
     )
 
     out_nopad = op_nopad(hidden, gating, w_gate_up, w_down)
-    out_padded = op_padded(hidden, gating, w_gate_up, w_down)
 
     assert out_nopad.shape == (num_tokens, hidden_size)
     assert out_nopad.dtype == dtype
@@ -160,7 +157,6 @@ def test_fused_moe_qwen3(
     ref = _ref_moe_ffn(hidden, w_gate_up, w_down, topk_weights, topk_ids.long())
 
     torch.testing.assert_close(out_nopad.float(), ref.float(), rtol=1e-2, atol=1e-2)
-    torch.testing.assert_close(out_padded.float(), ref.float(), rtol=1e-2, atol=1e-2)
 
     if _VLLM_AVAILABLE and scoring_func == "softmax":
         out_vllm = _vllm_fused_experts(
@@ -174,6 +170,69 @@ def test_fused_moe_qwen3(
         f"H={hidden_size}, F={ffn_size}, fn={scoring_func}, "
         f"renorm={renormalize}, {dtype}]"
     )
+
+
+# Cases for the FusedMoe non-determinism regression. The cooperative 3WG
+# grouped-GEMM TMA-store epilogue race is intermittent (~3% of calls at the
+# qwen3-medium scale) and only manifests inside the full FusedMoe pipeline
+# (adjacent activation/permute kernels keep the timing window open) — an
+# isolated grouped-GEMM loop never trips it, so this must run the op. The
+# nightly case repeats many times: at 3% per call, 200 repeats give >99%
+# detection. The smoke case is a fast path-coverage check.
+_DET_CASES = [
+    pytest.param(
+        dict(num_tokens=32, num_experts=8, top_k=2, hidden_size=64,
+             ffn_size=32, reps=3),
+        marks=pytest.mark.smoke, id="smoke",
+    ),
+    pytest.param(
+        dict(num_tokens=2048, num_experts=128, top_k=8, hidden_size=2048,
+             ffn_size=1024, reps=200),
+        marks=pytest.mark.nightly, id="qwen3-medium",
+    ),
+]
+
+
+@pytest.mark.parametrize("case", _DET_CASES)
+def test_fused_moe_deterministic(case):
+    """Regression for the cooperative 3WG grouped-GEMM TMA-store epilogue race.
+
+    The fast-path epilogue staged each full tile through a per-WG ``C_shared``
+    SMEM buffer without ordering the register→SMEM write before the async TMA
+    read, so the store could read a half-written ``C_shared`` on a small
+    fraction of calls, corrupting a sub-tile of the output non-deterministically.
+    The race only manifests inside the full FusedMoe pipeline; qwen3-medium
+    (E=128, ~128 rows/expert) drives the cooperative full-tile fast path heavily.
+    Run the op many times on fixed seed-42 inputs and assert every call matches
+    the PyTorch reference and is bitwise-identical to the first. Pre-fix the
+    qwen3-medium case trips within ~100 repeats; post-fix it is deterministic.
+    """
+    torch.manual_seed(42)
+    dev = "cuda"
+    dtype = torch.bfloat16
+    nt, ne, tk = case["num_tokens"], case["num_experts"], case["top_k"]
+    hs, ff, reps = case["hidden_size"], case["ffn_size"], case["reps"]
+    hidden = torch.randn(nt, hs, dtype=dtype, device=dev)
+    gating = torch.randn(nt, ne, dtype=dtype, device=dev)
+    w_gate_up = torch.randn(ne, ff * 2, hs, dtype=dtype, device=dev) * 0.02
+    w_down = torch.randn(ne, hs, ff, dtype=dtype, device=dev) * 0.02
+
+    op = FusedMoe(
+        num_tokens=nt, num_experts=ne, top_k=tk, hidden_size=hs,
+        ffn_size=ff, scoring_func="softmax", renormalize=False, dtype=dtype,
+    )
+    fk = FusedTopKOp(nt, ne, tk, "softmax", False)
+    topk_weights, topk_ids = fk(gating)
+    ref = _ref_moe_ffn(hidden, w_gate_up, w_down, topk_weights, topk_ids.long())
+
+    first = op(hidden, gating, w_gate_up, w_down)
+    torch.testing.assert_close(first.float(), ref.float(), rtol=1e-2, atol=1e-2)
+    for i in range(reps):
+        out = op(hidden, gating, w_gate_up, w_down)
+        assert torch.equal(out, first), (
+            f"non-deterministic FusedMoe output on call {i + 1}/{reps}: "
+            "3WG grouped-GEMM TMA-store epilogue write→read race regressed"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -246,19 +305,10 @@ def test_fused_moe_kimi(
         scoring_func="sigmoid", renormalize=True,
         with_correction_bias=with_correction_bias,
         routed_scaling_factor=routed_scaling_factor,
-        layout="nopad", dtype=dtype,
-    )
-    op_padded = FusedMoe(
-        num_tokens=num_tokens, num_experts=num_experts, top_k=top_k,
-        hidden_size=hidden_size, ffn_size=ffn_size,
-        scoring_func="sigmoid", renormalize=True,
-        with_correction_bias=with_correction_bias,
-        routed_scaling_factor=routed_scaling_factor,
-        layout="padded", dtype=dtype,
+        dtype=dtype,
     )
 
     out_nopad = op_nopad(hidden, gating, w_gate_up, w_down, correction_bias)
-    out_padded = op_padded(hidden, gating, w_gate_up, w_down, correction_bias)
 
     assert out_nopad.shape == (num_tokens, hidden_size)
     assert out_nopad.dtype == dtype
@@ -274,7 +324,6 @@ def test_fused_moe_kimi(
         ref = ref * routed_scaling_factor
 
     torch.testing.assert_close(out_nopad.float(), ref.float(), rtol=1e-2, atol=1e-2)
-    torch.testing.assert_close(out_padded.float(), ref.float(), rtol=1e-2, atol=1e-2)
 
     print(
         f"PASS [T={num_tokens}, E={num_experts}, K={top_k}, "
@@ -440,7 +489,7 @@ def test_fused_moe_vs_vllm(
         hidden_size=hidden_size, ffn_size=ffn_size,
         scoring_func="sigmoid", renormalize=True, with_correction_bias=True,
         routed_scaling_factor=routed_scaling_factor,
-        layout="nopad", dtype=dtype,
+        dtype=dtype,
     )
     out_tileops = op(hidden, gating, w_gate_up, w_down, correction_bias)
 
@@ -460,6 +509,73 @@ def test_fused_moe_vs_vllm(
 # ---------------------------------------------------------------------------
 # prepare_finalize / experts contract
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.smoke
+def test_fused_moe_fwd_op_identity() -> None:
+    """`FusedMoeFwdOp` (no correction bias) matches the `FusedMoe` reference output."""
+    torch.manual_seed(42)
+    dev = "cuda"
+    T, E, K, H, F_ = 32, 8, 2, 64, 32
+    dtype = torch.bfloat16
+
+    hidden = torch.randn(T, H, dtype=dtype, device=dev)
+    gating = torch.randn(T, E, dtype=dtype, device=dev)
+    w_gate_up = torch.randn(E, F_ * 2, H, dtype=dtype, device=dev) * 0.02
+    w_down = torch.randn(E, H, F_, dtype=dtype, device=dev) * 0.02
+
+    op = FusedMoeFwdOp(
+        num_tokens=T, num_experts=E, top_k=K,
+        hidden_size=H, ffn_size=F_, dtype=dtype,
+    )
+    out = op(hidden, gating, w_gate_up, w_down)
+    assert out.shape == (T, H)
+    assert out.dtype == dtype
+
+    ref_op = FusedMoe(
+        num_tokens=T, num_experts=E, top_k=K,
+        hidden_size=H, ffn_size=F_, dtype=dtype,
+    )
+    ref = ref_op(hidden, gating, w_gate_up, w_down)
+    torch.testing.assert_close(out.float(), ref.float(), rtol=1e-2, atol=1e-2)
+
+    flops, nbytes = op.eval_roofline()
+    assert flops > 0 and nbytes > 0
+
+
+@pytest.mark.smoke
+def test_fused_moe_fwd_cb_op_identity() -> None:
+    """`FusedMoeFwdCbFwdOp` (with correction bias) end-to-end smoke."""
+    torch.manual_seed(7)
+    dev = "cuda"
+    T, E, K, H, F_ = 32, 8, 2, 64, 32
+    dtype = torch.bfloat16
+
+    hidden = torch.randn(T, H, dtype=dtype, device=dev)
+    gating = torch.randn(T, E, dtype=dtype, device=dev)
+    correction_bias = torch.randn(E, dtype=torch.float32, device=dev) * 0.1
+    w_gate_up = torch.randn(E, F_ * 2, H, dtype=dtype, device=dev) * 0.02
+    w_down = torch.randn(E, H, F_, dtype=dtype, device=dev) * 0.02
+
+    op = FusedMoeFwdCbFwdOp(
+        num_tokens=T, num_experts=E, top_k=K,
+        hidden_size=H, ffn_size=F_, renormalize=True, dtype=dtype,
+    )
+    out = op(hidden, gating, correction_bias, w_gate_up, w_down)
+    assert out.shape == (T, H)
+    assert out.dtype == dtype
+
+    ref_op = FusedMoe(
+        num_tokens=T, num_experts=E, top_k=K,
+        hidden_size=H, ffn_size=F_,
+        scoring_func="sigmoid", renormalize=True, with_correction_bias=True,
+        dtype=dtype,
+    )
+    ref = ref_op(hidden, gating, w_gate_up, w_down, correction_bias)
+    torch.testing.assert_close(out.float(), ref.float(), rtol=1e-2, atol=1e-2)
+
+    flops, nbytes = op.eval_roofline()
+    assert flops > 0 and nbytes > 0
 
 
 @pytest.mark.smoke

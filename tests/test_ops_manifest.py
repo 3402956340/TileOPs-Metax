@@ -54,9 +54,14 @@ class TestOpSchema:
             sig = entry["signature"]
             assert "inputs" in sig, f"{op_name}: signature missing 'inputs'"
             assert isinstance(sig["inputs"], dict), f"{op_name}: inputs must be a dict"
-            assert len(sig["inputs"]) >= 1, f"{op_name}: must have at least 1 input"
             assert "outputs" in sig, f"{op_name}: signature missing 'outputs'"
             assert isinstance(sig["outputs"], dict), f"{op_name}: outputs must be a dict"
+            assert len(sig["outputs"]) >= 1, f"{op_name}: must have at least 1 output"
+            params = sig.get("params") or {}
+            assert len(sig["inputs"]) >= 1 or len(params) >= 1, (
+                f"{op_name}: signature must declare at least one input tensor "
+                f"or one param (both are empty)"
+            )
 
     def test_every_roofline_has_valid_mode(self, all_ops):
         for op_name, entry in all_ops.items():
@@ -194,6 +199,9 @@ class TestSourcePaths:
 
     def test_all_source_paths_exist(self, all_ops):
         for op_name, entry in all_ops.items():
+            # Skip spec-only ops — source paths are placeholders until implementation
+            if entry.get("status") == "spec-only":
+                continue
             source = entry["source"]
             for key, rel_path in source.items():
                 if not isinstance(rel_path, str):

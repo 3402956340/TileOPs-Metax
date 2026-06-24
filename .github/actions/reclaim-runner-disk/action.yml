@@ -49,7 +49,7 @@ inputs:
     description: >
       Newline-separated list of cache directory roots whose files older than
       cache-age-days should be trimmed at file granularity. Defaults target
-      the shared /data7-backed runner cache layout.
+      the bind-mounted /ci-cache runner cache layout.
       Do NOT include atomic cache roots here (see atomic-cache-dirs); file-
       level trim on an atomic root can produce a half-dead "directory exists
       but sentinel missing" state that crashes downstream consumers.
@@ -57,7 +57,6 @@ inputs:
     default: |
       /data/cache/ci/triton
       /data/cache/ci/pip
-      /data/cache/ci/wheels
       /data/cache/ci/tilelang/tmp
   atomic-cache-dirs:
     description: >
@@ -195,7 +194,9 @@ runs:
         AVAIL_KB=$(df -Pk "${RUNNER_TEMP}" | awk 'NR==2 {print $4}')
         MIN_KB=$(( MIN_AVAIL_GIB * 1024 * 1024 ))
         RECLAIM_BELOW_KB=$(( RECLAIM_BELOW_GIB * 1024 * 1024 ))
-        CACHE_TRIM_STAMP="/home/ci-runner/.ci-maintenance/reclaim-runner-disk-cache-trim.stamp"
+        # Stamp lives on the persistent bind-mounted cache (not the ephemeral container fs under
+        # /home/ci-runner), so the cache-trim cooldown survives across ephemeral runner jobs.
+        CACHE_TRIM_STAMP="/data/cache/ci/.ci-maintenance/reclaim-runner-disk-cache-trim.stamp"
         DID_RECLAIM="false"
         SHOULD_RECLAIM="false"
 

@@ -13,9 +13,6 @@ FLOPs:
   Routed:  T*K * 6*F*H   (gate+up + down)
   Shared:  T   * 6*Fs*H  (gate+up + down)
   Total  = T*K*6*F*H + T*6*Fs*H
-
-Usage:
-    conda run -n tileops python -m pytest benchmarks/ops/bench_moe_shared_fused_moe.py -vvs
 """
 
 from typing import Optional
@@ -199,7 +196,6 @@ def test_shared_fused_moe_bench(
         renormalize=renormalize,
         with_correction_bias=with_correction_bias,
         routed_scaling_factor=routed_scaling_factor,
-        layout="nopad",
         dtype=dtype,
         shared_ffn_size=shared_ffn_size,
     )

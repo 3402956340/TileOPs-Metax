@@ -1,5 +1,3 @@
-# 2026 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
-
 """
 Gated DeltaNet decode (single-step recurrence).
 
@@ -14,7 +12,7 @@ where alpha = exp(g).
 
 Optimization:
   - T.Pipelined + T.copy: async prefetch state tiles from HBM
-  - T.gemm: fused matvec via [padded_qk; ...] @ S_tile, using tensor cores
+  - fp32 scalar accumulation for the recurrent matvecs
   - Native dtype: bf16/fp16 halve state bandwidth vs fp32
   - K-tiling: small shared memory footprint → high occupancy
 """
@@ -27,12 +25,115 @@ import torch
 
 from tileops.kernels.kernel_base import Kernel
 
-__all__ = ["GatedDeltaNetDecodeFP32Kernel", "GatedDeltaNetDecodeKernel"]
+__all__ = [
+    "GatedDeltaNetDecodeFP32Kernel",
+    "GatedDeltaNetDecodeKernel",
+    "GatedDeltaNetDecodeRawCudaFlaStyleKernel",
+]
 
 _LOG2E = 1.4426950408889634
 _DEFAULT_K_TILE = 16
-# T.gemm requires M divisible by 16; we use rows 0 (k) and 1 (q)
-_GEMM_M = 16
+
+
+@functools.lru_cache(maxsize=32)
+def _gated_deltanet_decode_raw_cuda_flastyle_tl(
+    batch: int,
+    head: int,
+    dim_k: int,
+    dim_v: int,
+    v_tile: int = 16,
+    raw_group_size: int = 2,
+    raw_maxrregcount: int = 146,
+    dtype: str = "bfloat16",
+):
+    if dtype != "bfloat16":
+        raise ValueError("Raw CUDA Gated DeltaNet decode currently supports bfloat16 only.")
+    if dim_k != 128 or dim_v != 128:
+        raise ValueError("Raw CUDA Gated DeltaNet decode currently requires DK=DV=128.")
+    if dim_v % v_tile != 0:
+        raise ValueError(f"dim_v={dim_v} must be divisible by v_tile={v_tile}")
+    if raw_group_size != 2:
+        raise ValueError("raw_group_size must equal 2 for the fixed two-lane reductions.")
+    if raw_group_size * v_tile != 32:
+        raise ValueError("raw_group_size * v_tile must equal one warp")
+    if dim_k % raw_group_size != 0:
+        raise ValueError(f"dim_k={dim_k} must be divisible by raw_group_size={raw_group_size}")
+
+    total_blocks = batch * head * (dim_v // v_tile)
+    k_chunk = dim_k // raw_group_size
+
+    raw_compile_flags = ["-O3", "-DENABLE_BF16", "--use_fast_math"]
+    if raw_maxrregcount > 0:
+        raw_compile_flags.append(f"--maxrregcount={raw_maxrregcount}")
+
+    @tilelang.jit(
+        out_idx=[-2, -1],
+        compile_flags=raw_compile_flags,
+    )
+    def _decode_func(threads=32):
+        @T.prim_func
+        def gated_deltanet_decode_raw_cuda_flastyle(
+            q: T.Tensor([batch, head, dim_k], dtype),
+            k: T.Tensor([batch, head, dim_k], dtype),
+            v: T.Tensor([batch, head, dim_v], dtype),
+            g: T.Tensor([batch, head], dtype),
+            beta: T.Tensor([batch, head], dtype),
+            state: T.Tensor([batch, head, dim_k, dim_v], dtype),
+            o: T.Tensor([batch, head, dim_v], dtype),
+            new_state: T.Tensor([batch, head, dim_k, dim_v], dtype),
+        ):
+            with T.Kernel(total_blocks, threads=threads) as (block,):
+                tx = T.get_thread_binding()
+                vid = block % (dim_v // v_tile)
+                nh = block // (dim_v // v_tile)
+                bid = nh // head
+                hid = nh - bid * head
+                v_lane = tx // raw_group_size
+                k_rank = tx - v_lane * raw_group_size
+                v_idx = vid * v_tile + v_lane
+                k_begin = k_rank * k_chunk
+
+                k_shared = T.alloc_shared([dim_k], "float32")
+                q_shared = T.alloc_shared([dim_k], "float32")
+                h = T.alloc_local([k_chunk], "float32")
+                old_partial = T.alloc_var("float32", init=0.0)
+                out_partial = T.alloc_var("float32", init=0.0)
+                v_new = T.alloc_var("float32", init=0.0)
+
+                for i in T.serial(T.ceildiv(dim_k, 32)):
+                    kk = tx + i * 32
+                    if kk < dim_k:
+                        k_shared[kk] = T.cast(k[bid, hid, kk], "float32")
+                        q_shared[kk] = T.cast(q[bid, hid, kk], "float32")
+                T.sync_threads()
+
+                alpha = T.exp2(T.cast(g[bid, hid], "float32") * _LOG2E)
+                beta_val = T.cast(beta[bid, hid], "float32")
+
+                for ii in T.serial(k_chunk):
+                    kk = k_begin + ii
+                    h_val = alpha * T.cast(state[bid, hid, kk, v_idx], "float32")
+                    h[ii] = h_val
+                    old_partial += h_val * k_shared[kk]
+
+                old_val = old_partial + T.shfl_down(old_partial, 1, width=raw_group_size)
+                if k_rank == 0:
+                    v_new = beta_val * (T.cast(v[bid, hid, v_idx], "float32") - old_val)
+                v_new = T.shfl_sync(v_new, v_lane * raw_group_size, width=raw_group_size)
+
+                for ii in T.serial(k_chunk):
+                    kk = k_begin + ii
+                    h_new = h[ii] + k_shared[kk] * v_new
+                    new_state[bid, hid, kk, v_idx] = T.cast(h_new, dtype)
+                    out_partial += h_new * q_shared[kk]
+
+                out_val = out_partial + T.shfl_down(out_partial, 1, width=raw_group_size)
+                if k_rank == 0:
+                    o[bid, hid, v_idx] = T.cast(out_val, dtype)
+
+        return gated_deltanet_decode_raw_cuda_flastyle
+
+    return _decode_func
 
 
 @functools.lru_cache(maxsize=32)
@@ -68,43 +169,33 @@ def _gated_deltanet_decode_tl(
             new_state: T.Tensor([batch, head, dim_k, dim_v], dtype),
         ):
             with T.Kernel(batch, head, threads=threads) as (bid, hid):
-                # State tile for T.Pipelined + T.copy async prefetch
                 h_tile = T.alloc_shared([k_tile, dim_v], dtype)
-                # Padded [_GEMM_M, k_tile] for T.gemm (rows 0=k, 1=q, rest=0)
-                qk_tile = T.alloc_shared([_GEMM_M, k_tile], dtype)
-                # Gemm accumulator (registers): row 0 = S@k, row 1 = S@q
-                acc = T.alloc_fragment([_GEMM_M, dim_v], accum_dtype)
-                # Shared buffer to extract gemm result from fragment
-                acc_shared = T.alloc_shared([2, dim_v], accum_dtype)
-                # Shared buffer for intermediate results
+                sk_frag = T.alloc_fragment([dim_v], accum_dtype)
+                sq_frag = T.alloc_fragment([dim_v], accum_dtype)
                 v_new = T.alloc_shared([dim_v], accum_dtype)
-                # Local (register) dot product — avoids shared-memory race
                 qk_dot = T.alloc_local([1], accum_dtype)
 
-                # Scalars
                 g_val = T.cast(g[bid, hid], accum_dtype)
                 beta_val = T.cast(beta[bid, hid], accum_dtype)
                 alpha = T.exp2(g_val * _LOG2E)
                 alpha_beta = alpha * beta_val
 
-                # === Pass 1: Tiled pipelined gemm for fused matvec ===
-                T.clear(acc)
-                for kt in T.Pipelined(dim_k // k_tile, num_stages=num_stages):
-                    T.copy(state[bid, hid, kt * k_tile, 0], h_tile)
-                    # Zero-init padding rows of qk_tile (rows 2..15)
-                    for i, j in T.Parallel(_GEMM_M, k_tile):
-                        if i >= 2:
-                            qk_tile[i, j] = T.cast(T.float32(0.0), dtype)
-                    for i in T.Parallel(k_tile):
-                        qk_tile[0, i] = k[bid, hid, kt * k_tile + i]
-                        qk_tile[1, i] = q[bid, hid, kt * k_tile + i]
-                    T.gemm(qk_tile, h_tile, acc, policy=T.GemmWarpPolicy.FullRow)
+                # Full-fp32 matvecs.  TileLang 0.1.9 cannot reliably lower
+                # the old tensor-core fragment copy here for fp16/bf16.
+                # TODO: restore a tensor-core fast path once fragment copies
+                # lower reliably without sacrificing recurrent decode numerics.
+                T.fill(sk_frag, 0.0)
+                T.fill(sq_frag, 0.0)
+                for kk in T.Serial(dim_k):
+                    k_val = T.cast(k[bid, hid, kk], accum_dtype)
+                    q_val = T.cast(q[bid, hid, kk], accum_dtype)
+                    for j in T.Parallel(dim_v):
+                        h_val = T.cast(state[bid, hid, kk, j], accum_dtype)
+                        sk_frag[j] = sk_frag[j] + k_val * h_val
+                        sq_frag[j] = sq_frag[j] + q_val * h_val
 
-                # Copy gemm result from fragment to shared (rows 0-1 only)
-                T.copy(acc[:2, :], acc_shared)
-
-                # q . k dot product (must be AFTER T.gemm to avoid
-                # corrupting fragment state)
+                # q . k is a scalar reduction, so keep it separate from the
+                # matvec loop whose inner work is parallelized over dim_v.
                 qk_dot[0] = T.float32(0.0)
                 for kk in T.Serial(dim_k):
                     qk_dot[0] += (
@@ -116,13 +207,13 @@ def _gated_deltanet_decode_tl(
                 for j in T.Parallel(dim_v):
                     v_new[j] = (
                         beta_val * T.cast(v[bid, hid, j], accum_dtype)
-                        - alpha_beta * acc_shared[0, j]
+                        - alpha_beta * sk_frag[j]
                     )
 
                 # o = alpha * (S @ q) + (q . k) * v_new
                 for j in T.Parallel(dim_v):
                     o[bid, hid, j] = T.cast(
-                        alpha * acc_shared[1, j] + qk_dot[0] * v_new[j], dtype
+                        alpha * sq_frag[j] + qk_dot[0] * v_new[j], dtype
                     )
 
                 # === Pass 2: State update with async prefetch ===
@@ -204,8 +295,10 @@ def _gated_deltanet_decode_wrapped_kernel_fake(
 class GatedDeltaNetDecodeKernel(Kernel):
     """Gated DeltaNet single-step decode kernel.
 
-    Uses T.Pipelined + T.copy for async state prefetch and T.gemm for
-    the fused matvec. Supports float32, float16, and bfloat16.
+    Uses T.Pipelined + T.copy for async state prefetch and full-fp32
+    scalar accumulation for the recurrent matvecs.  The scalar path avoids
+    TileLang 0.1.9 fragment-copy lowering failures on fp16/bf16 and keeps
+    decode numerics aligned with the fp32 reference.
     """
 
     supported_archs: list[int] = [80, 89, 90]
@@ -288,6 +381,84 @@ class GatedDeltaNetDecodeKernel(Kernel):
             "num_stages": 2,
             "threads": 128,
             "k_tile": _DEFAULT_K_TILE,
+        }
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        state: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self._kernel_fn(q, k, v, g, beta, state)
+
+
+class GatedDeltaNetDecodeRawCudaFlaStyleKernel(Kernel):
+    """Hopper bfloat16 decode kernel for the DK=DV=128 Gated DeltaNet case.
+
+    This path maps one warp to one (batch, head, V tile).  Two lanes cooperate
+    on one output value when v_tile=16: each lane owns half of the K dimension,
+    K/Q are staged in shared memory once per CTA, and the per-lane state slice
+    stays live in fp32 registers.  The implementation is intentionally narrow:
+    it is used only for bfloat16 DK=DV=128 decode on sm90 devices.
+
+    Unlike the sibling decode kernels, this Hopper-specialized path enables
+    --use_fast_math as an explicit speed/precision trade-off for the narrow
+    single-step decode workload.
+    """
+
+    supported_archs: list[int] = [90]
+
+    def __init__(
+        self,
+        batch: int,
+        head: int,
+        dim_k: int,
+        dim_v: int,
+        dtype: str = "bfloat16",
+        config: Optional[dict] = None,
+        tune: bool = False,
+    ):
+        super().__init__()
+        if tune:
+            raise NotImplementedError("Raw CUDA Gated DeltaNet decode does not autotune.")
+        self.batch = batch
+        self.head = head
+        self.dim_k = dim_k
+        self.dim_v = dim_v
+        self.dtype = dtype
+        self.init_config(config, tune=False)
+        if self.config["raw_group_size"] != 2:
+            raise ValueError(
+                "raw_group_size must equal 2 because this kernel uses fixed "
+                "two-lane shuffle reductions."
+            )
+        required_threads = self.config["raw_group_size"] * self.config["v_tile"]
+        if self.config["threads"] != required_threads:
+            raise ValueError(
+                f"threads ({self.config['threads']}) must equal raw_group_size * v_tile "
+                f"({required_threads}) for the warp-lane mapping used by this kernel."
+            )
+        self._kernel_fn = _gated_deltanet_decode_raw_cuda_flastyle_tl(
+            batch,
+            head,
+            dim_k,
+            dim_v,
+            self.config["v_tile"],
+            self.config["raw_group_size"],
+            self.config["raw_maxrregcount"],
+            self.dtype_str,
+        )(self.config["threads"])
+
+    @property
+    def default_config(self) -> dict:
+        return {
+            "threads": 32,
+            "v_tile": 16,
+            "raw_group_size": 2,
+            "raw_maxrregcount": 146,
         }
 
     def forward(

@@ -9,8 +9,9 @@ An implementation PR may edit the aligned op's manifest entry only at:
 
 - `status` (any direction).
 - `source.kernel_map` entries.
+- `source.test` and `source.bench` path values. Discoverability pointers, not contractual fields — may be retargeted at the per-op test/bench file authored by the same PR.
 - `workloads` — **only** when the same PR flips `status: spec-only → implemented` on that op (promotion forces non-empty workloads to satisfy `test_every_op_has_at_least_two_workloads`).
 
-Every other field — `signature`, `roofline.*`, `params`, output-dtype, shape rules, and any other `workloads` edit — needs a separate manifest-only PR with human review.
+Every other field — `family`, `ref_api`, `signature`, `roofline.*`, `params`, `output-dtype`, `shape_rules`, `source.kernel`, `source.op`, `source.bench_manifest_driven`, and any other `workloads` edit — needs a separate manifest-only PR with human review.
 
 The carve-out narrows the prohibition; it does not relax the trust boundary.

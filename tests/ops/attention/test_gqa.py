@@ -199,12 +199,12 @@ def _apply_neox_rope_position_ids(
 class GroupedQueryAttentionFwdFixture(FixtureBase):
     PARAMS = [
         ("batch, seq_len, heads, heads_kv, dim, causal, dtype, tune", [
-            pytest.param(1, 1024, 8, 4, 64, False, torch.float16, False, marks=[pytest.mark.smoke, pytest.mark.skip(reason="No available kernel")]),
-            pytest.param(1, 1024, 8, 4, 64, False, torch.bfloat16, False, marks=[pytest.mark.smoke, pytest.mark.skip(reason="No available kernel")]),
-            pytest.param(4, 512, 64, 4, 128, False, torch.float16, False, marks=[pytest.mark.smoke, pytest.mark.skip(reason="No available kernel")]),
-            pytest.param(4, 512, 64, 4, 128, True, torch.float16, False, marks=[pytest.mark.smoke, pytest.mark.skip(reason="No available kernel")]),
-            pytest.param(4, 2048, 64, 4, 128, False, torch.float16, False, marks=[pytest.mark.full, pytest.mark.skip(reason="No available kernel")]),
-            pytest.param(4, 2048, 64, 4, 128, False, torch.bfloat16, False, marks=[pytest.mark.full, pytest.mark.skip(reason="No available kernel")]),
+            pytest.param(1, 1024, 8, 4, 64, False, torch.float16, False, marks=pytest.mark.smoke),
+            pytest.param(1, 1024, 8, 4, 64, False, torch.bfloat16, False, marks=pytest.mark.smoke),
+            pytest.param(4, 512, 64, 4, 128, False, torch.float16, False, marks=pytest.mark.smoke),
+            pytest.param(4, 512, 64, 4, 128, True, torch.float16, False, marks=pytest.mark.smoke),
+            pytest.param(4, 2048, 64, 4, 128, False, torch.float16, False, marks=pytest.mark.full),
+            pytest.param(4, 2048, 64, 4, 128, False, torch.bfloat16, False, marks=pytest.mark.full),
         ]),
     ]
 
@@ -816,7 +816,6 @@ def test_gqa_prefill_with_kv_cache_rejects_bad_contract_inputs() -> None:
 @GroupedQueryAttentionBwdFixture
 def test_gqa_bwd(batch: int, seq_len: int, heads: int, heads_kv: int, dim: int, causal: bool,
                  dtype: torch.dtype, tune: bool) -> None:
-    pytest.skip("GQA backward fails under tilelang 0.1.9 due to autodiff lowering regression; re-enable when backward produces numerically correct grads.")
     test = GroupedQueryAttentionBwdTest(batch, heads, heads_kv, seq_len, dim, causal, dtype)
     op = GroupedQueryAttentionBwdOp(batch, heads, heads_kv, seq_len, dim, causal, dtype, tune=tune)
     test.check(op, *test.gen_inputs(), atol=5e-3, rtol=1e-5)

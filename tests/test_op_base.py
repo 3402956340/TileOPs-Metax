@@ -123,3 +123,28 @@ class TestCacheKeyWarning:
 
         user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
         assert len(user_warnings) == 2
+
+
+class TestCompositeKernelMapOverride:
+    """Composite ops (empty ``default_kernel_map``) accept a non-empty override and store it verbatim."""
+
+    def test_empty_default_with_empty_override_yields_empty_map(self):
+        Cls = _make_op_subclass()
+        op = Cls()
+        op.dispatch_kernel(None)
+        assert op.kernel_map == {}
+
+    def test_empty_default_with_non_empty_override_stores_override(self):
+        Cls = _make_op_subclass()
+        op = Cls()
+        override = {"permute_nopad_kernel": object(), "unpermute_kernel": object()}
+        op.dispatch_kernel(override)
+        assert op.kernel_map == override
+
+    def test_empty_default_override_is_copied_not_aliased(self):
+        Cls = _make_op_subclass()
+        op = Cls()
+        override = {"permute_nopad_kernel": object()}
+        op.dispatch_kernel(override)
+        override["extra"] = object()
+        assert "extra" not in op.kernel_map
