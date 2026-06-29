@@ -307,7 +307,15 @@ class DeltaNetFwdKernel(Kernel):
         ]
         print(f"Autotuning fused_prepare_compute_w_u ({len(fused_configs)} configs)...")
         fused_jit = fused_prepare_compute_w_u_tl(B, H, S, BC, DK, DV, dt)
-        tuned_fused = tl_autotune(configs=fused_configs, warmup=warmup, rep=rep)(fused_jit)()
+        _fused_at = dict(configs=fused_configs, warmup=warmup, rep=rep)
+        _fused_dns = list(self._autotune_initial_kwargs(fused_jit, fused_configs[0]).keys())
+        if _fused_dns:
+            _fused_at["do_not_specialize"] = _fused_dns
+        tuned_fused = self._call_autotuned_kernel(
+            tl_autotune(**_fused_at)(fused_jit),
+            fused_jit,
+            fused_configs[0],
+        )
         fused_best = tuned_fused.config
         print(f"  Best: {fused_best}")
 
@@ -323,7 +331,15 @@ class DeltaNetFwdKernel(Kernel):
             label = f"block_v={bv}" if bv else "block_v=0 (no tile)"
             print(f"Autotuning h_recurrence {label} ({len(h_configs)} configs)...")
             h_jit = _h_recurrence_tl(B, H, S, BC, DK, DV, dt, block_v=bv)
-            tuned_h = tl_autotune(configs=h_configs, warmup=warmup, rep=rep)(h_jit)()
+            _h_at = dict(configs=h_configs, warmup=warmup, rep=rep)
+            _h_dns = list(self._autotune_initial_kwargs(h_jit, h_configs[0]).keys())
+            if _h_dns:
+                _h_at["do_not_specialize"] = _h_dns
+            tuned_h = self._call_autotuned_kernel(
+                tl_autotune(**_h_at)(h_jit),
+                h_jit,
+                h_configs[0],
+            )
             if tuned_h.config is not None:
                 lat = _do_bench(tuned_h, warmup=warmup, rep=rep)
                 print(f"  Best: {tuned_h.config}, latency={lat:.4f} ms")
@@ -337,7 +353,15 @@ class DeltaNetFwdKernel(Kernel):
         o_configs = [{"threads": t} for t in [64, 128, 256]]
         print(f"Autotuning output_o ({len(o_configs)} configs)...")
         o_jit = _output_o_tl(B, H, S, BC, DK, DV, dt)
-        tuned_o = tl_autotune(configs=o_configs, warmup=warmup, rep=rep)(o_jit)()
+        _o_at = dict(configs=o_configs, warmup=warmup, rep=rep)
+        _o_dns = list(self._autotune_initial_kwargs(o_jit, o_configs[0]).keys())
+        if _o_dns:
+            _o_at["do_not_specialize"] = _o_dns
+        tuned_o = self._call_autotuned_kernel(
+            tl_autotune(**_o_at)(o_jit),
+            o_jit,
+            o_configs[0],
+        )
         o_best = tuned_o.config
         print(f"  Best: {o_best}")
 

@@ -7,11 +7,14 @@ from typing import Optional
 import tilelang
 import torch
 from tilelang import language as T
-from tilelang.autotuner import autotune
 
 from tileops.kernels.kernel_base import Kernel
 
 __all__ = ["FP8LightingIndexerKernel"]
+
+# block_Q == 1 deadlocks the software pipeline (some warps never reach the
+# pipeline barrier); such tiles must run unpipelined. block_Q >= 2 is safe.
+_MIN_PIPELINED_BLOCK_Q = 2
 
 
 @functools.lru_cache(maxsize=32)
@@ -34,7 +37,10 @@ def _fp8_lighting_indexer_kernel(batch,
         block_Q=None,
     ):
         if block_Q is None:
-            block_Q = 128 // heads
+            block_Q = max(1, 128 // heads)
+        # Guards every entry point, incl. the default block_Q == 1 for heads >= 65.
+        if block_Q < _MIN_PIPELINED_BLOCK_Q:
+            num_stages = 0
         dtype = T.float8_e4m3fn
         accum_dtype = T.float32
         index_dtype = T.int32
@@ -66,7 +72,7 @@ def _fp8_lighting_indexer_kernel(batch,
                 index_k_scale_fragment = T.alloc_fragment([block_N, kv_group], accum_dtype)
                 s = T.alloc_fragment([block_N, block_Q * heads], accum_dtype)  #
                 s_reshaped = T.reshape(s, (block_N, block_Q, heads_per_group, kv_group))
-                s_tmp = T.alloc_fragment([block_N, heads_per_group], accum_dtype)
+                s_tmp = T.alloc_fragment([block_N, block_Q * heads_per_group], accum_dtype)
                 logits = T.alloc_fragment([block_N, block_Q, kv_group], accum_dtype)
                 weights = T.alloc_fragment([block_Q, heads], accum_dtype)
 
@@ -107,8 +113,9 @@ def _fp8_lighting_indexer_kernel(batch,
                             clear_accum=True,
                             policy=T.GemmWarpPolicy.FullCol,
                         )
-                        for bn_i, h_i in T.Parallel(block_N, heads_per_group):
-                            s[bn_i, g * heads_per_group + h_i] = s_tmp[bn_i, h_i]
+                        for bn_i, bq_i, h_i in T.Parallel(block_N, block_Q, heads_per_group):
+                            s_reshaped[bn_i, bq_i, h_i, g] = (
+                                s_tmp[bn_i, bq_i * heads_per_group + h_i])
 
                     for bn_i, bq_i, h_i, g in T.Parallel(block_N, block_Q, heads_per_group,
                                                          kv_group):
@@ -234,14 +241,15 @@ class FP8LightingIndexerKernel(Kernel):
 
     @property
     def default_config(self) -> dict:
-        return {"block_N": 64, "num_stages": 2, "threads": 128, "block_Q": 1}
+        return {"block_N": 64, "num_stages": 2, "threads": 128, "block_Q": 4}
 
     @property
     def autotune_configs(self) -> list[dict]:
         block_N = [32, 64, 128]
         num_stages = [0, 1, 2]
         threads = [128, 256]
-        block_Q = [1, 2, 4]
+        # Omit block_Q == 1: unsafe to pipeline (above) and never wins.
+        block_Q = [bq for bq in (1, 2, 4) if bq >= _MIN_PIPELINED_BLOCK_Q]
         _configs = list(itertools.product(block_N, num_stages, threads, block_Q))
 
         configs = [{
@@ -271,45 +279,39 @@ class FP8LightingIndexerKernel(Kernel):
             Weights, CuSeqLenKS, CuSeqLenKE)
 
     def supply_prog(
-        self,
-        q: torch.Tensor,
-        kv: torch.Tensor,
-        dtype=torch.float8_e4m3fn,
-        accum_dtype=torch.float32,
-        index_dtype=torch.int32,
-        params=None
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        self.q = q
-        self.kv = kv
-        batch, seq_len, heads, index_dim = q.shape
-        seq_len_kv = kv.shape[1]
+        self, *args, **kwargs
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+               torch.Tensor]:
+        # TileLang invokes supply_prog with the candidate JIT params during autotuning;
+        # ignore them and build benchmark inputs from the kernel's shape attributes.
+        batch, seq_len, heads, index_dim = self.batch, self.seq_len, self.heads, self.index_dim
+        seq_len_kv = self.seq_len_kv
+        accum_dtype = torch.float32
+        index_dtype = torch.int32
+        fp8_dtype = torch.float8_e4m3fn  # IndexQ/IndexK are fp8 in the kernel signature
+        # torch.randn does not support fp8 dtypes, so generate in fp16 then cast.
         IndexQ = torch.randn(
-            batch, seq_len * heads, index_dim, device='cuda', dtype=torch.float8_e4m3fn)
+            batch, seq_len * heads, index_dim, device='cuda', dtype=torch.float16).to(fp8_dtype)
         IndexK = torch.randn(
-            batch, seq_len_kv, self.kv_group, index_dim, device='cuda', dtype=self.dtype)
+            batch, seq_len_kv, self.kv_group, index_dim, device='cuda', dtype=torch.float16).to(
+                fp8_dtype)
         IndexKScale = torch.randn(batch, seq_len_kv, self.kv_group, device='cuda', dtype=accum_dtype)
+        Logits = torch.empty(
+            batch, seq_len, seq_len_kv, self.kv_group, device='cuda', dtype=accum_dtype)
         Weights = torch.randn(seq_len, heads, device='cuda', dtype=accum_dtype)
         CuSeqLenKS = torch.zeros(seq_len, device='cuda', dtype=index_dtype)
         CuSeqLenKE = torch.full((seq_len,),
-                                fill_value=seq_len_kv - 1,
+                                fill_value=seq_len_kv,
                                 device='cuda',
                                 dtype=index_dtype)
 
-        return IndexQ, IndexK, IndexKScale, Weights, CuSeqLenKS, CuSeqLenKE
+        return IndexQ, IndexK, IndexKScale, Logits, Weights, CuSeqLenKS, CuSeqLenKE
 
-    def autotune(self, warmup=10, rep=10):  # Removed supply_prog parameter
-        if self.autotune_configs is None:
-            return  # kernel doesn't support autotuning
-        print(f'Start autotuning {self.__class__.__name__}...')
+    @property
+    def autotune_supply_prog(self):
+        # The kernel has scalar (int32) params; the default tensor-only input
+        # generation cannot build them, so supply benchmark inputs explicitly.
+        return self.supply_prog
 
-        # Apply autotune decorator to the kernel function
-        autotuned_kernel_fn = autotune(
-            configs=self.autotune_configs, warmup=warmup, rep=rep, supply_prog=self.supply_prog)(
-                self.kernel)
-
-        # Call without config parameters to trigger autotuning, returns the tuned kernel
-        tuned_kernel = autotuned_kernel_fn()
-
-        # Extract and store the best config
-        self.config = tuned_kernel.config
-        print(f'Best config: {self.config}')
+    def autotune(self, warmup=10, rep=10):
+        super().autotune(warmup=warmup, rep=rep)
