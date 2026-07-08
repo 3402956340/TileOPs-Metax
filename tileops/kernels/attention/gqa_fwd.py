@@ -2430,7 +2430,7 @@ def _(batch: int, heads: int, heads_kv: int, total_q: int, physical_tokens: int,
 
 
 class GQAPrefillPagedWithFP8KVCacheFwdKernel(Kernel):
-    supported_archs: list[int] = [89, 90]
+    supported_archs: list[int] = [80, 89, 90]
 
     def __init__(self,
                  batch: int,
