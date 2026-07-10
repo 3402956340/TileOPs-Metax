@@ -357,29 +357,6 @@ jobs:
     # per-test --timeout below is the first line of defense, this is the ceiling.
     timeout-minutes: 90
     steps:
-      - name: Install dependencies for runner (MetaX)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git ccache
-          export USE_MACA=ON
-          export CCACHE_DIR=/data/cache/ccache
-          export PYTHONPATH=/data/cache/ci/site-packages
-          export TILELANG_CACHE_DIR=/data/cache/ci/tilelang
-          export TILELANG_TMP_DIR=/data/cache/ci/tilelang/tmp
-          export TRITON_CACHE_DIR=/data/cache/ci/triton
-          export PIP_CACHE_DIR=/data/cache/ci/pip
-          export PIP_NO_CACHE_DIR=0
-          export PATH="/opt/conda/bin${PATH:+:$PATH}"
-          echo "USE_MACA=ON" | tee -a "${GITHUB_ENV}"
-          echo "CCACHE_DIR=/data/cache/ccache" | tee -a "${GITHUB_ENV}"
-          echo "PYTHONPATH=/data/cache/ci/site-packages" | tee -a "${GITHUB_ENV}"
-          echo "TILELANG_CACHE_DIR=/data/cache/ci/tilelang" | tee -a "${GITHUB_ENV}"
-          echo "TILELANG_TMP_DIR=/data/cache/ci/tilelang/tmp" | tee -a "${GITHUB_ENV}"
-          echo "TRITON_CACHE_DIR=/data/cache/ci/triton" | tee -a "${GITHUB_ENV}"
-          echo "PIP_CACHE_DIR=/data/cache/ci/pip" | tee -a "${GITHUB_ENV}"
-          echo "PIP_NO_CACHE_DIR=0" | tee -a "${GITHUB_ENV}"
-          echo "PATH=${PATH}" | tee -a "${GITHUB_ENV}"
-
       - name: Checkout code for fork PR
         if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         uses: actions/checkout@v4
@@ -423,7 +400,6 @@ jobs:
           fetch-depth: 1
           sparse-checkout: |
             .github/actions
-          submodules: recursive
 
       - name: Reclaim runner disk
         uses: ./.trusted/.github/actions/reclaim-runner-disk
@@ -433,12 +409,12 @@ jobs:
           # Run-local venv retired: no tileops_ci_venv_* dirs to prune in the tool cache.
           prune-tool-cache: "false"
           cache-dirs: |
-            /data/cache/ci/triton
-            /data/cache/ci/pip
-            /data/cache/ci/tilelang/tmp
+            /ci-cache/triton
+            /ci-cache/pip
+            /ci-cache/tilelang/tmp
           atomic-cache-dirs: |
-            /data/cache/ci/tilelang/autotuner
-          df-paths: "/data /data/cache/ci"
+            /ci-cache/tilelang/autotuner
+          df-paths: "/ci-cache"
           # Daily runner-maintenance.yml owns the destructive autotuner
           # age-trim; per-PR runs only need sentinel-repair (still
           # unconditional) so they don't evict tuning artefacts the next
@@ -488,6 +464,10 @@ jobs:
             sleep "$SLEEP_SECONDS"
             attempt=$((attempt + 1))
           done
+
+      - name: Install tilelang-metax
+        if: ${{ github.repository == 'MetaX-MACA/TileOPs-Metax' }}
+        run: bash scripts/ci/install_tilelang.sh
 
       - name: Install TileOPs (image-baked stack, --no-deps)
         # tilelang + the full runtime/dev stack are baked into the runner image; this installs
