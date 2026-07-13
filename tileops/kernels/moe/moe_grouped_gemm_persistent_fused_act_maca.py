@@ -95,142 +95,142 @@ def _build_persistent_fused_act_maca(
     if k_aligned:
         k_loop_extent = K // block_k
 
-    @T.prim_func
-    def _gemm_main_fused(
-        A: T.Tensor(A_shape, dtype),
-        B: T.Tensor((num_experts, 2 * ffn, K), dtype),
-        true_sizes: T.Tensor((num_experts,), "int32"),
-        true_offsets: T.Tensor((num_experts,), "int32"),
-        C: T.Tensor((numel, ffn), dtype),
-        tile_counter: T.Tensor((1,), "int32"),
-    ):
-        with T.Kernel(sm_count, threads=threads) as (pid,):
-            A_shared = T.alloc_shared((block_m, block_k), dtype)
-            B_gate_shared = T.alloc_shared((block_n, block_k), dtype)
-            B_up_shared = T.alloc_shared((block_n, block_k), dtype)
-            C_gate_local = T.alloc_fragment((block_m, block_n), accum_dtype)
-            C_up_local = T.alloc_fragment((block_m, block_n), accum_dtype)
-            s_cum = T.alloc_shared((num_experts + 1,), "int32")
-            s_total = T.alloc_shared((1,), "int32")
-            s_tile = T.alloc_shared((1,), "int32")
-            s_expert = T.alloc_shared((1,), "int32")
-            lo = T.alloc_local((1,), "int32")
-            hi = T.alloc_local((1,), "int32")
+        @T.prim_func
+        def _gemm_main_fused(
+            A: T.Tensor(A_shape, dtype),
+            B: T.Tensor((num_experts, 2 * ffn, K), dtype),
+            true_sizes: T.Tensor((num_experts,), "int32"),
+            true_offsets: T.Tensor((num_experts,), "int32"),
+            C: T.Tensor((numel, ffn), dtype),
+            tile_counter: T.Tensor((1,), "int32"),
+        ):
+            with T.Kernel(sm_count, threads=threads) as (pid,):
+                A_shared = T.alloc_shared((block_m, block_k), dtype)
+                B_gate_shared = T.alloc_shared((block_n, block_k), dtype)
+                B_up_shared = T.alloc_shared((block_n, block_k), dtype)
+                C_gate_local = T.alloc_fragment((block_m, block_n), accum_dtype)
+                C_up_local = T.alloc_fragment((block_m, block_n), accum_dtype)
+                s_cum = T.alloc_shared((num_experts + 1,), "int32")
+                s_total = T.alloc_shared((1,), "int32")
+                s_tile = T.alloc_shared((1,), "int32")
+                s_expert = T.alloc_shared((1,), "int32")
+                lo = T.alloc_local((1,), "int32")
+                hi = T.alloc_local((1,), "int32")
 
-            T.annotate_layout({
-                A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                B_gate_shared: tilelang.layout.make_swizzled_layout(B_gate_shared),
-                B_up_shared: tilelang.layout.make_swizzled_layout(B_up_shared),
-            })
+                T.annotate_layout({
+                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+                    B_gate_shared: tilelang.layout.make_swizzled_layout(B_gate_shared),
+                    B_up_shared: tilelang.layout.make_swizzled_layout(B_up_shared),
+                })
 
-            tx = T.get_thread_binding()
+                tx = T.get_thread_binding()
 
-            if tx == 0:
-                s_cum[0] = T.int32(0)
-                for e in T.serial(num_experts):
-                    s_cum[e + 1] = s_cum[e] + (true_sizes[e] + (block_m - 1)) // block_m
-                s_total[0] = s_cum[num_experts] * T.int32(num_pid_n)
-            T.sync_threads()
-
-            for _iter in T.serial(max_iters):
                 if tx == 0:
-                    s_tile[0] = T.atomic_add(tile_counter[0], 1, return_prev=True)
+                    s_cum[0] = T.int32(0)
+                    for e in T.serial(num_experts):
+                        s_cum[e + 1] = s_cum[e] + (true_sizes[e] + (block_m - 1)) // block_m
+                    s_total[0] = s_cum[num_experts] * T.int32(num_pid_n)
                 T.sync_threads()
 
-                flat_id = s_tile[0]
-                total = s_total[0]
-
-                if flat_id < total:
-                    if group_size_m == 1:
-                        m_tile = flat_id // T.int32(num_pid_n)
-                        n_tile = flat_id % T.int32(num_pid_n)
-                    else:
-                        num_pid_in_group = group_size_m * num_pid_n
-                        m_tiles_total = s_cum[num_experts]
-                        pid_in_group = flat_id % T.int32(num_pid_in_group)
-                        group_id = flat_id // T.int32(num_pid_in_group)
-                        first_pid_m = group_id * T.int32(group_size_m)
-                        actual_gsm = T.min(m_tiles_total - first_pid_m,
-                                           T.int32(group_size_m))
-                        m_tile = first_pid_m + pid_in_group % actual_gsm
-                        n_tile = pid_in_group // actual_gsm
-
-                    lo[0] = T.int32(0)
-                    hi[0] = T.int32(num_experts - 1)
-                    for _bs in T.serial(log2_up):
-                        mid = (lo[0] + hi[0]) >> T.int32(1)
-                        if s_cum[mid + 1] <= m_tile:
-                            lo[0] = mid + T.int32(1)
-                        else:
-                            hi[0] = mid
+                for _iter in T.serial(max_iters):
                     if tx == 0:
-                        s_expert[0] = lo[0]
+                        s_tile[0] = T.atomic_add(tile_counter[0], 1, return_prev=True)
                     T.sync_threads()
-                    expert_id = s_expert[0]
-                    row_in_expert = (m_tile - s_cum[expert_id]) * T.int32(block_m)
-                    m_start = true_offsets[expert_id] + row_in_expert
-                    n_start = n_tile * T.int32(block_n)
-                    actual_rows = T.min(T.int32(block_m),
-                                        true_sizes[expert_id] - row_in_expert)
-                    actual_cols = T.min(T.int32(block_n),
-                                        T.int32(ffn) - n_start)
 
-                    T.clear(C_gate_local)
-                    T.clear(C_up_local)
+                    flat_id = s_tile[0]
+                    total = s_total[0]
 
-                    for k in T.Pipelined(k_loop_extent, num_stages=num_stages):
-                        k_start = k * block_k
-                        if actual_rows == T.int32(block_m) and actual_cols == T.int32(block_n):
-                            T.copy(
-                                A[m_start:m_start + block_m, k_start:k_start + block_k],
-                                A_shared,
-                                disable_tma=True,
-                            )
-                            T.copy(
-                                B[expert_id, n_start:n_start + block_n,
-                                  k_start:k_start + block_k],
-                                B_gate_shared,
-                                disable_tma=True,
-                            )
-                            T.copy(
-                                B[expert_id, ffn + n_start:ffn + n_start + block_n,
-                                  k_start:k_start + block_k],
-                                B_up_shared,
-                                disable_tma=True,
-                            )
+                    if flat_id < total:
+                        if group_size_m == 1:
+                            m_tile = flat_id // T.int32(num_pid_n)
+                            n_tile = flat_id % T.int32(num_pid_n)
                         else:
-                            for i, j in T.Parallel(block_m, block_k):
-                                A_shared[i, j] = T.if_then_else(
-                                    i < actual_rows and j < K - k * block_k,
-                                    A[m_start + i, k * block_k + j], 0)
-                            for i, j in T.Parallel(block_n, block_k):
-                                B_gate_shared[i, j] = T.if_then_else(
-                                    j < K - k * block_k and i < actual_cols,
-                                    B[expert_id, n_start + i, k * block_k + j], 0)
-                                B_up_shared[i, j] = T.if_then_else(
-                                    j < K - k * block_k and i < actual_cols,
-                                    B[expert_id, ffn + n_start + i, k * block_k + j], 0)
-                        T.gemm(
-                            A_shared,
-                            B_gate_shared,
-                            C_gate_local,
-                            transpose_B=True,
-                            policy=T.GemmWarpPolicy.FullRow,
-                        )
-                        T.gemm(
-                            A_shared,
-                            B_up_shared,
-                            C_up_local,
-                            transpose_B=True,
-                            policy=T.GemmWarpPolicy.FullRow,
-                        )
+                            num_pid_in_group = group_size_m * num_pid_n
+                            m_tiles_total = s_cum[num_experts]
+                            pid_in_group = flat_id % T.int32(num_pid_in_group)
+                            group_id = flat_id // T.int32(num_pid_in_group)
+                            first_pid_m = group_id * T.int32(group_size_m)
+                            actual_gsm = T.min(m_tiles_total - first_pid_m,
+                                               T.int32(group_size_m))
+                            m_tile = first_pid_m + pid_in_group % actual_gsm
+                            n_tile = pid_in_group // actual_gsm
 
-                    for i, j in T.Parallel(block_m, block_n):
-                        if i < actual_rows and j < actual_cols:
-                            C[m_start + i, n_start + j] = T.Cast(
-                                dtype,
-                                act(C_gate_local[i, j]) * C_up_local[i, j],
+                        lo[0] = T.int32(0)
+                        hi[0] = T.int32(num_experts - 1)
+                        for _bs in T.serial(log2_up):
+                            mid = (lo[0] + hi[0]) >> T.int32(1)
+                            if s_cum[mid + 1] <= m_tile:
+                                lo[0] = mid + T.int32(1)
+                            else:
+                                hi[0] = mid
+                        if tx == 0:
+                            s_expert[0] = lo[0]
+                        T.sync_threads()
+                        expert_id = s_expert[0]
+                        row_in_expert = (m_tile - s_cum[expert_id]) * T.int32(block_m)
+                        m_start = true_offsets[expert_id] + row_in_expert
+                        n_start = n_tile * T.int32(block_n)
+                        actual_rows = T.min(T.int32(block_m),
+                                            true_sizes[expert_id] - row_in_expert)
+                        actual_cols = T.min(T.int32(block_n),
+                                            T.int32(ffn) - n_start)
+
+                        T.clear(C_gate_local)
+                        T.clear(C_up_local)
+
+                        for k in T.Pipelined(k_loop_extent, num_stages=num_stages):
+                            k_start = k * block_k
+                            if actual_rows == T.int32(block_m) and actual_cols == T.int32(block_n):
+                                T.copy(
+                                    A[m_start:m_start + block_m, k_start:k_start + block_k],
+                                    A_shared,
+                                    disable_tma=True,
+                                )
+                                T.copy(
+                                    B[expert_id, n_start:n_start + block_n,
+                                      k_start:k_start + block_k],
+                                    B_gate_shared,
+                                    disable_tma=True,
+                                )
+                                T.copy(
+                                    B[expert_id, ffn + n_start:ffn + n_start + block_n,
+                                      k_start:k_start + block_k],
+                                    B_up_shared,
+                                    disable_tma=True,
+                                )
+                            else:
+                                for i, j in T.Parallel(block_m, block_k):
+                                    A_shared[i, j] = T.if_then_else(
+                                        i < actual_rows and j < K - k * block_k,
+                                        A[m_start + i, k * block_k + j], 0)
+                                for i, j in T.Parallel(block_n, block_k):
+                                    B_gate_shared[i, j] = T.if_then_else(
+                                        j < K - k * block_k and i < actual_cols,
+                                        B[expert_id, n_start + i, k * block_k + j], 0)
+                                    B_up_shared[i, j] = T.if_then_else(
+                                        j < K - k * block_k and i < actual_cols,
+                                        B[expert_id, ffn + n_start + i, k * block_k + j], 0)
+                            T.gemm(
+                                A_shared,
+                                B_gate_shared,
+                                C_gate_local,
+                                transpose_B=True,
+                                policy=T.GemmWarpPolicy.FullRow,
                             )
+                            T.gemm(
+                                A_shared,
+                                B_up_shared,
+                                C_up_local,
+                                transpose_B=True,
+                                policy=T.GemmWarpPolicy.FullRow,
+                            )
+
+                        for i, j in T.Parallel(block_m, block_n):
+                            if i < actual_rows and j < actual_cols:
+                                C[m_start + i, n_start + j] = T.Cast(
+                                    dtype,
+                                    act(C_gate_local[i, j]) * C_up_local[i, j],
+                                )
     else:
         @T.prim_func
         def _gemma_main_fused(
@@ -328,20 +328,20 @@ def _build_persistent_fused_act_maca(
                                 B_up_shared[i, j] = T.if_then_else(
                                     j < K - k * block_k and i < actual_cols,
                                     B[expert_id, ffn + n_start + i, k * block_k + j], 0)
-                        T.gemm(
-                            A_shared,
-                            B_gate_shared,
-                            C_gate_local,
-                            transpose_B=True,
-                            policy=T.GemmWarpPolicy.FullRow,
-                        )
-                        T.gemm(
-                            A_shared,
-                            B_up_shared,
-                            C_up_local,
-                            transpose_B=True,
-                            policy=T.GemmWarpPolicy.FullRow,
-                        )
+                            T.gemm(
+                                A_shared,
+                                B_gate_shared,
+                                C_gate_local,
+                                transpose_B=True,
+                                policy=T.GemmWarpPolicy.FullRow,
+                            )
+                            T.gemm(
+                                A_shared,
+                                B_up_shared,
+                                C_up_local,
+                                transpose_B=True,
+                                policy=T.GemmWarpPolicy.FullRow,
+                            )
 
                         for i, j in T.Parallel(block_m, block_n):
                             if i < actual_rows and j < actual_cols:
