@@ -10,6 +10,7 @@ from torch import Tensor
 
 from tileops.kernels.grouped_gemm import (
     GroupedGemmPersistent3WGKernel,
+    GroupedGemmPersistentMACAKernel,
 )
 from tileops.kernels.grouped_gemm.grouped_gemm_persistent_3wg import (
     _DEFAULT_CONFIG as _3WG_DEFAULT_CONFIG,
@@ -24,6 +25,7 @@ from tileops.kernels.moe.moe_grouped_gemm_persistent_3wg_fused_act import (
     _DEFAULT_CONFIG as _FUSED_ACT_DEFAULT_CONFIG,
 )
 from tileops.ops.moe._activation import build_activation_op
+from tileops.utils import is_maca
 
 from .abc import (
     FusedMoEExpertsModular,
@@ -129,7 +131,10 @@ class FusedMoEExpertsNopadPersistent3WGFwdOp(FusedMoEExpertsModular):
             int((expert_map >= 0).sum().item()) if expert_map is not None else num_experts
         )
 
-        kernel_cls = gemm_kernel or GroupedGemmPersistent3WGKernel
+        if is_maca():
+            kernel_cls = gemm_kernel or GroupedGemmPersistentMACAKernel
+        else:
+            kernel_cls = gemm_kernel or GroupedGemmPersistent3WGKernel
 
         # 3WG requires N and K aligned to its default block dimensions.
         # Fall back to tile scheduler kernel for small/unaligned dimensions.

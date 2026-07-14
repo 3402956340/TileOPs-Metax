@@ -1764,7 +1764,7 @@ class GQAPrefillWithKVCacheRopeFwdKernel(Kernel):
     @property
     def default_config(self) -> dict:
         return {
-            "block_m": 64,
+            "block_m": 32,
             "block_n": 64 if self.dim <= 128 else 32,
             "num_stages": 1,
             "threads": 128
@@ -2482,7 +2482,7 @@ def _(batch: int, heads: int, heads_kv: int, total_q: int, physical_tokens: int,
 
 
 class GQAPrefillPagedWithFP8KVCacheFwdKernel(Kernel):
-    supported_archs: list[int] = [89, 90]
+    supported_archs: list[int] = [80, 89, 90]
 
     def __init__(self,
                  batch: int,
@@ -3044,7 +3044,7 @@ class GQAPrefillPagedWithKVCacheRopeFwdKernel(Kernel):
     @property
     def default_config(self) -> dict:
         return {
-            "block_m": 64,
+            "block_m": 32,
             "block_n": 64 if self.dim <= 128 else 32,
             "num_stages": 1,
             "threads": 128

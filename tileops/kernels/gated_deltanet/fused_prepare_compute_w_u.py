@@ -1,3 +1,5 @@
+# 2026 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
+
 """
 Fused prepare_wy_repr + compute_w_u kernel.
 
@@ -59,12 +61,12 @@ def fused_prepare_compute_w_u_tl(
                 # Shared buffers
                 k_shared = T.alloc_shared([block_C, dim_k], dtype)
                 v_shared = T.alloc_shared([block_C, dim_v], dtype)
-                g_shared = T.alloc_shared([block_C], dtype)
-                beta_shared = T.alloc_shared([block_C], dtype)
-                k_beta_shared = T.alloc_shared([block_C, dim_k], dtype)
-                v_beta_shared = T.alloc_shared([block_C, dim_v], dtype)
-                S_shared = T.alloc_shared([block_C, block_C], dtype)
-                P_shared = T.alloc_shared([block_C, block_C], dtype)
+                g_shared = T.alloc_shared([block_C], accum_dtype)
+                beta_shared = T.alloc_shared([block_C], accum_dtype)
+                k_beta_shared = T.alloc_shared([block_C, dim_k], accum_dtype)
+                v_beta_shared = T.alloc_shared([block_C, dim_v], accum_dtype)
+                S_shared = T.alloc_shared([block_C, block_C], accum_dtype)
+                P_shared = T.alloc_shared([block_C, block_C], accum_dtype)
                 # Fragments (fp32 accumulators)
                 gram_frag = T.alloc_fragment([block_C, block_C], accum_dtype)
                 temp_frag = T.alloc_fragment([block_C, block_C], accum_dtype)

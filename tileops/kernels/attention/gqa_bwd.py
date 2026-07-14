@@ -1,3 +1,5 @@
+# 2026 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
+
 import functools
 import itertools
 from typing import Callable, Optional, Tuple
@@ -260,8 +262,8 @@ class MHABwdKernel(Kernel):
     @property
     def default_config(self) -> dict:
         return {
-            "block_m": 64,
-            "block_n": 64 if self.dim <= 64 else 32,
+            "block_m": 32,
+            "block_n": 32,
             "num_stages": 1,
             "threads": 128
         }

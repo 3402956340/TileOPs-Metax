@@ -283,6 +283,9 @@ class AdaLayerNormKernel(Kernel):
         # Main constraint: block_m * N_padded * dtype_size for shared_buf < 48KB
         smem_per_row = self.N_padded * torch.tensor([], dtype=self.dtype).element_size()
         max_block_m = (48 * 1024) // smem_per_row
+        # MACA pri_mem_sz 4 KiB/thread: DiT-XL/2 (N_padded=1280) needs block_m=1.
+        if max_block_m >= 8 and self.N_padded <= 1280:
+            max_block_m = 1
         block_m = 1
         for bm in [1, 2, 4, 8, 16]:
             if bm <= max_block_m:
@@ -293,6 +296,8 @@ class AdaLayerNormKernel(Kernel):
     def autotune_configs(self) -> list[dict]:
         smem_per_row = self.N_padded * torch.tensor([], dtype=self.dtype).element_size()
         max_block_m = (48 * 1024) // smem_per_row
+        if max_block_m >= 8 and self.N_padded <= 1280:
+            max_block_m = 1
         block_ms = [bm for bm in [1, 2, 4, 8, 16] if bm <= max_block_m]
         threads_list = [128, 256]
         configs = list(itertools.product(block_ms, threads_list))

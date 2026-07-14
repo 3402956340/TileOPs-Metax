@@ -182,6 +182,9 @@ class GroupNormKernel(Kernel):
         for bm in [1, 2, 4, 8, 16]:
             if bm <= max_block_m:
                 block_m = bm
+        # Metax/MACA: block_m > 1 with large D_padded overflows private memory.
+        if self.D_padded > 4096:
+            block_m = 1
         return {"block_m": block_m, "threads": 256}
 
     @property
@@ -189,6 +192,8 @@ class GroupNormKernel(Kernel):
         smem_per_row = self.D_padded * torch.tensor([], dtype=self.dtype).element_size()
         max_block_m = (48 * 1024) // smem_per_row
         block_ms = [bm for bm in [1, 2, 4, 8, 16] if bm <= max_block_m]
+        if self.D_padded > 4096:
+            block_ms = [1]
         threads_list = [128, 256]
         configs = list(itertools.product(block_ms, threads_list))
         return [{"block_m": bm, "threads": t} for bm, t in configs]
@@ -343,6 +348,9 @@ class GroupNormNoAffineKernel(Kernel):
         for bm in [1, 2, 4, 8, 16]:
             if bm <= max_block_m:
                 block_m = bm
+        # Metax/MACA: block_m > 1 with large D_padded overflows private memory.
+        if self.D_padded > 4096:
+            block_m = 1
         return {"block_m": block_m, "threads": 256}
 
     @property
@@ -350,6 +358,8 @@ class GroupNormNoAffineKernel(Kernel):
         smem_per_row = self.D_padded * torch.tensor([], dtype=self.dtype).element_size()
         max_block_m = (48 * 1024) // smem_per_row
         block_ms = [bm for bm in [1, 2, 4, 8, 16] if bm <= max_block_m]
+        if self.D_padded > 4096:
+            block_ms = [1]
         threads_list = [128, 256]
         configs = list(itertools.product(block_ms, threads_list))
         return [{"block_m": bm, "threads": t} for bm, t in configs]
