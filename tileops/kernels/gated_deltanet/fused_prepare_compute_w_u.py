@@ -62,7 +62,7 @@ def fused_prepare_compute_w_u_tl(
                 k_shared = T.alloc_shared([block_C, dim_k], dtype)
                 v_shared = T.alloc_shared([block_C, dim_v], dtype)
                 g_shared = T.alloc_shared([block_C], accum_dtype)
-                beta_shared = T.alloc_shared([block_C], accum_dtype)
+                beta_shared = T.alloc_fragment([block_C], accum_dtype)
                 k_beta_shared = T.alloc_shared([block_C, dim_k], accum_dtype)
                 v_beta_shared = T.alloc_shared([block_C, dim_v], accum_dtype)
                 S_shared = T.alloc_shared([block_C, block_C], accum_dtype)
