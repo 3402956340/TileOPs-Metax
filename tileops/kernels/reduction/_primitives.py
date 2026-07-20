@@ -59,7 +59,7 @@ def device_smem_budget(device_index: int | None = None) -> int:
     from tileops.utils import is_maca
 
     if is_maca():
-        return 65536 - 512 # 64KB - 512 bytes
+        return 65536
 
     explicit = device_index is not None
     try:
