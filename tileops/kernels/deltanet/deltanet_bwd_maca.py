@@ -251,7 +251,15 @@ class DeltaNetBwdMACAKernel(Kernel):
         parallel_configs = [{"threads": t} for t in [128, 256]]
         print(f"Autotuning bwd_parallel ({len(parallel_configs)} configs)...")
         parallel_jit = _bwd_parallel_tl(B, H, S, BC, DK, DV, dt)
-        tuned_parallel = tl_autotune(configs=parallel_configs, warmup=warmup, rep=rep)(parallel_jit)()
+        _parallel_at = dict(configs=parallel_configs, warmup=warmup, rep=rep)
+        _parallel_dns = list(self._autotune_initial_kwargs(parallel_jit, parallel_configs[0]).keys())
+        if _parallel_dns:
+            _parallel_at["do_not_specialize"] = _parallel_dns
+        tuned_parallel = self._call_autotuned_kernel(
+            tl_autotune(**_parallel_at)(parallel_jit),
+            parallel_jit,
+            parallel_configs[0],
+        )
         parallel_best = tuned_parallel.config
         print(f"  Best: {parallel_best}")
 
@@ -262,9 +270,15 @@ class DeltaNetBwdMACAKernel(Kernel):
         ]
         print(f"Autotuning dh_recurrence_bwd_maca ({len(recurrence_configs)} configs)...")
         recurrence_jit = _dh_recurrence_bwd_tl_maca(B, H, S, BC, DK, DV, dt)
-        tuned_recurrence = tl_autotune(
-            configs=recurrence_configs, warmup=warmup, rep=rep,
-        )(recurrence_jit)()
+        _recurrence_at = dict(configs=recurrence_configs, warmup=warmup, rep=rep)
+        _recurrence_dns = list(self._autotune_initial_kwargs(recurrence_jit, recurrence_configs[0]).keys())
+        if _recurrence_dns:
+            _recurrence_at["do_not_specialize"] = _recurrence_dns
+        tuned_recurrence = self._call_autotuned_kernel(
+            tl_autotune(**_recurrence_at)(recurrence_jit),
+            recurrence_jit,
+            recurrence_configs[0],
+        )
         recurrence_best = tuned_recurrence.config
         print(f"  Best: {recurrence_best}")
 
@@ -274,7 +288,15 @@ class DeltaNetBwdMACAKernel(Kernel):
         ]
         print(f"Autotuning compute_w_u_bwd_maca ({len(wu_bwd_configs)} configs)...")
         wu_bwd_jit = compute_w_u_bwd_tl_maca(B, H, S, BC, DK, DV, dt)
-        tuned_wu_bwd = tl_autotune(configs=wu_bwd_configs, warmup=warmup, rep=rep)(wu_bwd_jit)()
+        _wu_bwd_at = dict(configs=wu_bwd_configs, warmup=warmup, rep=rep)
+        _wu_bwd_dns = list(self._autotune_initial_kwargs(wu_bwd_jit, wu_bwd_configs[0]).keys())
+        if _wu_bwd_dns:
+            _wu_bwd_at["do_not_specialize"] = _wu_bwd_dns
+        tuned_wu_bwd = self._call_autotuned_kernel(
+            tl_autotune(**_wu_bwd_at)(wu_bwd_jit),
+            wu_bwd_jit,
+            wu_bwd_configs[0],
+        )
         wu_bwd_best = tuned_wu_bwd.config
         print(f"  Best: {wu_bwd_best}")
 
