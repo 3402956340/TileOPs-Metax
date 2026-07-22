@@ -1,4 +1,4 @@
-"""DeltaNet backward MACA path: smem-safe dh_recurrence + tiled compute_w_u_bwd."""
+"""DeltaNet backward MACA path: smem-safe bwd_parallel + dh_recurrence + wu_bwd."""
 
 import functools
 from typing import Optional, Tuple
@@ -9,11 +9,175 @@ import torch
 
 from tileops.kernels.kernel_base import Kernel
 
-from .deltanet_bwd import _bwd_parallel_tl
-
 __all__ = [
     "DeltaNetBwdMACAKernel",
 ]
+
+
+@functools.lru_cache(maxsize=32)
+def _bwd_parallel_tl_maca(
+    batch: int,
+    head: int,
+    seq_len: int,
+    chunk_size: int,
+    dim_k: int,
+    dim_v: int,
+    dtype: str = "float32",
+):
+    """Parallel per-chunk backward with V-tiling (MACA smem-safe).
+
+    Same outputs as ``_bwd_parallel_tl``; V-side buffers use BV=32 so peak
+    dynamic shared memory stays under MACA's 64 KiB/block limit.
+    """
+    accum_dtype = "float32"
+    block_C = chunk_size
+    num_chunks = seq_len // block_C
+    BV = 32
+    sub_dim_v = dim_v // BV
+
+    assert dim_v % BV == 0, "dim_v must be divisible by BV"
+
+    @tilelang.jit(
+        out_idx=[-6, -5, -4, -3, -2, -1],
+        pass_configs={
+            tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
+        },
+        compile_flags=["-O3", "-DENABLE_BF16"],
+    )
+    def _func(threads=256):
+        @T.prim_func
+        def bwd_parallel_kernel_maca(
+            do: T.Tensor([batch, head, seq_len, dim_v], dtype),
+            q: T.Tensor([batch, head, seq_len, dim_k], dtype),
+            k: T.Tensor([batch, head, seq_len, dim_k], dtype),
+            w: T.Tensor([batch, head, seq_len, dim_k], dtype),
+            u: T.Tensor([batch, head, seq_len, dim_v], dtype),
+            S: T.Tensor([batch, head, num_chunks + 1, dim_k, dim_v], accum_dtype),
+            dq: T.Tensor([batch, head, seq_len, dim_k], dtype),
+            dk_partial: T.Tensor([batch, head, seq_len, dim_k], dtype),
+            dw: T.Tensor([batch, head, seq_len, dim_k], dtype),
+            du_partial: T.Tensor([batch, head, seq_len, dim_v], dtype),
+            v_new_out: T.Tensor([batch, head, seq_len, dim_v], dtype),
+            dh_local: T.Tensor([batch, head, num_chunks, dim_k, dim_v], accum_dtype),
+        ):
+            with T.Kernel(num_chunks, batch, head, threads=threads) as (tid, bid, hid):
+                q_c = T.alloc_shared([block_C, dim_k], dtype)
+                k_c = T.alloc_shared([block_C, dim_k], dtype)
+                w_c = T.alloc_shared([block_C, dim_k], dtype)
+                u_c = T.alloc_shared([block_C, BV], dtype)
+                do_c = T.alloc_shared([block_C, BV], dtype)
+                h_c = T.alloc_shared([dim_k, BV], dtype)
+                v_new_c = T.alloc_shared([block_C, BV], dtype)
+                d_v_new_c = T.alloc_shared([block_C, BV], dtype)
+                attn = T.alloc_shared([block_C, block_C], dtype)
+                d_attn = T.alloc_shared([block_C, block_C], dtype)
+
+                ws_frag = T.alloc_fragment([block_C, BV], accum_dtype)
+                attn_frag = T.alloc_fragment([block_C, block_C], accum_dtype)
+                d_v_new_frag = T.alloc_fragment([block_C, BV], accum_dtype)
+                d_attn_frag = T.alloc_fragment([block_C, block_C], accum_dtype)
+                d_q_c_frag = T.alloc_fragment([block_C, dim_k], accum_dtype)
+                d_k_c_frag = T.alloc_fragment([block_C, dim_k], accum_dtype)
+                dP_frag = T.alloc_fragment([block_C, dim_k], accum_dtype)
+                dP_tmp = T.alloc_fragment([block_C, dim_k], accum_dtype)
+                dh_frag = T.alloc_fragment([dim_k, BV], accum_dtype)
+                dh_sub_frag = T.alloc_fragment([dim_k, BV], accum_dtype)
+
+                T.copy(q[bid, hid, tid * block_C : (tid + 1) * block_C, :], q_c, disable_tma=True)
+                T.copy(k[bid, hid, tid * block_C : (tid + 1) * block_C, :], k_c, disable_tma=True)
+                T.copy(w[bid, hid, tid * block_C : (tid + 1) * block_C, :], w_c, disable_tma=True)
+
+                # attn = causal(q @ k^T) — independent of V
+                T.clear(attn_frag)
+                T.gemm(q_c, k_c, attn_frag, transpose_B=True)
+                for i, j in T.Parallel(block_C, block_C):
+                    attn[i, j] = T.if_then_else(
+                        i >= j,
+                        attn_frag[i, j],
+                        T.float32(0.0))
+
+                T.clear(d_q_c_frag)
+                T.clear(dP_frag)
+                T.clear(d_attn_frag)
+
+                for v0 in T.serial(0, sub_dim_v):
+                    v_off = v0 * BV
+                    T.copy(
+                        u[bid, hid, tid * block_C : (tid + 1) * block_C, v_off : v_off + BV],
+                        u_c, disable_tma=True,
+                    )
+                    T.copy(
+                        do[bid, hid, tid * block_C : (tid + 1) * block_C, v_off : v_off + BV],
+                        do_c, disable_tma=True,
+                    )
+                    T.copy(
+                        S[bid, hid, tid, :, v_off : v_off + BV],
+                        h_c, disable_tma=True,
+                    )
+
+                    # v_new = u - w @ h
+                    T.clear(ws_frag)
+                    T.gemm(w_c, h_c, ws_frag)
+                    for i, j in T.Parallel(block_C, BV):
+                        v_new_c[i, j] = u_c[i, j] - ws_frag[i, j]
+                    T.copy(
+                        v_new_c,
+                        v_new_out[bid, hid, tid * block_C : (tid + 1) * block_C, v_off : v_off + BV],
+                        disable_tma=True,
+                    )
+
+                    # d_v_new = attn^T @ do
+                    T.clear(d_v_new_frag)
+                    T.gemm(attn, do_c, d_v_new_frag, transpose_A=True)
+                    T.copy(d_v_new_frag, d_v_new_c)
+                    T.copy(
+                        d_v_new_c,
+                        du_partial[bid, hid, tid * block_C : (tid + 1) * block_C, v_off : v_off + BV],
+                        disable_tma=True,
+                    )
+
+                    # d_attn += do @ v_new^T (mask after all tiles)
+                    T.gemm(do_c, v_new_c, d_attn_frag, transpose_B=True)
+
+                    # dq += do @ h^T
+                    T.gemm(do_c, h_c, d_q_c_frag, transpose_B=True)
+
+                    # dh_local tile = q^T @ do - w^T @ d_v_new
+                    T.clear(dh_frag)
+                    T.gemm(q_c, do_c, dh_frag, transpose_A=True)
+                    T.clear(dh_sub_frag)
+                    T.gemm(w_c, d_v_new_c, dh_sub_frag, transpose_A=True)
+                    for i, j in T.Parallel(dim_k, BV):
+                        dh_frag[i, j] -= dh_sub_frag[i, j]
+                    T.copy(
+                        dh_frag,
+                        dh_local[bid, hid, tid, :, v_off : v_off + BV],
+                        disable_tma=True,
+                    )
+
+                    # dP -= d_v_new @ h^T
+                    T.clear(dP_tmp)
+                    T.gemm(d_v_new_c, h_c, dP_tmp, transpose_B=True)
+                    for i, j in T.Parallel(block_C, dim_k):
+                        dP_frag[i, j] -= dP_tmp[i, j]
+
+                for i, j in T.Parallel(block_C, block_C):
+                    d_attn[i, j] = T.if_then_else(i >= j, d_attn_frag[i, j], T.float32(0.0))
+
+                # dq/dk from d_attn
+                T.gemm(d_attn, k_c, d_q_c_frag)
+                T.copy(d_q_c_frag, dq[bid, hid, tid * block_C : (tid + 1) * block_C, :], disable_tma=True)
+
+                T.clear(d_k_c_frag)
+                T.gemm(d_attn, q_c, d_k_c_frag, transpose_A=True)
+                T.copy(d_k_c_frag, dk_partial[bid, hid, tid * block_C : (tid + 1) * block_C, :], disable_tma=True)
+
+                # dw = dP
+                T.copy(dP_frag, dw[bid, hid, tid * block_C : (tid + 1) * block_C, :], disable_tma=True)
+
+        return bwd_parallel_kernel_maca
+
+    return _func
 
 
 @functools.lru_cache(maxsize=32)
@@ -161,7 +325,7 @@ def _deltanet_bwd_wrapped_kernel_maca(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     from .compute_w_u_bwd_maca import compute_w_u_bwd_tl_maca
 
-    bwd_parallel_fn = _bwd_parallel_tl(
+    bwd_parallel_fn = _bwd_parallel_tl_maca(
         batch, head, seq_len, chunk_size, dim_k, dim_v, dtype,
     )(parallel_threads)
     dh_recurrence_bwd_fn = _dh_recurrence_bwd_tl_maca(
@@ -249,8 +413,8 @@ class DeltaNetBwdMACAKernel(Kernel):
         DK, DV, dt = self.dim_k, self.dim_v, self.dtype_str
 
         parallel_configs = [{"threads": t} for t in [128, 256]]
-        print(f"Autotuning bwd_parallel ({len(parallel_configs)} configs)...")
-        parallel_jit = _bwd_parallel_tl(B, H, S, BC, DK, DV, dt)
+        print(f"Autotuning bwd_parallel_maca ({len(parallel_configs)} configs)...")
+        parallel_jit = _bwd_parallel_tl_maca(B, H, S, BC, DK, DV, dt)
         _parallel_at = dict(configs=parallel_configs, warmup=warmup, rep=rep)
         _parallel_dns = list(self._autotune_initial_kwargs(parallel_jit, parallel_configs[0]).keys())
         if _parallel_dns:
