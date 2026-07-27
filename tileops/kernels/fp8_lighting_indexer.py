@@ -211,7 +211,7 @@ def _(
 
 
 class FP8LightingIndexerKernel(Kernel):
-    supported_archs: list[int] = [80]
+    supported_archs: list[int] = [80, 89]
 
     def __init__(self,
                  batch,
