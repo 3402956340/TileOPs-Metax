@@ -29,8 +29,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         _RUNTIME_LAUNCH_ERROR,
         (
             "benchmarks/ops/attention/bench_gqa_decode.py::test_gqa_decode_bench[qwen3-30b-a3b-bs1-1k-float16]",
-            "benchmarks/ops/bench_argreduce.py::test_argmin_bench[hidden-state-argmin-float16]",
-            "benchmarks/ops/bench_argreduce.py::test_argmin_bench[hidden-state-argmin-bfloat16]",
         ),
     ),
     (
