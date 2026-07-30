@@ -28,7 +28,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         _RUNTIME_LAUNCH_ERROR,
         (
-            "benchmarks/ops/attention/bench_gqa_decode.py::test_gqa_decode_bench[qwen3-30b-a3b-bs1-1k-float16]",
             "benchmarks/ops/bench_argreduce.py::test_argmin_bench[hidden-state-argmin-float16]",
             "benchmarks/ops/bench_argreduce.py::test_argmin_bench[hidden-state-argmin-bfloat16]",
             "benchmarks/ops/bench_reduce_multidim.py::test_argreduce_multidim_bench[argmin-7B-dim2-keepdim]",
@@ -37,13 +36,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         _COMPILATION_FAILURE,
         (
-            "benchmarks/ops/attention/bench_gqa_decode.py::test_gqa_decode_bench[qwen3-30b-a3b-bs1-4k-float16]",
-            "benchmarks/ops/attention/bench_gqa_decode.py::test_gqa_decode_bench[qwen3-30b-a3b-bs1-8k-float16]",
-            "benchmarks/ops/attention/bench_gqa_decode.py::test_gqa_decode_bench[qwen3-30b-a3b-bs1-16k-float16]",
-            "benchmarks/ops/attention/bench_gqa_decode.py::test_gqa_decode_bench[qwen3-30b-a3b-bs1-32k-float16]",
-            "benchmarks/ops/attention/bench_gqa_decode.py::test_gqa_decode_bench[qwen3-30b-a3b-bs1-64k-float16]",
-            "benchmarks/ops/attention/bench_gqa_decode.py::test_gqa_decode_bench[qwen3-30b-a3b-bs1-128k-float16]",
-            "benchmarks/ops/attention/bench_gqa_decode.py::test_gqa_decode_bench[qwen3-30b-a3b-bs1-256k-float16]",
             "benchmarks/ops/bench_elementwise_manifest.py::test_logical_and_manifest_bench[cnn-feat-broadcast-bool]",
             "benchmarks/ops/bench_elementwise_manifest.py::test_logical_or_manifest_bench[cnn-feat-broadcast-bool]",
             "benchmarks/ops/bench_elementwise_manifest.py::test_bitwise_and_manifest_bench[cnn-feat-broadcast-bool]",
