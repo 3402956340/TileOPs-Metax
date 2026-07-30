@@ -43,13 +43,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         _RUNTIME_LAUNCH_ERROR,
         (
-            "tests/ops/test_argreduce.py::test_argmin_op[256-4096-dtype3]",
-            "tests/ops/test_argreduce.py::test_argmin_op[256-4096-dtype4]",
-            "tests/ops/test_argreduce.py::test_argmin_dim_none[shape0-dtype0]",
-            "tests/ops/test_argreduce.py::test_argmin_dim_none[shape1-dtype1]",
-            "tests/ops/test_argreduce.py::test_argmin_dim_none[shape2-dtype2]",
-            "tests/ops/test_argreduce.py::test_argmin_dim_none[shape4-dtype4]",
-            "tests/ops/test_argreduce.py::test_argmin_dim_none[shape5-dtype5]",
             "tests/ops/test_engram.py::test_engram_decode[4-1024-512-20-4-5-dtype2-False]",
             "tests/ops/test_gated_deltanet_chunkwise_bwd.py::test_gated_deltanet_bwd[2-64-2-64-64-32-dtype0-False]",
             "tests/ops/test_gated_deltanet_chunkwise_bwd.py::test_gated_deltanet_bwd[2-64-2-64-64-32-dtype1-False]",
