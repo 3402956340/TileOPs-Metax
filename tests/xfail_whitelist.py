@@ -38,7 +38,7 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/ops/test_convolution.py::test_conv1d[full-padding-valid-fp16]",
             "tests/ops/test_convolution.py::test_conv1d_same_padding_even_kernel_matches_torch[bias]",
             "tests/ops/test_fused_moe_experts.py::TestFusedMoEExpertsNopadPersistent3WGFwdOp::test_forward_matches_torch_ref_activation[float16-gelu_and_mul]",
-            "tests/ops/test_mamba.py::test_da_cumsum_fwd[2-4-128-16-True-True-dtype6-False]",        ),
+        ),
     ),
     (
         _RUNTIME_LAUNCH_ERROR,
