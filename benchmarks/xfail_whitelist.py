@@ -23,9 +23,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         _RUNTIME_LAUNCH_ERROR,
         (
-            "benchmarks/ops/bench_argreduce.py::test_argmin_bench[hidden-state-argmin-float16]",
-            "benchmarks/ops/bench_argreduce.py::test_argmin_bench[hidden-state-argmin-bfloat16]",
-            "benchmarks/ops/bench_reduce_multidim.py::test_argreduce_multidim_bench[argmin-7B-dim2-keepdim]",
         ),
     ),
     (
@@ -41,15 +38,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         _BENCHMARK_API_MISMATCH,
         (
-            "benchmarks/ops/bench_cumulative.py::test_cumsum_bench[hidden-state-scan-float16]",
-            "benchmarks/ops/bench_cumulative.py::test_cumsum_bench[hidden-state-scan-bfloat16]",
-            "benchmarks/ops/bench_cumulative.py::test_cumsum_bench[long-seq-scan-bfloat16]",
-            "benchmarks/ops/bench_cumulative.py::test_cumprod_bench[hidden-state-scan-float16]",
-            "benchmarks/ops/bench_cumulative.py::test_cumprod_bench[hidden-state-scan-bfloat16]",
-            "benchmarks/ops/bench_cumulative.py::test_cumprod_bench[long-seq-scan-bfloat16]",
-            "benchmarks/ops/bench_reduce_multidim.py::test_cumulative_multidim_bench[cumsum-7B-3D]",
-            "benchmarks/ops/bench_reduce_multidim.py::test_cumulative_multidim_bench[cumsum-7B-3D-bf16]",
-            "benchmarks/ops/bench_reduce_multidim.py::test_cumulative_multidim_bench[cumprod-7B-longctx-3D]",
         ),
     ),
     (
