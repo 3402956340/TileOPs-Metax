@@ -60,7 +60,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         _AUTOTUNE_FAILURE,
         (
-            "benchmarks/ops/bench_engram.py::test_engram_decode_bench[fp16-large]",
         ),
     ),
 )
