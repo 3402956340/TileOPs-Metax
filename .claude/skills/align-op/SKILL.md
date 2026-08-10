@@ -11,19 +11,19 @@ description: Per-op orchestrator that brings a single op into alignment with its
 
 ## Contract
 
-- **Input**: `op_name` must be present in [`tileops/manifest/`](../../../tileops/manifest/) with `status: spec-only` and a non-empty `source.kernel_map` (same preconditions as scaffold-op; see [PRE_CHECK](#pre_check)).
+- **Input**: `op_name` must be present in [`src/tileops/manifest/`](../../../src/tileops/manifest/) with `status: spec-only` and a non-empty `source.kernel_map` (same preconditions as scaffold-op; see [PRE_CHECK](#pre_check)).
 - **Path and data bindings used throughout this skill** (resolved by the orchestrator once at `PRE_CHECK` when the manifest entry is first loaded, then passed into every sub-skill invocation):
-  - `<source_op>` — manifest `source.op` path (e.g., `tileops/ops/reduction/cumsum.py`).
+  - `<source_op>` — `src/` + manifest `source.op` (e.g., `src/tileops/ops/reduction/cumulative.py`).
   - `<source_test>` — manifest `source.test` path (e.g., `tests/ops/test_cumulative.py`).
   - `<source_bench>` — manifest `source.bench` path.
-  - `<source_kernel>` — manifest `source.kernel` path (the primary kernel implementation file).
+  - `<source_kernel>` — `src/` + manifest `source.kernel` (the primary kernel implementation file).
   - `<manifest_signature>` — the `signature` sub-tree from the op's manifest entry, passed verbatim to test-op / implement-op.
   - `<pytorch_equivalent>` — manifest `ref_api` value (e.g., `"torch.cumsum"`) or `null` if the op has no PyTorch reference. Required by test-op.
 - **Output** (SUCCESS path): op file at `source.op` aligned with the manifest; test file `source.test` aligned; `__init__.py` registrations consistent; `status` flipped `spec-only → implemented` (single commit). Side-artefacts in `.foundry/plan/<op_name>/`: `mode.json` (classification), `plan.json` (scaffold-op's §1/§2/§3 when that skill ran), `kernel-check.json` (redesign case only), `pre-rewrite/source.py` (redesign case, removed at CLEANUP on SUCCESS).
 - **Termination (success)**: `python scripts/validate_manifest.py --check-op <op_name>` reports no errors + `python -m pytest <source_test> -v` passes + benchmark produces numbers + manifest status flipped.
 - **Termination (blocked)**: any sub-skill (scaffold-op / test-op / implement-op / bench-op) returns blocked; or scaffold-op §1 drift; or REVALIDATE fails. Kernel-layer mismatches surfaced by `KERNEL_CHECK` are **informational only** and never cause BLOCKED by themselves — BLOCKED is reached only if a kernel drift propagates into a downstream sub-skill failure (e.g., bench-op runtime error, REVALIDATE regression). Archives are kept for post-mortem.
 - **Constraints**:
-  - Only align-op (and only at FLIP_STATUS) may modify `tileops/manifest/`. Sub-skills never touch the manifest.
+  - Only align-op (and only at FLIP_STATUS) may modify `src/tileops/manifest/`. Sub-skills never touch the manifest.
   - MUST NOT modify kernel code. Kernel-layer work, if needed, is surfaced via `kernel-check.json` as a separate follow-up.
   - MUST NOT expand to multi-op scope; that is `align-family`'s role.
 
@@ -83,9 +83,9 @@ stateDiagram-v2
 
 Preconditions identical to `scaffold-op`'s — orchestrator enforces them up front so sub-skills never see ill-formed input:
 
-- `op_name` in `tileops/manifest/` → proceed; otherwise BLOCKED ("op not in manifest").
-- `status: spec-only` → proceed; `implemented` → BLOCKED ("already aligned; flip status to spec-only in a manifest PR first if you intend to re-align"); missing/other → BLOCKED.
-- `source.kernel_map` declared and non-empty → proceed; missing → BLOCKED with the same guidance scaffold-op uses (add in a prerequisite manifest PR).
+- `op_name` in `src/tileops/manifest/` → proceed; otherwise BLOCKED ("op not in manifest").
+- `status: spec-only` → proceed; `implemented` → BLOCKED ("already aligned; flip status back to spec-only first if you intend to re-align"); missing/other → BLOCKED.
+- `source.kernel_map` declared and non-empty → proceed; missing → BLOCKED with the same guidance scaffold-op uses (add the dispatch map first).
 - Every value in `source.kernel_map` resolves to an importable symbol → proceed; otherwise BLOCKED ("kernel class not found at expected path" — kernel must exist for op layer to align, regardless of case).
 
 ### 2. CLASSIFY
@@ -191,7 +191,7 @@ Write `.foundry/plan/<op_name>/kernel-check.json`:
     {
       "dispatch_key": "cumulative_fwd",
       "kernel_class": "CumulativeKernel",
-      "kernel_source": "tileops/kernels/reduction/cumulative.py",
+      "kernel_source": "src/tileops/kernels/reduction/cumulative.py",
       "classification": "aligned",
       "op_call": "self.kernel_map['cumulative_fwd'](M, N, 'sum', self.dtype, tune=self.tune)",
       "kernel_ctor": "__init__(self, M, N, op_kind, dtype, *, tune=False)",
@@ -266,7 +266,7 @@ Orchestrator (not a sub-skill) edits the manifest:
 - `ops.<op_name>.status: spec-only` → `status: implemented`
 - Commit as `[Refactor][Manifest] promote <op_name> to implemented`.
 
-This is the only manifest write in the entire workflow, and it MUST stay within the [Status flip carve-out](../../rules/manifest-trust-model.md#status-flip-carve-out); any contractual-field change requires a separate manifest-only PR.
+This is the only manifest write in the entire workflow: flip `status`, and retarget `source.kernel_map` / `source.test` / `source.bench` at what this run produced. A contractual field — `signature`, `shape_rules`, `roofline`, `params` — is spec, and changing it to match the code inverts the spec relationship ([manifest-spec.md](../../domain-rules/manifest-spec.md)).
 
 ### 11. CLEANUP
 
@@ -324,4 +324,3 @@ They do not conflict. `align-op` never manages cross-op cleanup gates; that rema
 - **Kernel scaffolding / kernel-layer edits.** align-op surfaces kernel work as a follow-up via `kernel-check.json`; a separate (future) `kernel-scaffold` / `kernel-align` skill will own that layer.
 - **Family-level cleanup.** Cross-op dual-path removal lives in `align-family` and is not a concern of per-op alignment.
 - **General auto-detection of "redesign vs minor."** The distinction is a design judgement; align-op prompts or accepts `--mode`. The one exception is the **first-op bias** in CLASSIFY (no canonical-pattern precedent in the family → auto `redesign`). Beyond that one case, no auto-detection.
-- **Manifest changes (other than FLIP_STATUS).** Per the trust model, manifest changes live in separate manifest PRs.

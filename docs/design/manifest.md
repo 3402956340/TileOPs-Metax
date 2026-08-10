@@ -1,6 +1,6 @@
 # Op Manifest Specification
 
-The [`tileops/manifest/`](../../tileops/manifest/) package is the **source of truth** for op interfaces, benchmark workloads, and roofline metadata.
+The [`src/tileops/manifest/`](../../src/tileops/manifest/) package is the **source of truth** for op interfaces, benchmark workloads, and roofline metadata.
 
 ## Layout
 
@@ -14,15 +14,15 @@ One or more YAML files per family (single file by default; large families may sh
 
 ```mermaid
 flowchart LR
-    H["Human reviewer"] -->|writes / approves| M["tileops/manifest/"]
+    R["Authoritative reference"] -->|specified from| M["src/tileops/manifest/"]
     M -->|reads spec from| A["Agent (codegen)"]
     A -->|produces| C["Op code, tests, benchmarks"]
     M -->|validates against| V["Validator (CI)"]
     C -->|checked by| V
 ```
 
-- **Human reviewer** — only actor that modifies the manifest. All changes require PR review.
-- **Agent** — generates Ops, tests, benchmarks from the manifest. Reads only, never modifies.
+- The manifest is written against an authoritative reference, never derived from current TileOps code.
+- Ops, tests and benchmarks are generated from the manifest, not the other way round.
 - **Validator** — [`scripts/validate_manifest.py`](../../scripts/validate_manifest.py) in CI. Enforces manifest ↔ code consistency.
 
 **Invariants:**
@@ -293,10 +293,9 @@ signature:
 | `layout`      | no       | Memory format when non-default (R19).                                                                                                    |
 
 **Param fields:** `type` (string: `int`, `float`, `bool`, `"list[int]"`) + optional `default`.
-`compat_default` is reserved for legacy Python constructor compatibility:
-it may match an `__init__` default without making the parameter optional in
-the manifest contract. Manifest-driven callers must still provide params that
-omit `default`.
+A param that omits `default` MUST have no `__init__` default either: a
+constructor that accepts a placeholder and rejects it later states a contract
+the signature does not.
 
 #### Shape Decision Tree
 
@@ -354,28 +353,27 @@ are defined in [roofline.md](roofline.md).
 | `op`                    | yes      | Op class file path.                                                    |
 | `test`                  | yes      | Test file path.                                                        |
 | `bench`                 | yes      | Benchmark file path.                                                   |
-| `bench_manifest_driven` | no       | `true` = L4 is a hard CI error. Migration flag.                        |
+| `bench_manifest_driven` | \*       | Required `true` when `status: implemented`; makes L4 a hard CI error.  |
 
 #### kernel_map
 
-Op→Kernel dispatch registration table. Declares which Kernels an Op uses so agents know what to implement. Does not describe dispatch strategy (runtime concern). Format: `dispatch_key: KernelClassName`. See [ops-design-reference.md § S14 `default_kernel_map`](ops-design-reference.md#slot-s14).
+Op→Kernel dispatch registration table. Declares which Kernels an Op uses so agents know what to implement. Does not describe dispatch strategy (runtime concern). Format: `dispatch_key: KernelClassName`. See [ops-design-reference.md § S14 `default_kernel_map`](../../.claude/skills/scaffold-op/slot-rules.md#slot-s14).
 
 ```yaml
 # Single-kernel op
 source:
-  kernel: tileops/kernels/norm/rms_norm.py
+  kernel: src/tileops/kernels/norm/rms_norm.py
   kernel_map:
     rms_norm: RMSNormKernel
-  op: tileops/ops/norm/rms_norm.py
+  op: src/tileops/ops/norm/rms_norm.py
 
 # Multi-kernel op
 source:
-  kernel: tileops/kernels/attention/gqa_bwd.py
+  kernel: src/tileops/kernels/attention/gqa_bwd.py
   kernel_map:
     gqa_bwd_preprocess_kernel: FlashAttnBwdPreprocessKernel
-    gqa_bwd_kernel: GQABwdKernel
-    gqa_bwd_postprocess_kernel: FlashAttnBwdPostprocessKernel
-  op: tileops/ops/attention/mha.py
+    gqa_bwd_kernel: GQABwdWgmmaPipelinedKernel
+  op: src/tileops/ops/attention/gqa.py
 ```
 
 - Optional when `status: spec-only`. Required when `status: implemented`.
@@ -473,10 +471,10 @@ RMSNormFwdOp:
     bytes: "(2 * M * N + N) * elem_bytes"
 
   source:
-    kernel: tileops/kernels/norm/rms_norm.py
+    kernel: src/tileops/kernels/norm/rms_norm.py
     kernel_map:
       rms_norm: RMSNormKernel
-    op: tileops/ops/norm/rms_norm.py
+    op: src/tileops/ops/norm/rms_norm.py
     test: tests/ops/test_rms_norm.py
     bench: benchmarks/ops/bench_norm.py
 ```

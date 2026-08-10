@@ -29,7 +29,7 @@ def _compute_gqa_square_lse(
     return torch.logsumexp(scores, dim=-1) * math.log2(math.e)
 
 
-class GroupedQueryAttentionBwdTest(WorkloadBase):
+class GroupedQueryAttentionBwdWorkload(WorkloadBase):
 
     def __init__(self, batch: int, heads: int, heads_kv: int, seq_len: int, dim: int,
                  is_causal: bool, dtype: torch.dtype) -> None:
@@ -72,7 +72,7 @@ class GroupedQueryAttentionBwdTest(WorkloadBase):
             self.batch, self.seq_len, self.heads, self.dim, dtype=self.dtype, device='cuda')
 
         fwd_op = GroupedQueryAttentionFwdOp(self.batch, self.heads, self.heads_kv, self.seq_len,
-                                            self.dim, self.is_causal, self.dtype)
+                                            self.dim, self.is_causal)
         with torch.no_grad():
             o = fwd_op(q, k, v)
             lse = _compute_gqa_square_lse(
@@ -87,7 +87,7 @@ class GroupedQueryAttentionBwdTest(WorkloadBase):
         return q, k, v, o, grad_output, lse
 
 
-class GroupedQueryAttentionFwdTest(WorkloadBase):
+class GroupedQueryAttentionFwdWorkload(WorkloadBase):
 
     def __init__(self, batch: int, heads: int, heads_kv: int, seq_len: int, dim: int,
                  is_causal: bool, dtype: torch.dtype) -> None:
@@ -112,7 +112,7 @@ class GroupedQueryAttentionFwdTest(WorkloadBase):
         return q, k, v
 
 
-class GroupedQueryAttentionDecodeTest(WorkloadBase):
+class GroupedQueryAttentionDecodeWorkload(WorkloadBase):
 
     def __init__(self,
                  batch: int,
@@ -141,7 +141,7 @@ class GroupedQueryAttentionDecodeTest(WorkloadBase):
         return Q, K, V
 
 
-class GroupedQueryAttentionDecodePagedTest(WorkloadBase):
+class GroupedQueryAttentionDecodePagedWorkload(WorkloadBase):
 
     def __init__(self,
                  batch: int,
@@ -186,7 +186,7 @@ class GroupedQueryAttentionDecodePagedTest(WorkloadBase):
         return q, k, v, real_seqlen_kv, block_table
 
 
-class GQAPrefillFwdTest(WorkloadBase):
+class GQAPrefillFwdWorkload(WorkloadBase):
 
     def __init__(self, batch: int, heads: int, heads_kv: int, seq_len_q: int,
                  seq_len_kv: int, dim: int, is_causal: bool, dtype: torch.dtype) -> None:
@@ -212,7 +212,7 @@ class GQAPrefillFwdTest(WorkloadBase):
         return q, k, v
 
 
-class GQAPrefillVarlenFwdTest(WorkloadBase):
+class GQAPrefillVarlenFwdWorkload(WorkloadBase):
 
     def __init__(self, batch: int, heads: int, heads_kv: int, q_lens: list[int],
                  kv_lens: list[int], dim: int, is_causal: bool,
@@ -266,7 +266,7 @@ class GQAPrefillVarlenFwdTest(WorkloadBase):
 
 
 
-class GQAPrefillPagedWithKVCacheFwdTest(WorkloadBase):
+class GQAPrefillPagedWithKVCacheFwdWorkload(WorkloadBase):
 
     def __init__(self, batch: int, heads: int, heads_kv: int, q_lens: list[int],
                  cache_lens: list[int], page_size: int, dim: int, is_causal: bool,
@@ -332,7 +332,7 @@ class GQAPrefillPagedWithKVCacheFwdTest(WorkloadBase):
             block_table, self.max_seqlen_q)
 
 
-class GroupedQueryAttentionSlidingWindowFwdTest(WorkloadBase):
+class GroupedQueryAttentionSlidingWindowFwdWorkload(WorkloadBase):
 
     def __init__(
         self,
@@ -366,7 +366,7 @@ class GroupedQueryAttentionSlidingWindowFwdTest(WorkloadBase):
         return q, k, v
 
 
-class GroupedQueryAttentionSlidingWindowVarlenFwdTest(WorkloadBase):
+class GroupedQueryAttentionSlidingWindowVarlenFwdWorkload(WorkloadBase):
 
     def __init__(
         self,
@@ -416,3 +416,28 @@ class GroupedQueryAttentionSlidingWindowVarlenFwdTest(WorkloadBase):
         max_seqlen_q = max(self.seqlens_q)
 
         return q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q
+
+
+def uniform_packed_prefill_inputs(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+           torch.Tensor, torch.Tensor]:
+    batch, seq_len_q, _, _ = q.shape
+    _, seq_len_kv, heads_kv, _ = k.shape
+    cu_q = torch.arange(batch + 1, device=q.device, dtype=torch.int32) * seq_len_q
+    cu_kv = torch.arange(batch + 1, device=q.device, dtype=torch.int32) * seq_len_kv
+    q_scale = torch.ones((batch, heads_kv), device=q.device, dtype=torch.float32)
+    k_scale = torch.ones_like(q_scale)
+    v_scale = torch.ones_like(q_scale)
+    return (
+        q.reshape(batch * seq_len_q, q.shape[2], q.shape[3]).contiguous(),
+        k.reshape(batch * seq_len_kv, heads_kv, k.shape[3]).contiguous(),
+        v.reshape(batch * seq_len_kv, heads_kv, v.shape[3]).contiguous(),
+        cu_q,
+        cu_kv,
+        q_scale,
+        k_scale,
+        v_scale,
+    )

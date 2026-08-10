@@ -7,12 +7,12 @@ from benchmarks.benchmark_base import BenchmarkReport, ManifestBenchmark
 from benchmarks.ops.attention.manifest_params import manifest_params, mla_decode_args
 from tileops.manifest import load_workloads
 from tileops.ops import MultiHeadLatentAttentionDecodeWithKVCacheFwdOp
-from workloads.attention.deepseek import MlaDecodeTest
+from workloads.attention.deepseek import MlaDecodeWorkload
 
 _OP_NAME = "MultiHeadLatentAttentionDecodeWithKVCacheFwdOp"
 
 
-class _MlaDecodeTestBaseline(MlaDecodeTest):
+class MlaDecodeTestBaseline(MlaDecodeWorkload):
     """Adds baseline ref_program for benchmark profiling."""
 
     def ref_program(self, q: torch.Tensor, q_pe: torch.Tensor, kv: torch.Tensor,
@@ -68,11 +68,11 @@ _MLA_DECODE_BENCH_PARAMS = manifest_params(load_workloads(_OP_NAME), mla_decode_
 )
 def test_mla_decode_bench(batch: int, heads: int, heads_kv: int, seq_len_kv: int, dim: int,
                           dim_pe: int, dtype: torch.dtype, tune: bool) -> None:
-    test = _MlaDecodeTestBaseline(batch, heads, heads_kv, seq_len_kv, dim, dim_pe, dtype)
+    test = MlaDecodeTestBaseline(batch, heads, heads_kv, seq_len_kv, dim, dim_pe, dtype)
     inputs = test.gen_inputs()
 
     op = MultiHeadLatentAttentionDecodeWithKVCacheFwdOp(
-        batch, heads, heads_kv, seq_len_kv, dim, dim_pe, dtype, tune=tune)
+        batch, heads, heads_kv, seq_len_kv, dim, dim_pe, tune=tune)
     bm = ManifestBenchmark(_OP_NAME, op, test)
     result = bm.profile(op, *inputs)
     BenchmarkReport.record(op, locals(), result, tag="tileops")

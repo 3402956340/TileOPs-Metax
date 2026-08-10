@@ -7,7 +7,7 @@ from workloads.attention.gqa import _compute_gqa_square_lse
 from workloads.workload_base import WorkloadBase
 
 
-class MhaBwdTest(WorkloadBase):
+class MhaBwdWorkload(WorkloadBase):
 
     def __init__(self, batch: int, heads: int, seq_len: int, dim: int, is_causal: bool,
                  dtype: torch.dtype):
@@ -49,10 +49,9 @@ class MhaBwdTest(WorkloadBase):
             self.batch, self.seq_len, self.heads, self.dim, dtype=self.dtype, device='cuda')
 
         fwd_op = MultiHeadAttentionFwdOp(self.batch, self.heads, self.seq_len, self.dim,
-                                         self.is_causal, self.dtype)
+                                         self.is_causal)
         with torch.no_grad():
-            result = fwd_op(q, k, v)
-            o = result[0] if isinstance(result, tuple) else result
+            o = fwd_op(q, k, v)
             lse = _compute_gqa_square_lse(
                 q,
                 k,
@@ -65,7 +64,7 @@ class MhaBwdTest(WorkloadBase):
         return q, k, v, o, grad_output, lse
 
 
-class MhaFwdTest(WorkloadBase):
+class MhaFwdWorkload(WorkloadBase):
 
     def __init__(self, batch: int, heads: int, seq_len: int, dim: int, is_causal: bool,
                  dtype: torch.dtype):
@@ -86,7 +85,7 @@ class MhaFwdTest(WorkloadBase):
         return q, k, v
 
 
-class MhaDecodeTest(WorkloadBase):
+class MhaDecodeWorkload(WorkloadBase):
 
     def __init__(self, batch: int, heads: int, seq_len_q: int, seq_len_kv: int, dim: int,
                  dtype: torch.dtype) -> None:
@@ -107,7 +106,7 @@ class MhaDecodeTest(WorkloadBase):
         return Q, K, V
 
 
-class MhaDecodePagedTest(WorkloadBase):
+class MhaDecodePagedWorkload(WorkloadBase):
 
     def __init__(self, batch: int, heads: int, seqlen_q: int, seqlen_kv: int, dim: int,
                  page_size: int, is_causal: bool, dtype: torch.dtype) -> None:

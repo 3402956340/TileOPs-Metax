@@ -11,14 +11,14 @@ from tileops.ops.norm.fused_add_rms_norm import FusedAddRMSNormFwdOp
 from tileops.ops.norm.layer_norm import LayerNormFwdOp
 from tileops.ops.norm.rms_norm import RMSNormFwdOp
 from workloads.normalization import (
-    FusedAddLayerNormTest,
-    FusedAddRMSNormTest,
-    LayerNormTest,
-    RMSNormTest,
+    FusedAddLayerNormWorkload,
+    FusedAddRMSNormWorkload,
+    LayerNormWorkload,
+    RMSNormWorkload,
 )
 
 
-class _RMSNormTestBaseline(RMSNormTest):
+class RMSNormTestBaseline(RMSNormWorkload):
     """Adds baseline ref_program for benchmark profiling."""
 
     def ref_program(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -45,10 +45,10 @@ def _rms_params():
 
 @pytest.mark.parametrize("m, n, dtype, tune", _rms_params())
 def test_rms_norm_bench(m: int, n: int, dtype: torch.dtype, tune: bool) -> None:
-    test = _RMSNormTestBaseline(m, n, dtype)
+    test = RMSNormTestBaseline(m, n, dtype)
     inputs = test.gen_inputs()
 
-    op = RMSNormFwdOp(normalized_shape=(n,), dtype=dtype, tune=tune)
+    op = RMSNormFwdOp(normalized_shape=(n,), tune=tune)
     bm = ManifestBenchmark(_RMS_OP_NAME, op, test)
     result = bm.profile(op, *inputs)
     BenchmarkReport.record(op, locals(), result, tag="tileops")
@@ -82,10 +82,10 @@ def _fused_rms_params():
 
 @pytest.mark.parametrize("m, n, dtype, tune", _fused_rms_params())
 def test_fused_add_rms_norm_bench(m: int, n: int, dtype: torch.dtype, tune: bool) -> None:
-    test = FusedAddRMSNormTest(m, n, dtype)
+    test = FusedAddRMSNormWorkload(m, n, dtype)
     inputs = test.gen_inputs()
 
-    op = FusedAddRMSNormFwdOp(dtype=dtype, tune=tune)
+    op = FusedAddRMSNormFwdOp(tune=tune)
     bm = ManifestBenchmark(_FUSED_RMS_OP_NAME, op, test)
     result = bm.profile(op, *inputs)
     BenchmarkReport.record(op, locals(), result, tag="tileops")
@@ -118,10 +118,10 @@ def _ln_params():
 
 @pytest.mark.parametrize("m, n, dtype, tune", _ln_params())
 def test_layer_norm_bench(m: int, n: int, dtype: torch.dtype, tune: bool) -> None:
-    test = LayerNormTest(m, n, dtype)
+    test = LayerNormWorkload(m, n, dtype)
     inputs = test.gen_inputs()
 
-    op = LayerNormFwdOp(normalized_shape=(n,), dtype=dtype, tune=tune)
+    op = LayerNormFwdOp(normalized_shape=(n,), tune=tune)
     bm = ManifestBenchmark(_LN_OP_NAME, op, test)
     result = bm.profile(op, *inputs)
     BenchmarkReport.record(op, locals(), result, tag="tileops")
@@ -151,10 +151,10 @@ def _fused_ln_params():
 
 @pytest.mark.parametrize("m, n, dtype, tune", _fused_ln_params())
 def test_fused_add_layer_norm_bench(m: int, n: int, dtype: torch.dtype, tune: bool) -> None:
-    test = FusedAddLayerNormTest(m, n, dtype)
+    test = FusedAddLayerNormWorkload(m, n, dtype)
     inputs = test.gen_inputs()
 
-    op = FusedAddLayerNormFwdOp(dtype=dtype, tune=tune)
+    op = FusedAddLayerNormFwdOp(tune=tune)
     bm = ManifestBenchmark(_FUSED_LN_OP_NAME, op, test)
     result = bm.profile(op, *inputs)
     BenchmarkReport.record(op, locals(), result, tag="tileops")

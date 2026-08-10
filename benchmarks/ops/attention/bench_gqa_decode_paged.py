@@ -9,12 +9,12 @@ from benchmarks.benchmark_base import BenchmarkReport, ManifestBenchmark
 from benchmarks.ops.attention.manifest_params import gqa_decode_paged_args, manifest_params
 from tileops.manifest import load_workloads
 from tileops.ops import GroupedQueryAttentionDecodePagedWithKVCacheFwdOp
-from workloads.attention.gqa import GroupedQueryAttentionDecodePagedTest
+from workloads.attention.gqa import GroupedQueryAttentionDecodePagedWorkload
 
 _OP_NAME = "GroupedQueryAttentionDecodePagedWithKVCacheFwdOp"
 
 
-class _GroupedQueryAttentionDecodePagedTestBaseline(GroupedQueryAttentionDecodePagedTest):
+class GroupedQueryAttentionDecodePagedTestBaseline(GroupedQueryAttentionDecodePagedWorkload):
     """Adds baseline ref_program for benchmark profiling."""
 
     def ref_program(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
@@ -132,6 +132,7 @@ def _flashinfer_gqa_decode_paged(test, q, k, v, real_seqlen_kv, block_table):
 _GQA_DECODE_PAGED_BENCH_PARAMS = manifest_params(
     load_workloads(_OP_NAME),
     gqa_decode_paged_args,
+    tune=False,
 )
 
 
@@ -142,14 +143,14 @@ _GQA_DECODE_PAGED_BENCH_PARAMS = manifest_params(
 def test_gqa_decode_paged_bench(batch: int, heads: int, heads_kv: int, seqlen_kv: int, dim: int,
                                 page_size: int, sm_scale: float | None,
                                 softcap: float | None, dtype: torch.dtype, tune: bool) -> None:
-    test = _GroupedQueryAttentionDecodePagedTestBaseline(
+    test = GroupedQueryAttentionDecodePagedTestBaseline(
         batch, heads, heads_kv, seqlen_kv, dim, page_size, dtype,
         sm_scale=sm_scale, softcap=softcap)
     inputs = test.gen_inputs()
     q, k, v, real_seqlen_kv, block_table = inputs
 
     op = GroupedQueryAttentionDecodePagedWithKVCacheFwdOp(
-        batch, heads, heads_kv, seqlen_kv, dim, page_size, dtype,
+        batch, heads, heads_kv, seqlen_kv, dim, page_size,
         sm_scale=sm_scale, softcap=softcap, tune=tune)
     bm = ManifestBenchmark(_OP_NAME, op, test)
     result = bm.profile(op, *inputs)

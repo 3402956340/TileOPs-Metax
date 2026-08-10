@@ -149,15 +149,17 @@ def test_da_cumsum_fwd_bench(batch, num_chunks, chunk_len, n_heads, has_dt_bias,
         BenchmarkReport.record(op, locals(), result_bl, tag="torch-ref")
 
 
+
+
 def ssd_chunk_scan_fwd_ref(x, cb, dA_cumsum, C, prev_states, dt, n_groups):
-    """Official-aligned PyTorch reference for chunk scan.
+    """PyTorch reference for ssd_chunk_scan_fwd (benchmark-local copy).
 
     Inputs (official layouts):
       x:           [B, S, H, P]        dtype
       cb:          [B, C, G, L, L]     dtype    group-owned
       dA_cumsum:   [B, H, C, L]        float32
       C:           [B, S, G, N]        dtype    group-owned
-      prev_states: [B, C, H, P, N]     dtype    P before N
+      prev_states: [B, C, H, P, N]     float32  P before N
       dt:          [B, H, C, L]        dtype
 
     Output: [B, S, H, P]  float32
@@ -271,21 +273,6 @@ _SSD_CHUNK_SCAN_FWD_BENCH_PARAMS = [
     pytest.param(1,  16, 256, 24, 64, 128, 1, torch.float16, True, id="latency-130m-4k"),
     pytest.param(8,  16, 256, 24, 64, 128, 1, torch.float16, True, id="serving-130m-4k"),
     pytest.param(4, 128, 256, 24, 64, 128, 1, torch.float16, True, id="longctx-130m-32k"),
-    # ── 370M (n_heads=32) ──
-    pytest.param(1,  16, 256, 32, 64, 128, 1, torch.float16, True, id="latency-370m-4k"),
-    pytest.param(8,  16, 256, 32, 64, 128, 1, torch.float16, True, id="serving-370m-4k"),
-    pytest.param(4, 128, 256, 32, 64, 128, 1, torch.float16, True, id="longctx-370m-32k"),
-    pytest.param(32,  8, 256, 32, 64, 128, 1, torch.float16, True, id="throughput-370m-2k"),
-    # ── 780M (n_heads=48) ──
-    pytest.param(1,  16, 256, 48, 64, 128, 1, torch.float16, True, id="latency-780m-4k"),
-    pytest.param(8,  16, 256, 48, 64, 128, 1, torch.float16, True, id="serving-780m-4k"),
-    pytest.param(4, 128, 256, 48, 64, 128, 1, torch.float16, True, id="longctx-780m-32k"),
-    pytest.param(16,  8, 256, 48, 64, 128, 1, torch.float16, True, id="throughput-780m-2k"),
-    # ── 1.3B (n_heads=64) ──
-    pytest.param(1,  16, 256, 64, 64, 128, 1, torch.float16, True, id="latency-1p3b-4k"),
-    pytest.param(8,  16, 256, 64, 64, 128, 1, torch.float16, True, id="serving-1p3b-4k"),
-    pytest.param(2, 128, 256, 64, 64, 128, 1, torch.float16, True, id="longctx-1p3b-32k"),
-    pytest.param(8,   8, 256, 64, 64, 128, 1, torch.float16, True, id="throughput-1p3b-2k"),
     # ── 2.7B (n_heads=80) ──
     pytest.param(1,  16, 256, 80, 64, 128, 1, torch.float16, True, id="latency-2p7b-4k"),
     pytest.param(4,  16, 256, 80, 64, 128, 1, torch.float16, True, id="serving-2p7b-4k"),
@@ -548,19 +535,6 @@ _SSD_STATE_PASSING_FWD_BENCH_PARAMS = [
     pytest.param(1,  16, 24, 128, torch.float16, True, id="latency-130m-4k"),
     pytest.param(8,  16, 24, 128, torch.float16, True, id="serving-130m-4k"),
     pytest.param(4, 128, 24, 128, torch.float16, True, id="longctx-130m-32k"),
-    # ── 370M (n_heads=32) ──
-    pytest.param(1,  16, 32, 128, torch.float16, True, id="latency-370m-4k"),
-    pytest.param(8,  16, 32, 128, torch.float16, True, id="serving-370m-4k"),
-    pytest.param(4, 128, 32, 128, torch.float16, True, id="longctx-370m-32k"),
-    pytest.param(32,  8, 32, 128, torch.float16, True, id="throughput-370m-2k"),
-    # ── 780M (n_heads=48) ──
-    pytest.param(1,  16, 48, 128, torch.float16, True, id="latency-780m-4k"),
-    pytest.param(8,  16, 48, 128, torch.float16, True, id="serving-780m-4k"),
-    pytest.param(4, 128, 48, 128, torch.float16, True, id="longctx-780m-32k"),
-    # ── 1.3B (n_heads=64) ──
-    pytest.param(1,  16, 64, 128, torch.float16, True, id="latency-1p3b-4k"),
-    pytest.param(8,  16, 64, 128, torch.float16, True, id="serving-1p3b-4k"),
-    pytest.param(2, 128, 64, 128, torch.float16, True, id="longctx-1p3b-32k"),
     # ── 2.7B (n_heads=80) ──
     pytest.param(1,  16, 80, 128, torch.float16, True, id="latency-2p7b-4k"),
     pytest.param(4,  16, 80, 128, torch.float16, True, id="serving-2p7b-4k"),
@@ -694,18 +668,6 @@ _SSD_DECODE_BENCH_PARAMS = [
     pytest.param(1,  24, 64, 128, 1, torch.float16, True, id="latency-130m"),
     pytest.param(8,  24, 64, 128, 1, torch.float16, True, id="serving-130m"),
     pytest.param(64, 24, 64, 128, 1, torch.float16, True, id="throughput-130m"),
-    # ── 370M (n_heads=32) ──
-    pytest.param(1,  32, 64, 128, 1, torch.float16, True, id="latency-370m"),
-    pytest.param(8,  32, 64, 128, 1, torch.float16, True, id="serving-370m"),
-    pytest.param(64, 32, 64, 128, 1, torch.float16, True, id="throughput-370m"),
-    # ── 780M (n_heads=48) ──
-    pytest.param(1,  48, 64, 128, 1, torch.float16, True, id="latency-780m"),
-    pytest.param(8,  48, 64, 128, 1, torch.float16, True, id="serving-780m"),
-    pytest.param(32, 48, 64, 128, 1, torch.float16, True, id="throughput-780m"),
-    # ── 1.3B (n_heads=64) ──
-    pytest.param(1,  64, 64, 128, 1, torch.float16, True, id="latency-1p3b"),
-    pytest.param(8,  64, 64, 128, 1, torch.float16, True, id="serving-1p3b"),
-    pytest.param(16, 64, 64, 128, 1, torch.float16, True, id="throughput-1p3b"),
     # ── 2.7B (n_heads=80) ──
     pytest.param(1,  80, 64, 128, 1, torch.float16, True, id="latency-2p7b"),
     pytest.param(4,  80, 64, 128, 1, torch.float16, True, id="serving-2p7b"),

@@ -1,0 +1,228 @@
+"""MaskedFill ops (Tensor-value and scalar-value variants)."""
+
+from math import prod
+from typing import Dict, Optional
+
+import torch
+
+from tileops.kernels.elementwise import (
+    MaskedFillFwdKernel,
+    MaskedFillTensorValueFwdKernel,
+)
+from tileops.kernels.kernel_base import Kernel
+
+from ..op_base import Op
+from ._base import KernelEntry, _PerDtypeKernels, _validate_scalar_param_repr
+
+
+class MaskedFillFwdOp(_PerDtypeKernels, Op):
+    """MaskedFill with 0-dim Tensor value (``torch.Tensor.masked_fill(mask, value: Tensor)``).
+
+    Output shape is the bidirectional broadcast of ``input`` and ``mask``;
+    ``value`` must be a 0-dim Tensor. The Op expands ``input`` and ``mask``
+    to the broadcast shape and dispatches the existing flat scalar kernel
+    using ``value.item()`` as the fill literal — this keeps the
+    fast vectorized kernel path while satisfying the manifest's Tensor-value
+    contract (the kernel reads ``value`` once at forward time, which is
+    consistent with the 0-dim semantics).
+
+    Args:
+        input: Shape of the input tensor.
+        mask: Shape of the mask tensor (bool).
+        value: Shape of the value tensor (must be ``()`` per the manifest).
+        kernel_map: Optional dispatch override mapping kernel keys to
+            ``Kernel`` subclasses. Falls back to ``default_kernel_map``.
+    """
+
+    _op_name = "masked_fill"
+    _wrapped = None
+
+    def __init__(
+        self,
+        input: tuple,
+        mask: tuple,
+        value: tuple,
+        *,
+        kernel_map: Optional[Dict[str, Kernel]] = None,
+    ):
+        if tuple(value) != ():
+            raise ValueError(
+                f"MaskedFillFwdOp requires a 0-dim value Tensor; got shape {tuple(value)}"
+            )
+        self.input_shape = tuple(input)
+        self.mask_shape = tuple(mask)
+        self.value_shape = tuple(value)
+        self.out_shape = tuple(torch.broadcast_shapes(self.input_shape, self.mask_shape))
+        self.N_total = prod(self.out_shape) if self.out_shape else 1
+        self.dispatch_kernel(kernel_map)
+
+    def _build_entry(self, dtype: torch.dtype, *shape: int) -> KernelEntry:
+        """The kernel names the implementation and storage for this dtype."""
+        impl, compute = self._selected_kernel_cls("masked_fill_tensor_value").specialize(dtype)
+        supported = impl.SUPPORTED_DTYPES
+        if supported is not None and compute not in supported:
+            names = ", ".join(str(dt) for dt in (torch.bool, *supported))
+            raise ValueError(
+                f"{self._op_name} does not support dtype {dtype}. "
+                f"Supported: [{names}]"
+            )
+        return KernelEntry(
+            kernel=impl(self.N_total, compute),
+            compute_dtype=compute,
+            output_dtype=dtype,
+        )
+
+    @property
+    def default_kernel_map(self):
+        return {"masked_fill_tensor_value": MaskedFillTensorValueFwdKernel}
+
+    @staticmethod
+    def _expand_flat(t: torch.Tensor, target_shape: tuple) -> torch.Tensor:
+        if tuple(t.shape) != tuple(target_shape):
+            t = t.expand(target_shape)
+        return t.contiguous().view(-1)
+
+    def _eager_forward(
+        self, input: torch.Tensor, mask: torch.Tensor, value: torch.Tensor,
+    ) -> torch.Tensor:
+        # Broadcast input/mask to out_shape; the kernel owns how it represents
+        # the predicate and the scalar.
+        out_shape = self.out_shape if self.out_shape else (1,)
+        entry = self._entry(input.dtype)
+        x_flat = self._expand_flat(input, out_shape)
+        mask_b = mask if mask.dtype == torch.bool else mask.bool()
+        mask_flat = self._expand_flat(mask_b, out_shape)
+        result = entry.kernel(x_flat, mask_flat, value)
+        return result.view(self.out_shape if self.out_shape else ())
+
+    def forward(
+        self, input: torch.Tensor, mask: torch.Tensor, value: torch.Tensor,
+    ) -> torch.Tensor:
+        if not (input.is_cuda and mask.is_cuda and value.is_cuda):
+            raise ValueError("Inputs must be CUDA tensors")
+        if mask.dtype != torch.bool:
+            raise ValueError(f"Expected mask.dtype torch.bool, got {mask.dtype}")
+        if value.dtype != input.dtype:
+            raise ValueError(
+                f"Expected value.dtype {input.dtype}, got {value.dtype}")
+        if tuple(input.shape) != self.input_shape:
+            raise ValueError(
+                f"Expected input.shape {self.input_shape}, got {tuple(input.shape)}"
+            )
+        if tuple(mask.shape) != self.mask_shape:
+            raise ValueError(
+                f"Expected mask.shape {self.mask_shape}, got {tuple(mask.shape)}"
+            )
+        if tuple(value.shape) != ():
+            raise ValueError(f"Expected value.shape (), got {tuple(value.shape)}")
+        wrapped = type(self)._wrapped
+        if wrapped is not None:
+            return wrapped(input, mask, value, self._instance_key)
+        return self._eager_forward(input, mask, value)
+
+
+class MaskedFillScalarFwdOp(_PerDtypeKernels, Op):
+    """MaskedFill with Number (scalar) value.
+
+    Conforms to ``torch.Tensor.masked_fill(mask, value: Number)``. Output
+    shape follows the bidirectional broadcast of ``input`` and ``mask``.
+
+    The manifest declares the PyTorch dtype union (``bool | uint8 |
+    int8 | int16 | int32 | int64 | float16 | bfloat16 | float32``); every
+    union member dispatches to a real kernel. A bool operand is served by
+    whatever storage the selected kernel requires; the op passes and receives
+    semantic bool either way.
+
+    Args:
+        input: Shape of the input tensor.
+        mask: Shape of the mask tensor (bool).
+        value: Scalar fill value (bool / int / float). Range-validated
+            against ``dtype`` with PyTorch ``Tensor.masked_fill``
+            coercion: bool reduces non-zero to ``True``; integer dtypes
+            range-check the real value against ``torch.iinfo`` and
+            truncate floats toward zero (``1.5 -> 1``); ``torch.uint8``
+            additionally wraps Python ints in ``[-255, 0)`` via two's
+            complement.
+        kernel_map: Optional dispatch override mapping kernel keys to
+            ``Kernel`` subclasses. Falls back to ``default_kernel_map``.
+    """
+
+    _op_name = "masked_fill"
+    _wrapped = None
+
+    def __init__(
+        self,
+        input: tuple,
+        mask: tuple,
+        value: bool | int | float = 0,
+        *,
+        kernel_map: Optional[Dict[str, Kernel]] = None,
+    ):
+        self.input_shape = tuple(input)
+        self.mask_shape = tuple(mask)
+        self.value = value
+        self.out_shape = tuple(torch.broadcast_shapes(self.input_shape, self.mask_shape))
+        self.N_total = prod(self.out_shape) if self.out_shape else 1
+        self.dispatch_kernel(kernel_map)
+
+    def _build_entry(self, dtype: torch.dtype, *shape: int) -> KernelEntry:
+        """The fill value is baked in, so it is checked against each dtype."""
+        impl, compute = self._selected_kernel_cls("masked_fill").specialize(dtype)
+        supported = impl.SUPPORTED_DTYPES
+        if supported is not None and compute not in supported:
+            names = ", ".join(str(dt) for dt in (torch.bool, *supported))
+            raise ValueError(
+                f"{self._op_name} does not support dtype {dtype}. "
+                f"Supported: [{names}]"
+            )
+        _validate_scalar_param_repr(
+            "value", self.value, dtype, self._op_name,
+            allow_nonfinite_float=True,
+        )
+        # The scalar is baked in, so it is normalized to the semantic dtype's
+        # value set — bool takes 0 or 1 whatever storage the kernel picked.
+        value = (1 if bool(self.value) else 0) if dtype == torch.bool else self.value
+        return KernelEntry(
+            kernel=impl(self.N_total, compute, value),
+            compute_dtype=compute,
+            output_dtype=dtype,
+        )
+
+    @property
+    def default_kernel_map(self):
+        return {"masked_fill": MaskedFillFwdKernel}
+
+    @staticmethod
+    def _expand_flat(t: torch.Tensor, target_shape: tuple) -> torch.Tensor:
+        if tuple(t.shape) != tuple(target_shape):
+            t = t.expand(target_shape)
+        return t.contiguous().view(-1)
+
+    def _eager_forward(self, input: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        out_shape = self.out_shape if self.out_shape else (1,)
+        entry = self._entry(input.dtype)
+        x_flat = self._expand_flat(input, out_shape)
+        mask_b = mask if mask.dtype == torch.bool else mask.bool()
+        mask_flat = self._expand_flat(mask_b, out_shape)
+        result = entry.kernel(x_flat, mask_flat)
+        return result.view(self.out_shape if self.out_shape else ())
+
+    def forward(self, input: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        if not input.is_cuda:
+            raise ValueError("Input must be a CUDA tensor")
+        if tuple(input.shape) != self.input_shape:
+            raise ValueError(
+                f"Expected input.shape {self.input_shape}, got {tuple(input.shape)}"
+            )
+        if not mask.is_cuda:
+            raise ValueError("Mask must be a CUDA tensor")
+        if mask.dtype != torch.bool:
+            raise ValueError(f"Expected mask.dtype torch.bool, got {mask.dtype}")
+        if tuple(mask.shape) != self.mask_shape:
+            raise ValueError(
+                f"Expected mask.shape {self.mask_shape}, got {tuple(mask.shape)}"
+            )
+        wrapped = type(self)._wrapped
+        if wrapped is not None:
+            return wrapped(input, mask, self._instance_key)
+        return self._eager_forward(input, mask)

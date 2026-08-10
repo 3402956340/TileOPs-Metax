@@ -1,101 +1,133 @@
-"""Benchmarks for the MHC pre/post ops."""
+"""Benchmarks for the MHC pre/post ops.
+
+Workload shapes, dtypes, and the pre-op scaling params come from the ops
+manifest; roofline FLOP and byte counts come from each op's
+``eval_roofline()`` via :class:`ManifestBenchmark`.
+"""
+
 
 import math
-from typing import Optional
 
 import pytest
 import torch
 
-from benchmarks.benchmark_base import BenchmarkBase, BenchmarkReport
+from benchmarks.benchmark_base import (
+    BenchmarkReport,
+    ManifestBenchmark,
+    workload_field_params,
+)
+from tileops.manifest import load_workloads
 from tileops.ops import MHCPostOp, MHCPreOp
-from workloads.mhc import MHCPostTest, MHCPreTest
+from workloads.mhc import MHCPostWorkload, MHCPreWorkload
+
+# Autotuning is a bench-run policy, not a workload property; manifest
+# workloads do not carry it.
+_TUNE = True
+
+# Sinkhorn epsilon is not part of any manifest workload; use the manifest
+# signature default.
+_SINKHORN_EPS = 0.02
 
 
-class _MHCPreTestBaseline(MHCPreTest):
+def mhc_pre_ref(
+    batch: int,
+    n_expand: int,
+    c_x: int,
+    phi: torch.Tensor,
+    x: torch.Tensor,
+    b: torch.Tensor,
+    alpha_pre,
+    alpha_post,
+    alpha_res,
+    sinkhorn_repeat: int,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Baseline for the MHC pre-projection stage (benchmark-local copy).
+
+    Returns:
+        ``(x_res_ref, x_layer_ref)``, both bfloat16.
+    """
+
+    xsqr = x * x
+    norm_eps = 0.0001
+    r_ref = torch.sqrt(xsqr.sum(dim=1)) / math.sqrt(n_expand * c_x) + norm_eps
+    H = torch.zeros([batch, n_expand * n_expand + 2 * n_expand],
+                    device=x.device, dtype=torch.float)
+    for i in range(batch):
+        H[i, :] = x[i, :].float() @ phi
+
+    H_pre_ref = H[:, :n_expand]
+    H_res_ref = H[:, 2 * n_expand:]
+    H_res_ref = H_res_ref.reshape(batch, n_expand, n_expand)
+
+    b_pre_ref = b[:n_expand]
+    b_res_ref = b[2 * n_expand:]
+    b_res_ref = b_res_ref.reshape([n_expand, n_expand])
+
+    H_pre_ref = torch.sigmoid(alpha_pre * H_pre_ref / r_ref.unsqueeze(-1) + b_pre_ref)
+    H_res_ref = alpha_res * H_res_ref / r_ref.unsqueeze(-1).unsqueeze(-1) + b_res_ref
+
+    H_res_ref_tmp = H_res_ref.max(dim=-1, keepdim=True).values
+
+    H_res_ref = torch.exp(H_res_ref - H_res_ref_tmp)
+    for _i in range(sinkhorn_repeat):
+        H_res_ref = H_res_ref / (H_res_ref.sum(dim=-1, keepdim=True) + eps)
+        H_res_ref = H_res_ref / (H_res_ref.sum(dim=-2, keepdim=True) + eps)
+    x_in_reshaped = x.reshape([batch, n_expand, c_x])
+    x_res_ref = torch.zeros([batch, n_expand, c_x], device=x.device, dtype=torch.bfloat16)
+    x_layer_ref = torch.zeros([batch, c_x], device=x.device, dtype=torch.bfloat16)
+
+    h_res_ref = H_res_ref
+    h_pre_ref = H_pre_ref
+    for i in range(batch):
+        h_res_tmp = h_res_ref[i, :, :].float()
+        h_pre_tmp = h_pre_ref[i, :].float()
+        x_in_reshaped_tmp = x_in_reshaped[i, :, :].float()
+        x_res_ref[i, :, :] = h_res_tmp @ x_in_reshaped_tmp
+        x_layer_ref[i, :] = h_pre_tmp @ x_in_reshaped_tmp
+
+    x_res_ref = x_res_ref.reshape(batch, n_expand * c_x)
+
+    x_res_ref = x_res_ref.bfloat16()
+    x_layer_ref = x_layer_ref.bfloat16()
+    return x_res_ref, x_layer_ref
+
+
+class MHCPreTestBaseline(MHCPreWorkload):
     """Adds baseline ref_program for benchmark profiling."""
 
     def ref_program(self, phi: torch.Tensor, x: torch.Tensor, b: torch.Tensor,
                     alpha_pre, alpha_post, alpha_res,
                     sinkhorn_repeat: int, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
-        batch = self.batch
-        n_expand = self.n_expand
-        c_x = self.c_x
-
-        xsqr = x * x
-        norm_eps = 0.0001
-        r_ref = torch.sqrt(xsqr.sum(dim=1)) / math.sqrt(n_expand * c_x) + norm_eps
-        H = torch.zeros([batch, n_expand * n_expand + 2 * n_expand],
-                        device="cuda", dtype=torch.float)
-        for i in range(batch):
-            H[i, :] = x[i, :].float() @ phi
-
-        H_pre_ref = H[:, :n_expand]
-        H_res_ref = H[:, 2 * n_expand:]
-        H_res_ref = H_res_ref.reshape(batch, n_expand, n_expand)
-
-        b_pre_ref = b[:n_expand]
-        b_res_ref = b[2 * n_expand:]
-        b_res_ref = b_res_ref.reshape([n_expand, n_expand])
-
-        H_pre_ref = torch.sigmoid(alpha_pre * H_pre_ref / r_ref.unsqueeze(-1) + b_pre_ref)
-        H_res_ref = alpha_res * H_res_ref / r_ref.unsqueeze(-1).unsqueeze(-1) + b_res_ref
-
-        H_res_ref_tmp = H_res_ref.max(dim=-1, keepdim=True).values
-
-        H_res_ref = torch.exp(H_res_ref - H_res_ref_tmp)
-        for _i in range(sinkhorn_repeat):
-            H_res_ref = H_res_ref / (H_res_ref.sum(dim=-1, keepdim=True) + eps)
-            H_res_ref = H_res_ref / (H_res_ref.sum(dim=-2, keepdim=True) + eps)
-        x_in_reshaped = x.reshape([batch, n_expand, c_x])
-        x_res_ref = torch.zeros([batch, n_expand, c_x], device="cuda", dtype=torch.bfloat16)
-        x_layer_ref = torch.zeros([batch, c_x], device="cuda", dtype=torch.bfloat16)
-
-        h_res_ref = H_res_ref
-        h_pre_ref = H_pre_ref
-        for i in range(batch):
-            h_res_tmp = h_res_ref[i, :, :].float()
-            h_pre_tmp = h_pre_ref[i, :].float()
-            x_in_reshaped_tmp = x_in_reshaped[i, :, :].float()
-            x_res_ref[i, :, :] = h_res_tmp @ x_in_reshaped_tmp
-            x_layer_ref[i, :] = h_pre_tmp @ x_in_reshaped_tmp
-
-        x_res_ref = x_res_ref.reshape(batch, n_expand * c_x)
-
-        x_res_ref = x_res_ref.bfloat16()
-        x_layer_ref = x_layer_ref.bfloat16()
-        return x_res_ref, x_layer_ref
+        return mhc_pre_ref(
+            self.batch, self.n_expand, self.c_x,
+            phi, x, b, alpha_pre, alpha_post, alpha_res, sinkhorn_repeat, eps,
+        )
 
 
-class MHCPreBenchmark(BenchmarkBase[MHCPreTest]):
-
-    def calculate_flops(self) -> Optional[float]:
-        t = self.workload
-        flops = 2 * t.batch * (
-            (t.n_expand * t.n_expand * t.c_x * t.c_x) *
-            (t.n_expand * t.n_expand + 2 * t.n_expand) + t.n_expand * t.c_x)
-        return flops
-
-    def calculate_memory(self) -> Optional[float]:
-        t = self.workload
-        return (t.n_expand * 3 + 1) * t.c_x + (t.n_expand * t.c_x) * (
-            t.n_expand * t.n_expand + 2 * t.n_expand)
+_MHC_PRE_OP = "MHCPreOp"
+_MHC_PRE_PARAMS = workload_field_params(
+    load_workloads(_MHC_PRE_OP),
+    ("batch", "n_expand", "c_x", "dtype", "alpha_pre", "alpha_post", "alpha_res",
+     "sinkhorn_repeat"),
+)
 
 
-_MHC_PRE_BENCH_PARAMS = [
-    pytest.param(1, 4, 1280, torch.bfloat16, True, id="small"),
-    pytest.param(2, 4, 1920, torch.bfloat16, True, id="medium"),
-    pytest.param(4, 4, 2560, torch.bfloat16, True, id="large"),
-]
-
-
-@pytest.mark.parametrize("batch, n_expand, c_x, dtype, tune", _MHC_PRE_BENCH_PARAMS)
+@pytest.mark.parametrize(
+    "batch, n_expand, c_x, dtype, alpha_pre, alpha_post, alpha_res, sinkhorn_repeat",
+    _MHC_PRE_PARAMS,
+)
 def test_mhc_pre_bench(batch: int, n_expand: int, c_x: int, dtype: torch.dtype,
-                       tune: bool) -> None:
-    test = _MHCPreTestBaseline(batch, n_expand, c_x, dtype)
-    bm = MHCPreBenchmark(test)
-    inputs = test.gen_inputs()
+                       alpha_pre: float, alpha_post: float, alpha_res: float,
+                       sinkhorn_repeat: int) -> None:
+    test = MHCPreTestBaseline(batch, n_expand, c_x, dtype)
+    phi, x, b = test.gen_inputs()[:3]
+    # The shared workload generator draws its own scaling params; the
+    # manifest workload is the authority for them.
+    inputs = (phi, x, b, alpha_pre, alpha_post, alpha_res, sinkhorn_repeat, _SINKHORN_EPS)
 
-    op = MHCPreOp(tune=tune)
+    op = MHCPreOp(tune=_TUNE)
+    bm = ManifestBenchmark(_MHC_PRE_OP, op, test)
     result = bm.profile(op, *inputs)
     BenchmarkReport.record(op, locals(), result, tag="tileops")
 
@@ -103,49 +135,29 @@ def test_mhc_pre_bench(batch: int, n_expand: int, c_x: int, dtype: torch.dtype,
     BenchmarkReport.record(op, locals(), result_bl, tag="torch-ref")
 
 
-class _MHCPostTestBaseline(MHCPostTest):
+class MHCPostTestBaseline(MHCPostWorkload):
     """Adds baseline ref_program for benchmark profiling."""
 
     def ref_program(self, x_layer_out: torch.Tensor, h_post: torch.Tensor,
                     x_res: torch.Tensor) -> torch.Tensor:
-        batch = self.batch
-        n_expand = self.n_expand
-        c_x = self.c_x
-
         x_out_ref = (h_post.unsqueeze(2).float() @ x_layer_out.unsqueeze(1).float()).reshape(
-            batch, n_expand * c_x) + x_res.float()
-        x_out_ref = x_out_ref.bfloat16()
-        return x_out_ref
+            self.batch, self.n_expand * self.c_x) + x_res.float()
+        return x_out_ref.bfloat16()
 
 
-class MHCPostBenchmark(BenchmarkBase[MHCPostTest]):
-
-    def calculate_flops(self) -> Optional[float]:
-        t = self.workload
-        flops = 2 * t.batch * (
-            t.n_expand * t.n_expand * t.c_x * t.c_x + t.n_expand * t.c_x)
-        return flops
-
-    def calculate_memory(self) -> Optional[float]:
-        t = self.workload
-        return (t.n_expand * 2 + 1) * t.c_x
+_MHC_POST_OP = "MHCPostOp"
+_MHC_POST_PARAMS = workload_field_params(
+    load_workloads(_MHC_POST_OP), ("batch", "n_expand", "c_x", "dtype"),
+)
 
 
-_MHC_POST_BENCH_PARAMS = [
-    pytest.param(1, 4, 1280, torch.bfloat16, True, id="small"),
-    pytest.param(2, 4, 1920, torch.bfloat16, True, id="medium"),
-    pytest.param(4, 4, 2560, torch.bfloat16, True, id="large"),
-]
-
-
-@pytest.mark.parametrize("batch, n_expand, c_x, dtype, tune", _MHC_POST_BENCH_PARAMS)
-def test_mhc_post_bench(batch: int, n_expand: int, c_x: int, dtype: torch.dtype,
-                         tune: bool) -> None:
-    test = _MHCPostTestBaseline(batch, n_expand, c_x, dtype)
-    bm = MHCPostBenchmark(test)
+@pytest.mark.parametrize("batch, n_expand, c_x, dtype", _MHC_POST_PARAMS)
+def test_mhc_post_bench(batch: int, n_expand: int, c_x: int, dtype: torch.dtype) -> None:
+    test = MHCPostTestBaseline(batch, n_expand, c_x, dtype)
     inputs = test.gen_inputs()
 
-    op = MHCPostOp(tune=tune)
+    op = MHCPostOp(tune=_TUNE)
+    bm = ManifestBenchmark(_MHC_POST_OP, op, test)
     result = bm.profile(op, *inputs)
     BenchmarkReport.record(op, locals(), result, tag="tileops")
 

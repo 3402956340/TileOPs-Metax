@@ -1,26 +1,13 @@
-"""Benchmark for SharedExpertMLPMACAKernel vs PyTorch MLP."""
+"""Benchmark for SharedExpertMLPKernel / SharedExpertMLPMACAKernel vs PyTorch MLP."""
 
 import pytest
 import torch
 
 from benchmarks.benchmark_base import BenchmarkBase, BenchmarkReport
-from tileops.kernels.moe import SharedExpertMLPMACAKernel
-from workloads.workload_base import FixtureBase, WorkloadBase
-
-
-class SharedMLPBenchTest(WorkloadBase):
-    def __init__(self, num_tokens, hidden_size, ffn_size, dtype):
-        self.num_tokens = num_tokens
-        self.hidden_size = hidden_size
-        self.ffn_size = ffn_size
-        self.dtype = dtype
-
-    def gen_inputs(self):
-        device = torch.device("cuda")
-        hidden = torch.randn(self.num_tokens, self.hidden_size, dtype=self.dtype, device=device)
-        w_gate_up = torch.randn(self.ffn_size * 2, self.hidden_size, dtype=self.dtype, device=device)
-        w_down = torch.randn(self.hidden_size, self.ffn_size, dtype=self.dtype, device=device)
-        return hidden, w_gate_up, w_down
+from tileops.kernels.moe import SharedExpertMLPKernel, SharedExpertMLPMACAKernel
+from tileops.utils import is_maca
+from workloads.moe import MoeSharedExpertMlpWorkload
+from workloads.workload_base import FixtureBase
 
 
 class SharedMLPBenchFixture(FixtureBase):
@@ -49,13 +36,14 @@ class SharedMLPBenchmark(BenchmarkBase):
 
 @SharedMLPBenchFixture
 def test_shared_mlp_bench(num_tokens, hidden_size, ffn_size, dtype):
-    test = SharedMLPBenchTest(num_tokens, hidden_size, ffn_size, dtype)
+    test = MoeSharedExpertMlpWorkload(num_tokens, hidden_size, ffn_size, dtype)
     bm = SharedMLPBenchmark(test)
     hidden, w_gate_up, w_down = test.gen_inputs()
 
     # TileLang kernel
-    kernel = SharedExpertMLPMACAKernel(num_tokens=num_tokens, hidden_size=hidden_size,
-                                   ffn_size=ffn_size, dtype=dtype)
+    kernel_cls = SharedExpertMLPMACAKernel if is_maca() else SharedExpertMLPKernel
+    kernel = kernel_cls(num_tokens=num_tokens, hidden_size=hidden_size,
+                        ffn_size=ffn_size, dtype=dtype)
     kernel(hidden, w_gate_up, w_down)  # warmup
     torch.cuda.synchronize()
 

@@ -10,10 +10,10 @@ import torch.nn.functional as F
 from tests.test_base import FixtureBase, TestBase
 from tileops.kernels.elementwise import ReluFwdKernel
 from tileops.ops.elementwise import ReluFwdOp
-from workloads.elementwise import ReluTest as _ReluTestWorkload
+from workloads.elementwise import RandnFlatWorkload, ReluWorkload
 
 
-class ReluTest(_ReluTestWorkload, TestBase):
+class ReluTest(ReluWorkload, TestBase):
     def ref_program(self, x: torch.Tensor) -> torch.Tensor:
         return torch.relu(x.float()).to(x.dtype)
 
@@ -44,7 +44,7 @@ def _get_tolerances(dtype: torch.dtype) -> tuple[float, float]:
 @ReluFixture
 def test_relu_op(n_total: int, dtype: torch.dtype) -> None:
     test = ReluTest(n_total, dtype)
-    op = ReluFwdOp(N_total=n_total, dtype=dtype)
+    op = ReluFwdOp(N_total=n_total)
     atol, rtol = _get_tolerances(dtype)
     test.check(op, *test.gen_inputs(), atol=atol, rtol=rtol)
 
@@ -93,19 +93,12 @@ class ActivationEdgeFixture(FixtureBase):
     ]
 
 
-class UnaryActivationTest(TestBase):
+class UnaryActivationTest(RandnFlatWorkload, TestBase):
     """Generic test fixture for a single-input, single-output unary op."""
 
     def __init__(self, n_total: int, dtype: torch.dtype, gen_fn=None, ref_fn=None):
-        self.n_total = n_total
-        self.dtype = dtype
-        self._gen_fn = gen_fn
+        super().__init__(n_total, dtype, gen_fn=gen_fn)
         self._ref_fn = ref_fn
-
-    def gen_inputs(self) -> tuple[torch.Tensor]:
-        if self._gen_fn is not None:
-            return (self._gen_fn(self.n_total, self.dtype),)
-        return (torch.randn(self.n_total, device="cuda", dtype=self.dtype),)
 
     def ref_program(self, x: torch.Tensor) -> torch.Tensor:
         return self._ref_fn(x)
@@ -118,7 +111,7 @@ def _randn(n: int, dtype: torch.dtype) -> torch.Tensor:
 def _make_activation_test(n_total, dtype, gen_fn, ref_fn, op_cls, **op_kwargs):
     """Build test, instantiate op, and run check."""
     test = UnaryActivationTest(n_total, dtype, gen_fn=gen_fn, ref_fn=ref_fn)
-    op = op_cls(N_total=n_total, dtype=dtype, **op_kwargs)
+    op = op_cls(N_total=n_total, **op_kwargs)
     if dtype == torch.float16:
         tol = {"atol": 1e-3, "rtol": 1e-3}
     elif dtype == torch.bfloat16:
@@ -287,7 +280,7 @@ def test_prelu(n_total: int, dtype: torch.dtype) -> None:
     weight = torch.randn(C, device="cuda", dtype=dtype).abs() * 0.1 + 0.01
     ref = F.prelu(x.float(), weight.float()).to(dtype)
 
-    op = PreluFwdOp(shape=shape, dtype=dtype, num_channels=C)
+    op = PreluFwdOp(shape=shape, num_channels=C)
     out = op(x, weight)
     if dtype == torch.float16:
         tol = {"atol": 1e-3, "rtol": 1e-3}
@@ -309,7 +302,7 @@ def test_prelu_batch_dim() -> None:
     x = torch.randn(shape, device="cuda", dtype=dtype)
     weight = torch.tensor([0.1, 0.2, 0.3, 0.4], device="cuda", dtype=dtype)
     ref = F.prelu(x, weight)
-    op = PreluFwdOp(shape=shape, dtype=dtype, num_channels=C)
+    op = PreluFwdOp(shape=shape, num_channels=C)
     out = op(x, weight)
     torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)
 
@@ -325,7 +318,7 @@ def test_prelu_rejects_mismatched_shape_same_numel() -> None:
     dtype = torch.float32
     shape = (2, 4, 8)
     C = 4
-    op = PreluFwdOp(shape=shape, dtype=dtype, num_channels=C)
+    op = PreluFwdOp(shape=shape, num_channels=C)
     weight = torch.tensor([0.1, 0.2, 0.3, 0.4], device="cuda", dtype=dtype)
     bad = torch.randn((2, 8, 4), device="cuda", dtype=dtype)
     with pytest.raises(ValueError, match=r"Expected input.shape"):

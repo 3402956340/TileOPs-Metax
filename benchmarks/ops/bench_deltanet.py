@@ -20,7 +20,7 @@ import torch
 
 from benchmarks.benchmark_base import BenchmarkBase, BenchmarkReport
 from tileops.ops import DeltaNetBwdOp, DeltaNetFwdOp, DeltaNetOp
-from workloads.linear_attention import DeltaNetFwdTest
+from workloads.linear_attention import DeltaNetFwdWorkload
 from workloads.workload_base import FixtureBase
 
 
@@ -115,26 +115,18 @@ def prepare_wy_repr_deltanet_torch(k, beta, chunk_size):
     B, H, S, DK = k.shape
     assert S % chunk_size == 0
     BC = chunk_size
-    Aw = torch.empty(B, H, S, BC, dtype=torch.float32, device=k.device)
-    Au = torch.empty(B, H, S, BC, dtype=torch.float32, device=k.device)
-
-    for b in range(B):
-        for h in range(H):
-            for c in range(S // BC):
-                i0, i1 = c * BC, (c + 1) * BC
-                kc = k[b, h, i0:i1, :].float()
-                bc = beta[b, h, i0:i1].float()
-                Gram = kc @ kc.T
-                M = bc.unsqueeze(-1) * Gram
-                A = torch.eye(BC, device=k.device) + torch.tril(M, diagonal=-1)
-                A_inv = torch.linalg.inv(A)
-                Aw[b, h, i0:i1, :] = A_inv
-                Au[b, h, i0:i1, :] = A_inv
-
-    return Aw, Au
+    NC = S // BC
+    kc = k.float().reshape(B, H, NC, BC, DK)
+    bc = beta.float().reshape(B, H, NC, BC)
+    gram = kc @ kc.transpose(-2, -1)
+    m = bc.unsqueeze(-1) * gram
+    eye = torch.eye(BC, dtype=torch.float32, device=k.device)
+    a = eye + torch.tril(m, diagonal=-1)
+    a_inv = torch.linalg.inv(a).reshape(B, H, S, BC)
+    return a_inv, a_inv.clone()
 
 
-class _DeltaNetFwdTestBaseline(DeltaNetFwdTest):
+class DeltaNetFwdTestBaseline(DeltaNetFwdWorkload):
     """Adds baseline ref_program for benchmark profiling."""
 
     def ref_program(
@@ -170,7 +162,7 @@ def _to_fla_layout(q, k, v, beta):
 
 # Forward benchmark
 
-class DeltaNetFwdBenchmark(BenchmarkBase[DeltaNetFwdTest]):
+class DeltaNetFwdBenchmark(BenchmarkBase[DeltaNetFwdWorkload]):
 
     def calculate_flops(self) -> Optional[float]:
         t = self.workload
@@ -194,11 +186,6 @@ class DeltaNetVsFlaFwdFixture(FixtureBase):
             pytest.param(2, 8192, 4, 64, 64, 64, torch.float16, False, marks=pytest.mark.full),
             pytest.param(2, 16384, 4, 64, 64, 64, torch.float16, False, marks=pytest.mark.full),
             pytest.param(2, 32768, 4, 64, 64, 64, torch.float16, False, marks=pytest.mark.nightly),
-            pytest.param(2, 2048, 4, 64, 64, 64, torch.bfloat16, False, marks=pytest.mark.full),
-            pytest.param(2, 4096, 4, 64, 64, 64, torch.bfloat16, False, marks=pytest.mark.full),
-            pytest.param(2, 8192, 4, 64, 64, 64, torch.bfloat16, False, marks=pytest.mark.full),
-            pytest.param(2, 16384, 4, 64, 64, 64, torch.bfloat16, False, marks=pytest.mark.full),
-            pytest.param(2, 32768, 4, 64, 64, 64, torch.bfloat16, False, marks=pytest.mark.nightly),
         ]),
     ]
 
@@ -214,7 +201,7 @@ def test_deltanet_vs_fla_fwd(
     dtype: torch.dtype,
     tune: bool,
 ) -> None:
-    test = _DeltaNetFwdTestBaseline(batch, heads, seq_len, dim_k, dim_v, chunk_size, dtype)
+    test = DeltaNetFwdTestBaseline(batch, heads, seq_len, dim_k, dim_v, chunk_size, dtype)
     bm = DeltaNetFwdBenchmark(test)
     inputs = test.gen_inputs()  # q, k, v, beta (BHSD)
 
@@ -242,7 +229,7 @@ def test_deltanet_vs_fla_fwd(
 
 # Backward benchmark
 
-class DeltaNetBwdBenchmark(BenchmarkBase[DeltaNetFwdTest]):
+class DeltaNetBwdBenchmark(BenchmarkBase[DeltaNetFwdWorkload]):
 
     def calculate_flops(self) -> Optional[float]:
         t = self.workload
@@ -265,10 +252,6 @@ class DeltaNetVsFlaBwdFixture(FixtureBase):
             pytest.param(2, 2048, 4, 64, 64, 64, torch.float16, False, marks=pytest.mark.full),
             pytest.param(2, 8192, 4, 64, 64, 64, torch.float16, False, marks=pytest.mark.full),
             pytest.param(2, 16384, 4, 64, 64, 64, torch.float16, False, marks=pytest.mark.full),
-            pytest.param(2, 2048, 4, 64, 64, 64, torch.bfloat16, False, marks=pytest.mark.full),
-            pytest.param(2, 4096, 4, 64, 64, 64, torch.bfloat16, False, marks=pytest.mark.full),
-            pytest.param(2, 8192, 4, 64, 64, 64, torch.bfloat16, False, marks=pytest.mark.full),
-            pytest.param(2, 16384, 4, 64, 64, 64, torch.bfloat16, False, marks=pytest.mark.full),
         ]),
     ]
 
@@ -284,7 +267,7 @@ def test_deltanet_vs_fla_bwd(
     dtype: torch.dtype,
     tune: bool,
 ) -> None:
-    test = _DeltaNetFwdTestBaseline(batch, heads, seq_len, dim_k, dim_v, chunk_size, dtype)
+    test = DeltaNetFwdTestBaseline(batch, heads, seq_len, dim_k, dim_v, chunk_size, dtype)
     bm = DeltaNetBwdBenchmark(test)
 
     B, H, S, DK, DV, BC = batch, heads, seq_len, dim_k, dim_v, chunk_size
@@ -333,7 +316,7 @@ def test_deltanet_vs_fla_bwd(
 
 # Combined fwd+bwd benchmark (fair comparison: both measure fwd+bwd total)
 
-class DeltaNetFwdBwdBenchmark(BenchmarkBase[DeltaNetFwdTest]):
+class DeltaNetFwdBwdBenchmark(BenchmarkBase[DeltaNetFwdWorkload]):
 
     def calculate_flops(self) -> Optional[float]:
         t = self.workload
@@ -356,10 +339,6 @@ class DeltaNetVsFlaFwdBwdFixture(FixtureBase):
             pytest.param(2, 2048, 4, 64, 64, 64, torch.float16, False, marks=pytest.mark.full),
             pytest.param(2, 8192, 4, 64, 64, 64, torch.float16, False, marks=pytest.mark.full),
             pytest.param(2, 16384, 4, 64, 64, 64, torch.float16, False, marks=pytest.mark.full),
-            pytest.param(2, 2048, 4, 64, 64, 64, torch.bfloat16, False, marks=pytest.mark.full),
-            pytest.param(2, 4096, 4, 64, 64, 64, torch.bfloat16, False, marks=pytest.mark.full),
-            pytest.param(2, 8192, 4, 64, 64, 64, torch.bfloat16, False, marks=pytest.mark.full),
-            pytest.param(2, 16384, 4, 64, 64, 64, torch.bfloat16, False, marks=pytest.mark.full),
         ]),
     ]
 
@@ -375,7 +354,7 @@ def test_deltanet_vs_fla_fwdbwd(
     dtype: torch.dtype,
     tune: bool,
 ) -> None:
-    test = _DeltaNetFwdTestBaseline(batch, heads, seq_len, dim_k, dim_v, chunk_size, dtype)
+    test = DeltaNetFwdTestBaseline(batch, heads, seq_len, dim_k, dim_v, chunk_size, dtype)
     bm = DeltaNetFwdBwdBenchmark(test)
 
     B, H, S, DK, DV, BC = batch, heads, seq_len, dim_k, dim_v, chunk_size

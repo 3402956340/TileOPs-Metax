@@ -1,4 +1,4 @@
-- Every `tileops/kernels/*` subpackage MUST have an `__init__.py` with explicit `__all__` and `from .module import Symbol` re-exports.
+- Every `src/tileops/kernels/*` subpackage MUST have an `__init__.py` with explicit `__all__` and `from .module import Symbol` re-exports.
 
 - Intra-package imports: relative (`from .op import Op`). Cross-package: absolute (`tileops.foo.bar`).
 
@@ -16,7 +16,7 @@
 
 - Decorate each `_<op>_kernel` builder (the `@tilelang.jit`-wrapping `Callable`) with `@functools.lru_cache(maxsize=<N>)`; every parameter must be hashable. Default `maxsize=32`; use `64` only when the distinct-config working set demands it; `maxsize=None` only for intrinsically bounded config spaces. Document any non-default choice at the call site.
 
-- Tag tests degraded by a process constraint (e.g. trust model splitting manifest and code PRs) with `FIXME(staged-rollout)`. Cleanup line names the invariant to restore — never a PR number. Scan: `grep -rn 'FIXME(staged-rollout)'`.
+- Tag code degraded by something outside its own scope — a contract stub that cannot be made abstract until every op migrates, a benchmark that must skip a manifest workload no kernel can run — with `FIXME(staged-rollout)`. Cleanup line names the invariant to restore — never a PR number. Scan: `grep -rn 'FIXME(staged-rollout)'`.
 
   ```python
   # FIXME(staged-rollout): <one-line summary of what's degraded>
@@ -36,4 +36,4 @@
 
 - Shipped source (code, docstrings, manifest YAML) must not reference issue/PR numbers, AC labels, round numbers, reviewer names, or `Follow-up: #N`. See [domain-rules/manifest-spec.md](../domain-rules/manifest-spec.md).
 
-  Discovery scan: `grep -rnE '(^|[^[:alnum:]])#[0-9]{3,}|AC-[0-9]+|round-[0-9]+ review|[Ff]ollow-up:[[:space:]]*#' --exclude-dir=manifest tileops/ tests/ benchmarks/ scripts/`
+  Discovery scan: `grep -rnE '(^|[^[:alnum:]])#[0-9]{3,}|AC-[0-9]+|round-[0-9]+ review|[Ff]ollow-up:[[:space:]]*#' --exclude-dir=manifest src/tileops/ tests/ benchmarks/ scripts/`

@@ -27,7 +27,7 @@ except ImportError:
 from benchmarks.benchmark_base import BenchmarkReport, ManifestBenchmark
 from tileops.manifest import load_workloads
 from tileops.ops.moe import MoeUnpermuteFwdOp
-from workloads.moe import MoeUnpermuteTest
+from workloads.moe import MoeUnpermuteWorkload
 
 _OP_NAME = "MoeUnpermuteFwdOp"
 
@@ -59,17 +59,17 @@ def _manifest_params():
 )
 def test_moe_unpermute_bench(total_tokens: int, top_k: int, hidden_size: int) -> None:
     dtype = torch.bfloat16
-    test = MoeUnpermuteTest(total_tokens, top_k, hidden_size, dtype)
+    test = MoeUnpermuteWorkload(total_tokens, top_k, hidden_size, dtype)
     mm2_pad, fwd_idx, topk_weights = test.gen_inputs()
 
     # TileOPs
-    op = MoeUnpermuteFwdOp(total_tokens, top_k, hidden_size, dtype)
+    op = MoeUnpermuteFwdOp(total_tokens, top_k, hidden_size)
     bm = ManifestBenchmark(_OP_NAME, op, test)
     op(mm2_pad, fwd_idx, topk_weights)  # warmup / JIT compile
     torch.cuda.synchronize()
 
     result = bm.profile(op, mm2_pad, fwd_idx, topk_weights)
-    BenchmarkReport.record("moe_unpermute", locals(), result, tag="tileops")
+    BenchmarkReport.record(op, locals(), result, tag="tileops")
 
     # vLLM baseline (optional)
     if _VLLM_AVAILABLE:
@@ -88,7 +88,7 @@ def test_moe_unpermute_bench(total_tokens: int, top_k: int, hidden_size: int) ->
         torch.cuda.synchronize()
 
         result_vllm = bm.profile(_vllm_fn, mm2_pad, fwd_idx, topk_weights)
-        BenchmarkReport.record("moe_unpermute", locals(), result_vllm, tag="vllm")
+        BenchmarkReport.record(op, locals(), result_vllm, tag="vllm")
     else:
         # Fallback: PyTorch vectorized baseline (gather + weighted sum)
         fwd_idx_long = fwd_idx.long()
@@ -104,7 +104,7 @@ def test_moe_unpermute_bench(total_tokens: int, top_k: int, hidden_size: int) ->
         torch.cuda.synchronize()
 
         result_torch = bm.profile(_torch_fn, mm2_pad, fwd_idx, topk_weights)
-        BenchmarkReport.record("moe_unpermute", locals(), result_torch, tag="torch-ref")
+        BenchmarkReport.record(op, locals(), result_torch, tag="torch-ref")
 
 
 if __name__ == "__main__":
