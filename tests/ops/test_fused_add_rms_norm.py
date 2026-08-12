@@ -3,10 +3,10 @@ import torch
 
 from tests.test_base import FixtureBase, TestBase
 from tileops.ops.norm.fused_add_rms_norm import FusedAddRMSNormFwdOp
-from workloads.normalization import FusedAddRMSNormTest as _FusedAddRMSNormTestWorkload
+from workloads.normalization import FusedAddRMSNormWorkload
 
 
-class FusedAddRMSNormTest(_FusedAddRMSNormTestWorkload, TestBase):
+class FusedAddRMSNormTest(FusedAddRMSNormWorkload, TestBase):
     def ref_program(
         self,
         x: torch.Tensor,
@@ -51,7 +51,7 @@ def _get_tolerances(dtype: torch.dtype) -> tuple[float, float]:
 @FusedAddRMSNormFixture
 def test_fused_add_rms_norm_op(m: int, n: int, dtype: torch.dtype, tune: bool) -> None:
     test = FusedAddRMSNormTest(m, n, dtype)
-    op = FusedAddRMSNormFwdOp(dtype=dtype, tune=tune)
+    op = FusedAddRMSNormFwdOp(tune=tune)
     atol, rtol = _get_tolerances(dtype)
     test.check(op, *test.gen_inputs(), atol=atol, rtol=rtol)
 
@@ -74,7 +74,7 @@ def test_fused_add_rms_norm_non_contiguous(m: int, n: int, dtype: torch.dtype) -
     residual = r_full[:, :n]
     weight = torch.randn(n, dtype=dtype, device="cuda")
 
-    op = FusedAddRMSNormFwdOp(M=m, N=n, dtype=dtype)
+    op = FusedAddRMSNormFwdOp(M=m, N=n)
 
     # Reference on contiguous copies
     test = FusedAddRMSNormTest(m, n, dtype)
@@ -105,7 +105,7 @@ def test_fused_add_rms_norm_3d(batch: int, seq: int, hidden: int, dtype: torch.d
     weight = torch.randn(hidden, dtype=dtype, device="cuda")
 
     M = batch * seq
-    op = FusedAddRMSNormFwdOp(dtype=dtype)
+    op = FusedAddRMSNormFwdOp()
 
     test = FusedAddRMSNormTest(M, hidden, dtype)
     y_ref, add_ref = test.ref_program(x, residual, weight)

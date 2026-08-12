@@ -22,7 +22,7 @@ import torch
 
 from benchmarks.benchmark_base import BenchmarkBase, BenchmarkReport
 from tileops.ops import GatedDeltaNetBwdOp, GatedDeltaNetFwdOp, GatedDeltaNetOp
-from workloads.linear_attention import GatedDeltaNetFwdTest
+from workloads.linear_attention import GatedDeltaNetFwdWorkload
 from workloads.workload_base import FixtureBase
 
 
@@ -132,28 +132,20 @@ def prepare_wy_repr_gated_torch(k, g_cum, beta, chunk_size):
     B, H, S, DK = k.shape
     assert S % chunk_size == 0
     BC = chunk_size
-    Aw = torch.empty(B, H, S, BC, dtype=torch.float32, device=k.device)
-    Au = torch.empty(B, H, S, BC, dtype=torch.float32, device=k.device)
-
-    for b in range(B):
-        for h in range(H):
-            for c in range(S // BC):
-                i0, i1 = c * BC, (c + 1) * BC
-                kc = k[b, h, i0:i1, :].float()
-                gc = g_cum[b, h, i0:i1].float()
-                bc = beta[b, h, i0:i1].float()
-                Gram = kc @ kc.T
-                Gamma = torch.exp(gc.unsqueeze(1) - gc.unsqueeze(0))
-                M = bc.unsqueeze(-1) * (Gamma * Gram)
-                A_g = torch.eye(BC, device=k.device) + torch.tril(M, diagonal=-1)
-                A_g_inv = torch.linalg.inv(A_g)
-                Aw[b, h, i0:i1, :] = A_g_inv
-                Au[b, h, i0:i1, :] = A_g_inv
-
-    return Aw, Au
+    NC = S // BC
+    kc = k.float().reshape(B, H, NC, BC, DK)
+    gc = g_cum.float().reshape(B, H, NC, BC)
+    bc = beta.float().reshape(B, H, NC, BC)
+    gram = kc @ kc.transpose(-2, -1)
+    gamma = torch.exp(gc.unsqueeze(-1) - gc.unsqueeze(-2))
+    m = bc.unsqueeze(-1) * (gamma * gram)
+    eye = torch.eye(BC, dtype=torch.float32, device=k.device)
+    a_g = eye + torch.tril(m, diagonal=-1)
+    a_g_inv = torch.linalg.inv(a_g).reshape(B, H, S, BC)
+    return a_g_inv, a_g_inv.clone()
 
 
-class _GatedDeltaNetFwdTestBaseline(GatedDeltaNetFwdTest):
+class GatedDeltaNetFwdTestBaseline(GatedDeltaNetFwdWorkload):
     """Adds baseline ref_program for benchmark profiling."""
 
     def ref_program(
@@ -194,7 +186,7 @@ def _to_fla_layout(q, k, v, g, beta):
 
 # Forward benchmark
 
-class GatedDeltaNetFwdBenchmark(BenchmarkBase[GatedDeltaNetFwdTest]):
+class GatedDeltaNetFwdBenchmark(BenchmarkBase[GatedDeltaNetFwdWorkload]):
 
     def calculate_flops(self) -> Optional[float]:
         t = self.workload
@@ -212,28 +204,14 @@ class GatedDeltaNetVsFlaFwdFixture(FixtureBase):
     PARAMS = [
         ("batch, seq_len, heads, dim_k, dim_v, chunk_size, dtype, tune", [
             # chunk_size=32
-            #(2, 1024, 4, 64, 64, 32, torch.float32, False),
-            #(2, 2048, 4, 64, 64, 32, torch.float32, False),
-            #(2, 4096, 4, 64, 64, 32, torch.float32, False),
-            #(2, 1024, 4, 64, 64, 32, torch.float16, False),
-            #(2, 2048, 4, 64, 64, 32, torch.float16, False),
             (2, 4096, 4, 64, 64, 32, torch.float16, False),
-            #(2, 1024, 4, 64, 64, 32, torch.bfloat16, False),
-            #(2, 2048, 4, 64, 64, 32, torch.bfloat16, False),
             (2, 4096, 4, 64, 64, 32, torch.bfloat16, False),
             # chunk_size=64
-            #(2, 1024, 4, 64, 64, 64, torch.float16, False),
             (2, 2048, 4, 64, 64, 64, torch.float16, False),
             (2, 4096, 4, 64, 64, 64, torch.float16, False),
             (2, 8192, 4, 64, 64, 64, torch.float16, False),
             (2, 16384, 4, 64, 64, 64, torch.float16, False),
             (2, 32768, 4, 64, 64, 64, torch.float16, False),
-            #(2, 1024, 4, 64, 64, 64, torch.bfloat16, False),
-            (2, 2048, 4, 64, 64, 64, torch.bfloat16, False),
-            (2, 4096, 4, 64, 64, 64, torch.bfloat16, False),
-            (2, 8192, 4, 64, 64, 64, torch.bfloat16, False),
-            (2, 16384, 4, 64, 64, 64, torch.bfloat16, False),
-            (2, 32768, 4, 64, 64, 64, torch.bfloat16, False),
         ]),
     ]
 
@@ -249,7 +227,7 @@ def test_gated_deltanet_vs_fla_fwd(
     dtype: torch.dtype,
     tune: bool,
 ) -> None:
-    test = _GatedDeltaNetFwdTestBaseline(batch, heads, seq_len, dim_k, dim_v, chunk_size, dtype)
+    test = GatedDeltaNetFwdTestBaseline(batch, heads, seq_len, dim_k, dim_v, chunk_size, dtype)
     bm = GatedDeltaNetFwdBenchmark(test)
     inputs = test.gen_inputs()  # q, k, v, g, beta  (BHSD)
 
@@ -277,7 +255,7 @@ def test_gated_deltanet_vs_fla_fwd(
 
 # Backward benchmark
 
-class GatedDeltaNetBwdBenchmark(BenchmarkBase[GatedDeltaNetFwdTest]):
+class GatedDeltaNetBwdBenchmark(BenchmarkBase[GatedDeltaNetFwdWorkload]):
 
     def calculate_flops(self) -> Optional[float]:
         t = self.workload
@@ -295,26 +273,13 @@ class GatedDeltaNetVsFlaBwdFixture(FixtureBase):
     PARAMS = [
         ("batch, seq_len, heads, dim_k, dim_v, chunk_size, dtype, tune", [
             # chunk_size=32
-            #(2, 1024, 4, 64, 64, 32, torch.float32, False),
-            #(2, 2048, 4, 64, 64, 32, torch.float32, False),
-            #(2, 4096, 4, 64, 64, 32, torch.float32, False),
-            #(2, 1024, 4, 64, 64, 32, torch.float16, False),
-            #(2, 2048, 4, 64, 64, 32, torch.float16, False),
             (2, 4096, 4, 64, 64, 32, torch.float16, False),
-            #(2, 1024, 4, 64, 64, 32, torch.bfloat16, False),
-            #(2, 2048, 4, 64, 64, 32, torch.bfloat16, False),
             (2, 4096, 4, 64, 64, 32, torch.bfloat16, False),
             # chunk_size=64
-            #(2, 1024, 4, 64, 64, 64, torch.float16, False),
             (2, 2048, 4, 64, 64, 64, torch.float16, False),
             (2, 4096, 4, 64, 64, 64, torch.float16, False),
             (2, 8192, 4, 64, 64, 64, torch.float16, False),
             (2, 16384, 4, 64, 64, 64, torch.float16, False),
-            #(2, 1024, 4, 64, 64, 64, torch.bfloat16, False),
-            (2, 2048, 4, 64, 64, 64, torch.bfloat16, False),
-            (2, 4096, 4, 64, 64, 64, torch.bfloat16, False),
-            (2, 8192, 4, 64, 64, 64, torch.bfloat16, False),
-            (2, 16384, 4, 64, 64, 64, torch.bfloat16, False),
         ]),
     ]
 
@@ -330,7 +295,7 @@ def test_gated_deltanet_vs_fla_bwd(
     dtype: torch.dtype,
     tune: bool,
 ) -> None:
-    test = _GatedDeltaNetFwdTestBaseline(batch, heads, seq_len, dim_k, dim_v, chunk_size, dtype)
+    test = GatedDeltaNetFwdTestBaseline(batch, heads, seq_len, dim_k, dim_v, chunk_size, dtype)
     bm = GatedDeltaNetBwdBenchmark(test)
 
     B, H, S, DK, DV, BC = batch, heads, seq_len, dim_k, dim_v, chunk_size
@@ -381,7 +346,7 @@ def test_gated_deltanet_vs_fla_bwd(
 
 # Combined fwd+bwd benchmark (fair comparison: both measure fwd+bwd total)
 
-class GatedDeltaNetFwdBwdBenchmark(BenchmarkBase[GatedDeltaNetFwdTest]):
+class GatedDeltaNetFwdBwdBenchmark(BenchmarkBase[GatedDeltaNetFwdWorkload]):
 
     def calculate_flops(self) -> Optional[float]:
         t = self.workload
@@ -399,26 +364,13 @@ class GatedDeltaNetVsFlaFwdBwdFixture(FixtureBase):
     PARAMS = [
         ("batch, seq_len, heads, dim_k, dim_v, chunk_size, dtype, tune", [
             # chunk_size=32
-            #(2, 1024, 4, 64, 64, 32, torch.float32, False),
-            #(2, 2048, 4, 64, 64, 32, torch.float32, False),
-            #(2, 4096, 4, 64, 64, 32, torch.float32, False),
-            #(2, 1024, 4, 64, 64, 32, torch.float16, False),
-            #(2, 2048, 4, 64, 64, 32, torch.float16, False),
             (2, 4096, 4, 64, 64, 32, torch.float16, False),
-            #(2, 1024, 4, 64, 64, 32, torch.bfloat16, False),
-            #(2, 2048, 4, 64, 64, 32, torch.bfloat16, False),
             (2, 4096, 4, 64, 64, 32, torch.bfloat16, False),
             # chunk_size=64
-            #(2, 1024, 4, 64, 64, 64, torch.float16, False),
             (2, 2048, 4, 64, 64, 64, torch.float16, False),
             (2, 4096, 4, 64, 64, 64, torch.float16, False),
             (2, 8192, 4, 64, 64, 64, torch.float16, False),
             (2, 16384, 4, 64, 64, 64, torch.float16, False),
-            #(2, 1024, 4, 64, 64, 64, torch.bfloat16, False),
-            (2, 2048, 4, 64, 64, 64, torch.bfloat16, False),
-            (2, 4096, 4, 64, 64, 64, torch.bfloat16, False),
-            (2, 8192, 4, 64, 64, 64, torch.bfloat16, False),
-            (2, 16384, 4, 64, 64, 64, torch.bfloat16, False),
         ]),
     ]
 
@@ -434,7 +386,7 @@ def test_gated_deltanet_vs_fla_fwdbwd(
     dtype: torch.dtype,
     tune: bool,
 ) -> None:
-    test = _GatedDeltaNetFwdTestBaseline(batch, heads, seq_len, dim_k, dim_v, chunk_size, dtype)
+    test = GatedDeltaNetFwdTestBaseline(batch, heads, seq_len, dim_k, dim_v, chunk_size, dtype)
     bm = GatedDeltaNetFwdBwdBenchmark(test)
 
     B, H, S, DK, DV, BC = batch, heads, seq_len, dim_k, dim_v, chunk_size

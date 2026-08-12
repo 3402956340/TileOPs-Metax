@@ -44,7 +44,7 @@ def test_scalar_arithmetic_reductions(dim, keepdim: bool, dtype: torch.dtype) ->
     ]
 
     for op_cls, torch_fn in cases:
-        op = op_cls(dtype=dtype, dim=dim, keepdim=keepdim)
+        op = op_cls(dim=dim, keepdim=keepdim)
         y = op(x)
         ref = torch_fn(x.float(), dim=dim, keepdim=keepdim).to(dtype)
         assert y.shape == ref.shape, (
@@ -62,7 +62,7 @@ def test_scalar_prod_reduction(dim: int, keepdim: bool, dtype: torch.dtype) -> N
     from tileops.ops.reduction.reduce import ProdFwdOp
 
     x = _make_scalar(dtype)
-    op = ProdFwdOp(dtype=dtype, dim=dim, keepdim=keepdim)
+    op = ProdFwdOp(dim=dim, keepdim=keepdim)
     y = op(x)
     ref = torch.prod(x.float(), dim=dim, keepdim=keepdim).to(dtype)
     assert y.shape == ref.shape, (
@@ -73,6 +73,9 @@ def test_scalar_prod_reduction(dim: int, keepdim: bool, dtype: torch.dtype) -> N
 
 
 @pytest.mark.smoke
+# A scalar input leaves correction=1 with no degrees of freedom, so both the
+# op and the PyTorch reference warn. That is the contract under test.
+@pytest.mark.filterwarnings("ignore:.*degrees of freedom:UserWarning")
 @pytest.mark.parametrize("dim", _DIMS, ids=_DIM_IDS)
 @pytest.mark.parametrize("keepdim", [False, True], ids=["keepdim=False", "keepdim=True"])
 @pytest.mark.parametrize("dtype", _FLOAT_DTYPES, ids=["fp16", "bf16", "fp32"])
@@ -86,7 +89,7 @@ def test_scalar_welford_reductions(dim, keepdim: bool, dtype: torch.dtype) -> No
     ]
 
     for op_cls, ref_fn in cases:
-        op = op_cls(dtype=dtype, dim=dim, keepdim=keepdim)
+        op = op_cls(dim=dim, keepdim=keepdim)
         y = op(x)
         ref = ref_fn(x, dim=dim, keepdim=keepdim)
         assert y.shape == ref.shape, (
@@ -95,7 +98,7 @@ def test_scalar_welford_reductions(dim, keepdim: bool, dtype: torch.dtype) -> No
         )
         torch.testing.assert_close(y, ref, atol=1e-4, rtol=1e-4, equal_nan=True)
 
-    op = VarMeanFwdOp(dtype=dtype, dim=dim, keepdim=keepdim)
+    op = VarMeanFwdOp(dim=dim, keepdim=keepdim)
     var_y, mean_y = op(x)
     ref_var, ref_mean = torch.var_mean(
         x.float(), dim=dim, keepdim=keepdim, correction=1,
@@ -109,6 +112,7 @@ def test_scalar_welford_reductions(dim, keepdim: bool, dtype: torch.dtype) -> No
 
 
 @pytest.mark.smoke
+@pytest.mark.filterwarnings("ignore:.*degrees of freedom:UserWarning")
 @pytest.mark.parametrize(
     ("shape", "dim"),
     [((1,), None), ((1,), 0), ((2, 1), -1)],
@@ -129,12 +133,12 @@ def test_invalid_dof_welford_reductions_match_pytorch(
         (VarFwdOp, torch.var),
         (StdFwdOp, torch.std),
     ]:
-        op = op_cls(dtype=torch.float32, dim=dim, keepdim=keepdim)
+        op = op_cls(dim=dim, keepdim=keepdim)
         y = op(x)
         ref = torch_fn(x, dim=dim, keepdim=keepdim, correction=1)
         torch.testing.assert_close(y, ref, atol=1e-4, rtol=1e-4, equal_nan=True)
 
-    op = VarMeanFwdOp(dtype=torch.float32, dim=dim, keepdim=keepdim)
+    op = VarMeanFwdOp(dim=dim, keepdim=keepdim)
     var_y, mean_y = op(x)
     ref_var, ref_mean = torch.var_mean(x, dim=dim, keepdim=keepdim, correction=1)
     torch.testing.assert_close(var_y, ref_var, atol=1e-4, rtol=1e-4, equal_nan=True)
@@ -159,7 +163,7 @@ def test_scalar_logical_and_count_reductions(
         (AnyFwdOp, torch.any, torch.bool),
         (CountNonzeroFwdOp, torch.count_nonzero, torch.int64),
     ]:
-        op = op_cls(dtype=dtype, dim=dim)
+        op = op_cls(dim=dim)
         y = op(x)
         ref = torch_fn(x, dim=dim)
         assert y.dtype == out_dtype, f"{op_cls.__name__} scalar dtype {y.dtype}"

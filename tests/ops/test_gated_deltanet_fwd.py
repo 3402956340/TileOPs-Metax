@@ -5,7 +5,7 @@ import torch
 from tests.test_base import FixtureBase, TestBase
 from tileops.ops import GatedDeltaNetFwdOp
 from workloads.linear_attention import (
-    GatedDeltaNetFwdTest as _GatedDeltaNetFwdTestWorkload,
+    GatedDeltaNetFwdWorkload,
 )
 
 
@@ -86,7 +86,7 @@ def prepare_wy_repr_gated_torch(k, g_cum, beta, chunk_size):
     return Aw, Au
 
 
-class GatedDeltaNetFwdTest(_GatedDeltaNetFwdTestWorkload, TestBase):
+class GatedDeltaNetFwdTest(GatedDeltaNetFwdWorkload, TestBase):
     def ref_program(
         self,
         q: torch.Tensor,
@@ -162,6 +162,8 @@ def test_gated_deltanet_fwd(
     ref_o = test.ref_program(*inputs)
     op_o, _S, _Aw, _Au = op(*inputs)
     torch.testing.assert_close(op_o, ref_o, **tols)
+    if tune:
+        assert op.kernel.config in op.kernel.autotune_configs
 
 
 if __name__ == "__main__":

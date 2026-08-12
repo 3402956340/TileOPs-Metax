@@ -11,8 +11,7 @@ tensor for ``dim=None, keepdim=False``) and that the numerics match within
 standard reduction tolerances. ``VarMeanFwdOp`` additionally asserts the
 returned tuple shape/dtype matches ``torch.var_mean`` element-by-element.
 Once green, the corresponding manifest entries can flip from
-``status: spec-only`` to ``status: implemented`` in a separate
-manifest-only PR per the trust model.
+``status: spec-only`` to ``status: implemented``.
 """
 
 from __future__ import annotations
@@ -84,7 +83,7 @@ def test_var_conformance(
     """Each (dim-shape, correction, keepdim, dtype) cell must match torch.var."""
     torch.manual_seed(0)
     x = torch.randn(*_SHAPE, dtype=dtype, device="cuda")
-    op = VarFwdOp(dtype=dtype, dim=dim, correction=correction, keepdim=keepdim)
+    op = VarFwdOp(dim=dim, correction=correction, keepdim=keepdim)
     y = op(x)
     ref = _ref_var(x, dim, keepdim, correction)
     assert y.shape == ref.shape, (
@@ -116,7 +115,7 @@ def test_std_conformance(
     """Each (dim-shape, correction, keepdim, dtype) cell must match torch.std."""
     torch.manual_seed(0)
     x = torch.randn(*_SHAPE, dtype=dtype, device="cuda")
-    op = StdFwdOp(dtype=dtype, dim=dim, correction=correction, keepdim=keepdim)
+    op = StdFwdOp(dim=dim, correction=correction, keepdim=keepdim)
     y = op(x)
     ref = _ref_std(x, dim, keepdim, correction)
     assert y.shape == ref.shape, (
@@ -152,7 +151,7 @@ def test_var_mean_conformance(
     """
     torch.manual_seed(0)
     x = torch.randn(*_SHAPE, dtype=dtype, device="cuda")
-    op = VarMeanFwdOp(dtype=dtype, dim=dim, correction=correction, keepdim=keepdim)
+    op = VarMeanFwdOp(dim=dim, correction=correction, keepdim=keepdim)
     out = op(x)
     assert isinstance(out, tuple) and len(out) == 2, (
         f"VarMeanFwdOp must return a 2-tuple, got {type(out).__name__}"
@@ -197,7 +196,7 @@ def test_var_unaligned_innermost(dim) -> None:
     torch.manual_seed(0)
     dtype = torch.float16
     x = torch.randn(*_UNALIGNED_SHAPE, dtype=dtype, device="cuda")
-    op = VarFwdOp(dtype=dtype, dim=dim, correction=1, keepdim=False)
+    op = VarFwdOp(dim=dim, correction=1, keepdim=False)
     y = op(x)
     ref = _ref_var(x, dim, False, 1)
     assert y.shape == ref.shape
@@ -218,7 +217,7 @@ def test_var_mean_unaligned_innermost(dim) -> None:
     torch.manual_seed(0)
     dtype = torch.float16
     x = torch.randn(*_UNALIGNED_SHAPE, dtype=dtype, device="cuda")
-    op = VarMeanFwdOp(dtype=dtype, dim=dim, correction=1, keepdim=False)
+    op = VarMeanFwdOp(dim=dim, correction=1, keepdim=False)
     var_y, mean_y = op(x)
     ref_var, ref_mean = _ref_var_mean(x, dim, False, 1)
     assert var_y.shape == ref_var.shape
@@ -241,7 +240,7 @@ def test_std_unaligned_innermost(dim) -> None:
     torch.manual_seed(0)
     dtype = torch.float16
     x = torch.randn(*_UNALIGNED_SHAPE, dtype=dtype, device="cuda")
-    op = StdFwdOp(dtype=dtype, dim=dim, correction=1, keepdim=False)
+    op = StdFwdOp(dim=dim, correction=1, keepdim=False)
     y = op(x)
     ref = _ref_std(x, dim, False, 1)
     assert y.shape == ref.shape

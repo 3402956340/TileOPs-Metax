@@ -7,10 +7,6 @@ from benchmarks.benchmark_base import BenchmarkReport, _bench_results
 from benchmarks.xfail_whitelist import MACA_XFAILS
 from tileops.utils import is_maca
 
-# Skip NSA benchmarks until the underlying op failures are resolved.
-collect_ignore_glob = [
-    "ops/attention/bench_deepseek_nsa*.py",
-]
 
 def _normalized_benchmark_nodeid(item: pytest.Item) -> str:
     nodeid = item.nodeid

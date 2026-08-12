@@ -1,5 +1,6 @@
 import contextlib
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -9,10 +10,9 @@ from typing import (
     Any,
     Callable,
     Generic,
+    Iterator,
     Optional,
-    Protocol,
     TypeVar,
-    runtime_checkable,
 )
 
 import pytest
@@ -37,42 +37,6 @@ def _workload_contract(op_name: str) -> tuple[str, frozenset[str]]:
             "tensor input; multi-input ops use their own bench files."
         )
     return contract
-
-
-# Benchmark capability protocols
-
-
-@runtime_checkable
-class ShapeDtypeWorkload(Protocol):
-    """Structural type for workloads that carry shape and dtype metadata.
-
-    Any object with ``shape`` and ``dtype`` satisfies this protocol.
-    Used by helpers that only need tensor metadata, not input generation
-    capability.
-    """
-
-    shape: tuple[int, ...]
-    dtype: torch.dtype
-
-
-@runtime_checkable
-class InputGeneratingWorkload(Protocol):
-    """Structural type for workloads that can generate benchmark inputs."""
-
-    def gen_inputs(self) -> tuple[Any, ...]: ...
-
-
-@runtime_checkable
-class BenchmarkWorkload(ShapeDtypeWorkload, InputGeneratingWorkload, Protocol):
-    """Full benchmark workload: shape/dtype metadata + input generation.
-
-    This is the standard contract for benchmark workloads that need both
-    roofline metadata extraction and input tensor generation.
-    Workloads satisfy this protocol when they define ``shape`` and ``dtype``
-    metadata in addition to implementing ``gen_inputs()``.
-    """
-
-    ...
 
 
 W = TypeVar("W")
@@ -183,6 +147,7 @@ def _native_output_suppressor():
 
 # NVIDIA SOL-ExecBench–style benchmark
 
+
 def bench_kernel(
     fn: Callable,
     args: tuple[Any, ...] = (),
@@ -291,30 +256,59 @@ def bench_kernel(
                 # Untrustworthy trace → CUDA-events fallback; genuine CUDA
                 # errors and OOM propagate.
                 if n_regions != n_repeat:
+                    # Count actual CUDA kernels for diagnostics
+                    n_cuda_kernels = sum(
+                        1 for evt in profiler.profiler.kineto_results.events()
+                        if evt.device_type() == DeviceType.CUDA and not evt.is_user_annotation()
+                    )
+                    _logger.debug(
+                        "CUPTI projection mismatch: %d annotation windows vs %d repeats "
+                        "(%d CUDA kernels captured). This may indicate torch.profiler "
+                        "instability in the current environment. Falling back to CUDA events.",
+                        n_regions, n_repeat, n_cuda_kernels,
+                    )
                     raise _CuptiProjectionError(
-                        f"{n_regions}/{n_repeat} annotation windows projected"
+                        f"{n_regions}/{n_repeat} annotation windows projected, "
+                        f"{n_cuda_kernels} CUDA kernels captured"
                     )
                 trial_means.append((total_us / n_repeat) * 1e-3)
         _bench_meta.timing = "cupti"
     except _CuptiProjectionError as exc:
+        # Check if cuda-events fallback is allowed
+        allow_fallback = os.getenv("TILEOPS_ALLOW_CUDA_EVENTS_FALLBACK", "1") == "1"
+
+        if not allow_fallback:
+            raise RuntimeError(
+                f"CUPTI profiling failed: {exc}. "
+                "CUDA-events fallback is disabled (TILEOPS_ALLOW_CUDA_EVENTS_FALLBACK=0). "
+                "This prevents generating inaccurate benchmark data with ~7x inflated latency. "
+                "To debug: run with TILEOPS_ALLOW_CUDA_EVENTS_FALLBACK=1 and check logs."
+            ) from exc
+
         _logger.warning(
             "CUPTI projection failed (%s); falling back to CUDA-events "
-            "timing, which includes launch overhead", exc,
+            "timing, which includes ~50-60us launch overhead per call. "
+            "Latency will be inflated by ~6-7x for fast kernels (<10us). "
+            "Set TILEOPS_ALLOW_CUDA_EVENTS_FALLBACK=0 to prevent fallback.", exc,
         )
         trial_means = []
 
     # Fallback to CUDA events if CUPTI failed
     if not trial_means:
         _bench_meta.timing = "cuda-events"
+        # Mimic CUPTI behavior: flush L2 before measurement window
         for _ in range(n_trials):
             start_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
             end_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
+
             for i in range(n_repeat):
                 cache.zero_()
+                torch.cuda.synchronize()  # Drain flush before measurement
                 start_events[i].record()
                 _run(i)
                 end_events[i].record()
             torch.cuda.synchronize()
+
             times = [s.elapsed_time(e) for s, e in zip(start_events, end_events, strict=True)]
             trial_means.append(sum(times) / len(times))
 
@@ -495,18 +489,39 @@ def workloads_to_params(op_name: str, include_extra: bool = False) -> list:
     return params
 
 
-class ManifestBenchmark(BenchmarkBase[ShapeDtypeWorkload]):
+def workload_field_params(workloads: list, keys: tuple) -> list:
+    """Turn manifest workload dicts into pytest params.
+
+    First workload is marked ``smoke``, the rest ``full``. Keys ending in
+    ``dtype`` are resolved to ``torch.dtype`` values.
+    """
+    params = []
+    for i, w in enumerate(workloads):
+        args = [getattr(torch, w[k]) if k.endswith("dtype") else w[k] for k in keys]
+        params.append(
+            pytest.param(
+                *args,
+                marks=pytest.mark.smoke if i == 0 else pytest.mark.full,
+                id=w["label"],
+            )
+        )
+    return params
+
+
+class ManifestBenchmark(BenchmarkBase[Any]):
     """Generic benchmark that reads FLOP/memory counts from an Op instance.
 
-    Accepts an op name, an instantiated Op, and any workload satisfying
-    :class:`ShapeDtypeWorkload`.  The op must implement ``eval_roofline()``.
-    Dynamic-shape ops may bind roofline variables during ``forward()``, so
-    this helper calls ``op.eval_roofline()`` only while building a result
-    after profiling has executed the op.
+    Accepts an op name, an instantiated Op, and the workload that produced
+    the inputs.  Roofline numbers come from ``op.eval_roofline()``, so the
+    workload needs no ``shape`` / ``dtype`` metadata — it is retained only
+    for subclasses that read their own fields off it.  Dynamic-shape ops may
+    bind roofline variables during ``forward()``, so this helper calls
+    ``op.eval_roofline()`` only while building a result after profiling has
+    executed the op.
 
     Usage::
 
-        op = SumFwdOp(dtype=dtype, dim=0)
+        op = SumFwdOp(dim=0)
         bm = ManifestBenchmark("SumFwdOp", op, workload)
         result = bm.profile(op, *inputs)
     """
@@ -515,7 +530,7 @@ class ManifestBenchmark(BenchmarkBase[ShapeDtypeWorkload]):
         self,
         op_name: str,
         op: Any,
-        workload: ShapeDtypeWorkload,
+        workload: Any,
     ):
         super().__init__(workload)
         self._op_name = op_name
@@ -535,44 +550,45 @@ class ManifestBenchmark(BenchmarkBase[ShapeDtypeWorkload]):
         return self._get_roofline()[1]
 
 
+def _op_kernels(op: object) -> Iterator[object]:
+    """Yield the kernels *op* holds.
+
+    An ``Op`` enumerates them itself through ``iter_kernels`` — slot entries and
+    a directly bound ``op.kernel`` alike. A baseline that is not an ``Op``
+    exposes at most a single ``kernel`` attribute.
+    """
+    iter_kernels = getattr(op, "iter_kernels", None)
+    if callable(iter_kernels):
+        yield from iter_kernels()
+        return
+    kernel = getattr(op, "kernel", None)
+    if kernel is not None:
+        yield kernel
+
+
 def _extract_op_config(op: object) -> Optional[dict]:
     """Return the kernel config for an Op instance, or None if unavailable.
 
-    Handles the three Op patterns currently used in tileops:
-
-      1. **Eager-init** (e.g. ``GemmOp``): ``op.kernel`` is a Kernel
-         instance set in ``__init__``.
-      2. **Lazy with dummy kernel** (e.g. ``FFTC2COp``): ``op.kernel`` is a
-         default Kernel and ``op._kernel_cache`` may hold others.
-      3. **Pure lazy cache** (e.g. ``_SoftmaxBaseOp`` and the spec-conformant
-         reduction ops): ``op._kernel_cache`` is the only source; ``op.kernel``
-         is unset.
-
-    A direct ``op.config`` attribute (legacy / explicit override) takes
-    precedence over kernel introspection.
+    A direct ``op.config`` attribute (explicit override) takes precedence over
+    kernel introspection. Otherwise the first config among the kernels the op
+    holds: kernels an op built share dtype and op kind, so the first is
+    sufficient for a report that records one entry per call.
     """
     op_config = getattr(op, "config", None)
     if op_config:
         return op_config
 
-    kernel = getattr(op, "kernel", None)
-    op_config = getattr(kernel, "config", None) if kernel is not None else None
-    if op_config:
-        return op_config
-
-    # Pure lazy-cache pattern: pick any cached kernel's config. All cached
-    # kernels for a given op share dtype/op_kind, so taking the first is
-    # sufficient for the benchmark report (which records one entry per call).
-    cache = getattr(op, "_kernel_cache", None)
-    if cache:
-        try:
-            first_kernel = next(iter(cache.values()))
-        except StopIteration:
-            first_kernel = None
-        if first_kernel is not None:
-            op_config = getattr(first_kernel, "config", None)
-            if op_config:
-                return op_config
+    # FIXME(staged-rollout): reads `config` off the kernel object.
+    #
+    # Broken invariant: callers reach an op by calling it, not by reading its
+    #   kernel's attributes.
+    # Why: nothing reports what a call ran with; enumeration names the kernels
+    #   but not what they were built for.
+    # Cleanup: read the op's own execution metadata once it reports any.
+    for kernel in _op_kernels(op):
+        op_config = getattr(kernel, "config", None)
+        if op_config:
+            return op_config
 
     return None
 

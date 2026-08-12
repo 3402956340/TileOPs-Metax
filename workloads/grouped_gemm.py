@@ -25,22 +25,7 @@ def _generate_offsets(batch_sizes_list, padding_M):
             + math.ceil((batch_sizes_list[i] + 1) / padding_M) * padding_M)
     return batch_offsets_list, batch_padded_offsets_list
 
-class GroupedGemmCompleteTest:
-    """Parameter holder for GroupedGemmCompleteBenchmark (forward NT + backward NN + backward TN).
-
-    The benchmark test function profiles each variant (NT/NN/TN) individually
-    using GroupedGemmTest; this class exists so the benchmark can access
-    batch_sum, batch_count, N, K, and dtype for FLOPS/memory calculations.
-    """
-
-    def __init__(self, batch_sum: int, batch_count: int, N: int, K: int, dtype: torch.dtype):
-        self.batch_sum = batch_sum
-        self.batch_count = batch_count
-        self.N = N
-        self.K = K
-        self.dtype = dtype
-
-class GroupedGemmTest(WorkloadBase):
+class GroupedGemmWorkload(WorkloadBase):
 
     def __init__(self, batch_sum: int, batch_count: int, N: int, K: int, dtype: torch.dtype,
                  transpose_a: bool, transpose_b: bool):
@@ -88,3 +73,34 @@ class GroupedGemmTest(WorkloadBase):
         batch_padded_offsets = torch.tensor(
             batch_padded_offsets_list, device=device, dtype=torch.int32)
         return A, B, batch_sizes, batch_offsets, batch_padded_offsets
+
+
+class GroupedGemmUniformWorkload(WorkloadBase):
+    """Uniform routing: every expert gets ``numel // num_experts`` rows.
+
+    Produces the NT-layout tensors (``C = A @ B[e]^T``) plus the per-expert
+    size and offset tables. Derived index tables that only one baseline needs
+    are built by the caller.
+    """
+
+    def __init__(self, numel: int, num_experts: int, n: int, k: int, dtype: torch.dtype):
+        if numel % num_experts:
+            raise ValueError(f"numel={numel} not divisible by num_experts={num_experts}")
+        self.numel = numel
+        self.num_experts = num_experts
+        self.n = n
+        self.k = k
+        self.dtype = dtype
+        self.rows_per_expert = numel // num_experts
+
+    def gen_inputs(self) -> tuple[torch.Tensor, ...]:
+        torch.manual_seed(42)
+        dev = "cuda"
+        a = torch.randn(self.numel, self.k, dtype=self.dtype, device=dev) * 0.02
+        b = torch.randn(self.num_experts, self.n, self.k, dtype=self.dtype, device=dev) * 0.02
+        sizes = torch.full(
+            (self.num_experts,), self.rows_per_expert, dtype=torch.int32, device=dev
+        )
+        offsets = torch.zeros(self.num_experts, dtype=torch.int32, device=dev)
+        offsets[1:] = torch.cumsum(sizes[:-1], dim=0)
+        return a, b, sizes, offsets

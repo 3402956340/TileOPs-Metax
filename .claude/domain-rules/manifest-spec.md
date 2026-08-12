@@ -1,12 +1,4 @@
-## Boundary
-
-- **OWNS**: `tileops/manifest/`
-- **MUST NOT WRITE**: `tileops/ops/`, `tileops/kernels/`, `tests/`, `benchmarks/`
-- Manifest changes require human review in a separate PR.
-
 → [trust-model.md §Manifest](../../docs/design/trust-model.md#manifest)
-
-______________________________________________________________________
 
 - Manifest key must equal the Op `cls.__name__` exactly. Class-naming convention: see [ops-design.md](ops-design.md).
 
@@ -45,6 +37,8 @@ ______________________________________________________________________
 
 - Tensor layout defaults to contiguous row-major. Non-default needs an explicit `layout` field; `shape` dim names reflect memory order.
 
+- `source.kernel_map`, `source.test` and `source.bench` are discoverability pointers: they name where the current implementation, test and benchmark live, and are retargeted whenever those move. `source.kernel` and `source.op` are contract — they say where the op is *defined*, written as the path inside the distribution because the manifest ships in the wheel and must not name a path absent there; on disk they resolve under `src/`.
+
 - `source.kernel_map` is the Op→Kernel dispatch registration table (`dispatch_key: KernelClassName`). It declares what an Op uses, not how dispatch picks.
 
 - Never modify manifest to match non-conforming code. Code drift → `status: spec-only` and fix code in a follow-up PR. Never remove `params`, roofline `vars`, or `shape_rules` to silence validator errors.
@@ -53,4 +47,4 @@ ______________________________________________________________________
 
 - **Manifest comment policy.** Comments may carry technical content the DSL can't express (schema clarifications, edge cases, conventions, file headers); they MUST NOT carry process metadata bound to a specific issue, PR, commit, or round. Keep only if meaningful after every issue/PR is renumbered; otherwise move to commit message, PR description, or follow-up issue.
 
-  Discovery scan: `grep -rnE '#[0-9]{3,}|[Ff]ollow.?up|AC-[0-9]+' tileops/manifest/*.yaml`
+  Discovery scan: `grep -rnE '#[0-9]{3,}|[Ff]ollow.?up|AC-[0-9]+' src/tileops/manifest/*.yaml`

@@ -37,7 +37,7 @@ jobs:
   # =========================================================================
   benchmark:
     if: ${{ github.repository == 'MetaX-MACA/TileOPs-Metax' && (github.event_name == 'schedule' || github.ref == 'refs/heads/dev') }}
-    timeout-minutes: 120
+    timeout-minutes: 380
     runs-on: tileops-metax-runner
     env:
       # Keep the long benchmark suite from fragmenting CUDA allocator segments
@@ -70,9 +70,22 @@ jobs:
           echo "TILELANG_TMP_DIR=${TILELANG_TMP_DIR:-}"
           echo "TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-}"
 
+          # One pytest process per bench file: a native hang / segfault / OOM
+          # kill costs only that file's results. py-spy captures the stack of
+          # a hung child before the runner kills it.
+          # --stall-timeout bounds silence, not runtime. A file killed mid-run
+          # never writes its kernels to the persistent cache, so capping total
+          # runtime would keep the same files cold every night.
           set -o pipefail
-          python3 -m pip install -q -c constraints.txt pytest-timeout
-          python3 -m pytest -q benchmarks/ops --timeout=900 --timeout-method=thread --junit-xml=bench_results.xml | tee tileops_benchmarks.log
+          # Best-effort: on a network failure the run proceeds without stack
+          # dumps (the runner records the absence) instead of dying here.
+          python3 -m pip install -q -c constraints.txt py-spy \
+            || echo "::warning::py-spy install failed; hang stack dumps disabled"
+          python3 scripts/ci/run_benchmarks.py benchmarks/ops \
+            --junit-xml bench_results.xml \
+            --stall-timeout 900 \
+            --total-budget 21600 \
+            --dump-dir bench_stack_dumps | tee tileops_benchmarks.log
 
           if [ -f profile_run.log ]; then
             { echo; echo "===== profile_run.log summary ====="; cat profile_run.log; } >> tileops_benchmarks.log
@@ -89,6 +102,7 @@ jobs:
           path: |
             tileops_benchmarks.log
             bench_results.xml
+            bench_stack_dumps/
           if-no-files-found: warn
           retention-days: 14
 
@@ -346,6 +360,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # setuptools-scm needs full history; a shallow clone yields the fallback.
+          fetch-depth: 0
 
       - name: Verify nightly runner environment
         run: scripts/ci/verify_nightly_runner.sh
@@ -359,20 +376,6 @@ jobs:
         run: |
           set -euo pipefail
           exec > >(tee packaging.log) 2>&1
-
-          # Validate GPU frequency
-          TARGET_CLOCK_MHZ=1500
-          RETRIES=5
-          for i in $(seq 1 "${RETRIES}"); do
-            gpu_clock=$(nvidia-smi --query-gpu=clocks.current.graphics --format=csv,noheader,nounits | xargs)
-            echo "GPU clock: ${gpu_clock} MHz (attempt ${i}/${RETRIES})"
-            if [ "${gpu_clock}" = "${TARGET_CLOCK_MHZ}" ]; then break; fi
-            if [ "${i}" -eq "${RETRIES}" ]; then
-              echo "::error::GPU frequency validation failed. Expected ${TARGET_CLOCK_MHZ} MHz."
-              exit 1
-            fi
-            sleep 2
-          done
 
           python3 -m pip install -c constraints.txt build pytest pytest-timeout
 

@@ -16,7 +16,7 @@ import torch
 
 from tests.test_base import FixtureBase
 from tileops.ops.moe import FusedTopKOp
-from workloads.moe import FusedTopKTest
+from workloads.moe import FusedTopKWorkload
 
 
 def fused_topk_torch(
@@ -74,7 +74,7 @@ class FusedTopKFixture(FixtureBase):
 # Tests
 
 
-def _check(test: FusedTopKTest) -> None:
+def _check(test: FusedTopKWorkload) -> None:
     (gating,) = test.gen_inputs()
     op = FusedTopKOp(
         top_k=test.top_k,
@@ -127,7 +127,7 @@ def _check(test: FusedTopKTest) -> None:
 def test_fused_topk(
     num_tokens, num_experts, top_k, scoring_func, renormalize, dtype
 ) -> None:
-    test = FusedTopKTest(num_tokens, num_experts, top_k, scoring_func, renormalize, dtype)
+    test = FusedTopKWorkload(num_tokens, num_experts, top_k, scoring_func, renormalize, dtype)
     _check(test)
 
 
@@ -178,8 +178,8 @@ def test_fused_topk_dynamic_shape_kernel_cache() -> None:
 
     op(gating1)
     assert op.dtype == torch.float16
-    assert len(op._kernel_cache) == 1
+    assert len(list(op.iter_kernels())) == 1
     op(gating1)
-    assert len(op._kernel_cache) == 1
+    assert len(list(op.iter_kernels())) == 1
     op(gating2)
-    assert len(op._kernel_cache) == 2
+    assert len(list(op.iter_kernels())) == 2

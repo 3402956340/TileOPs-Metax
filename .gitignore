@@ -71,9 +71,15 @@ docs/plans/
 .foundry/runs/
 .foundry/migrations/
 .foundry/plan/
+.foundry/specs/
 .foundry/config.local.json
 
 CLAUDE.local.md
 .claude/worktrees/
 docs/superpowers/
 *.ncu-rep
+
+# Benchmark run artifacts
+profile_run.log
+bench_stack_dumps/
+bench_results.xml

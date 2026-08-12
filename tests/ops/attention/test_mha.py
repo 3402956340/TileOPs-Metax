@@ -1,25 +1,40 @@
 
-from typing import Optional
+import dataclasses
 
 import pytest
 import torch
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-import tileops.ops.attention.gqa as gqa_module
 from tests.test_base import FixtureBase, TestBase
+from tileops.kernels.attention.call_spec import square_ws_prefill_region
 from tileops.kernels.kernel_base import Kernel
 from tileops.ops import MultiHeadAttentionBwdOp, MultiHeadAttentionFwdOp
-from workloads.attention.mha import MhaBwdTest as _MhaBwdTestWorkload
-from workloads.attention.mha import MhaFwdTest as _MhaFwdTestWorkload
+from tileops.ops.attention.selection import DENSE_PREFILL_KEYS
+from workloads.attention.mha import MhaBwdWorkload, MhaFwdWorkload
 
 
 class _FakeDenseKernel(Kernel):
+    """Stands in for the general dense implementation.
+
+    A replacement declares its role the same way a shipped implementation does.
+    This one is the implementation behind the specialised ones, so it says so
+    rather than naming the fast path it yields to.
+    """
+
+    general = True
+
     def forward(self, *args: object, **kwargs: object) -> object:
         return None
 
 
 class _FakeSquareDenseKernel(Kernel):
+    """Stands in for the H200 square causal fast path."""
+
+    @classmethod
+    def applies(cls, call: object) -> bool:
+        return square_ws_prefill_region(call)
+
     def forward(self, *args: object, **kwargs: object) -> object:
         return None
 
@@ -33,7 +48,7 @@ class _FakeLegacyMhaBwdKernel(Kernel):
         return None
 
 
-class MhaBwdTest(_MhaBwdTestWorkload, TestBase):
+class MhaBwdTest(MhaBwdWorkload, TestBase):
     def ref_program(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, o: torch.Tensor,
                     grad_output: torch.Tensor,
                     lse: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -49,9 +64,9 @@ class MhaBwdTest(_MhaBwdTestWorkload, TestBase):
         return q.grad, k.grad, v.grad
 
 
-class MhaFwdTest(_MhaFwdTestWorkload, TestBase):
+class MhaFwdTest(MhaFwdWorkload, TestBase):
     def ref_program(self, q: torch.Tensor, k: torch.Tensor,
-                    v: torch.Tensor) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+                    v: torch.Tensor) -> torch.Tensor:
         q_bhsd = q.transpose(1, 2)  # [B, H, S, D]
         k_bhsd = k.transpose(1, 2)
         v_bhsd = v.transpose(1, 2)
@@ -59,7 +74,7 @@ class MhaFwdTest(_MhaFwdTestWorkload, TestBase):
             output_bhsd = F.scaled_dot_product_attention(
                 q_bhsd, k_bhsd, v_bhsd, is_causal=self.is_causal)
         output = output_bhsd.transpose(1, 2).contiguous()
-        return output, None  # do not check lse
+        return output
 
 
 class MhaFwdFixture(FixtureBase):
@@ -120,35 +135,42 @@ class MhaBwdFixture(FixtureBase):
 def test_mha_fwd(batch: int, seq_len: int, heads: int, dim: int, causal: bool, dtype: torch.dtype,
                  tune: bool) -> None:
     test = MhaFwdTest(batch, heads, seq_len, dim, causal, dtype)
-    op = MultiHeadAttentionFwdOp(batch, heads, seq_len, dim, causal, dtype, tune=tune)
+    op = MultiHeadAttentionFwdOp(batch, heads, seq_len, dim, causal, tune=tune)
     test.check(op, *test.gen_inputs(), atol=5e-3, rtol=1e-5)
 
 
 @pytest.mark.smoke
 def test_mha_fwd_dispatches_to_gqa_kernel() -> None:
-    op = MultiHeadAttentionFwdOp(1, 8, 128, 64, False, torch.float16)
-    assert op.kernel.__class__.__name__.startswith("GQA")
+    op = MultiHeadAttentionFwdOp(1, 8, 128, 64, False)
+    assert op._get_kernel(torch.float16).__class__.__name__.startswith("GQA")
 
 
 @pytest.mark.smoke
-def test_mha_fwd_preserves_gqa_square_dense_fast_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(gqa_module, "is_h200", lambda: True)
+def test_mha_fwd_preserves_gqa_square_dense_fast_path() -> None:
+    """MHA delegates to GQA, so the square fast path is still reached through it.
+
+    The device is stated on the record rather than probed, so the case holds on
+    any machine.
+    """
     op = MultiHeadAttentionFwdOp(
         batch=4,
         heads=64,
         seq_len=512,
         dim=128,
         is_causal=True,
-        dtype=torch.float16,
         kernel_map={
-            "gqa_prefill_fwd_kernel": _FakeDenseKernel,
+            "gqa_prefill_causal_fwd_kernel": _FakeDenseKernel,
             "gqa_prefill_square_fwd_kernel": _FakeSquareDenseKernel,
         },
     )
+    delegate, = op.kernel_delegates()
+    stated = dataclasses.replace(
+        delegate.attention_call(torch.float16), arch=90, h200=True)
 
-    assert isinstance(op.kernel, _FakeSquareDenseKernel)
+    key = delegate.select_kernel_key(DENSE_PREFILL_KEYS, stated)
+
+    assert key == "gqa_prefill_square_fwd_kernel"
+    assert delegate.kernel_map[key] is _FakeSquareDenseKernel
 
 
 @pytest.mark.smoke
@@ -160,7 +182,6 @@ def test_mha_bwd_rejects_legacy_kernel_map_keys() -> None:
             seq_len=128,
             dim=64,
             is_causal=False,
-            dtype=torch.float16,
             kernel_map={"mha_bwd_kernel": _FakeLegacyMhaBwdKernel},
         )
 
@@ -169,7 +190,7 @@ def test_mha_bwd_rejects_legacy_kernel_map_keys() -> None:
 def test_mha_bwd(batch: int, seq_len: int, heads: int, dim: int, causal: bool, dtype: torch.dtype,
                  tune: bool) -> None:
     test = MhaBwdTest(batch, heads, seq_len, dim, causal, dtype)
-    op = MultiHeadAttentionBwdOp(batch, heads, seq_len, dim, causal, dtype, tune=tune)
+    op = MultiHeadAttentionBwdOp(batch, heads, seq_len, dim, causal, tune=tune)
     test.check(op, *test.gen_inputs(), atol=5e-3, rtol=1e-5)
 
 

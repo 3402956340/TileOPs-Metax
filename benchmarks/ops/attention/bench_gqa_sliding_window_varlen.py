@@ -12,7 +12,7 @@ from benchmarks.ops.attention.manifest_params import (
 from tileops.manifest import load_workloads
 from tileops.ops import GroupedQueryAttentionSlidingWindowVarlenFwdOp
 from workloads.attention.gqa import (
-    GroupedQueryAttentionSlidingWindowVarlenFwdTest,
+    GroupedQueryAttentionSlidingWindowVarlenFwdWorkload,
 )
 
 _OP_NAME = "GroupedQueryAttentionSlidingWindowVarlenFwdOp"
@@ -22,8 +22,6 @@ _GQA_SLIDING_WINDOW_VARLEN_FWD_BENCH_PARAMS = manifest_params(
     gqa_sliding_window_varlen_args,
     tune=False,
 )
-
-
 def _torch_sliding_window_varlen_fwd(test):
     """Torch SDPA forward baseline: unpack varlen to padded batch, single SDPA call."""
 
@@ -155,7 +153,7 @@ def test_gqa_sliding_window_varlen_fwd_bench(
     dtype: torch.dtype,
     tune: bool,
 ) -> None:
-    test = GroupedQueryAttentionSlidingWindowVarlenFwdTest(
+    test = GroupedQueryAttentionSlidingWindowVarlenFwdWorkload(
         batch, seqlens_q, seqlens_k, heads, heads_kv, dim, is_causal, wl, wr, dtype
     )
     inputs = test.gen_inputs()
@@ -169,7 +167,6 @@ def test_gqa_sliding_window_varlen_fwd_bench(
         is_causal=is_causal,
         window_size_left=wl,
         window_size_right=wr,
-        dtype=dtype,
         tune=tune,
     )
     op.total_q = sum(seqlens_q)

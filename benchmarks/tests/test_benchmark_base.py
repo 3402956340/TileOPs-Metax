@@ -1,9 +1,7 @@
 """Unit tests for benchmarks.benchmark_base.
 
-Verifies that ``ShapeDtypeWorkload``, ``InputGeneratingWorkload``, and
-``BenchmarkWorkload`` protocols accept duck-typed objects, and that the
-generic ``BenchmarkBase`` / ``ManifestBenchmark`` accept workloads through
-protocol contracts rather than nominal ``WorkloadBase`` inheritance.
+Verifies that the generic ``BenchmarkBase`` / ``ManifestBenchmark`` accept
+any duck-typed workload rather than requiring ``WorkloadBase`` inheritance.
 """
 
 import pytest
@@ -11,14 +9,13 @@ import torch
 
 from benchmarks.benchmark_base import (
     BenchmarkReport,
-    BenchmarkWorkload,
-    InputGeneratingWorkload,
     ManifestBenchmark,
-    ShapeDtypeWorkload,
     _bench_meta,
     bench_kernel,
     workloads_to_params,
 )
+from tileops.kernels.kernel_base import Kernel
+from tileops.ops.op_base import Op
 
 # Duck-typed test workloads
 
@@ -39,7 +36,7 @@ class _DuckInputGen:
 
 
 class _DuckFull:
-    """Object satisfying the full BenchmarkWorkload protocol."""
+    """Object carrying shape, dtype and gen_inputs()."""
 
     def __init__(self, shape: tuple[int, ...], dtype: torch.dtype):
         self.shape = shape
@@ -47,20 +44,6 @@ class _DuckFull:
 
     def gen_inputs(self):
         return (torch.randn(*self.shape, dtype=self.dtype),)
-
-
-class _MissingDtype:
-    """Object with shape only -- should NOT satisfy ShapeDtypeWorkload."""
-
-    def __init__(self, shape: tuple[int, ...]):
-        self.shape = shape
-
-
-class _MissingShape:
-    """Object with dtype only -- should NOT satisfy ShapeDtypeWorkload."""
-
-    def __init__(self, dtype: torch.dtype):
-        self.dtype = dtype
 
 
 class _FakeRooflineOp:
@@ -75,59 +58,12 @@ class _FakeRooflineOp:
         return self._roofline
 
 
-# ShapeDtypeWorkload protocol tests
-
-
-@pytest.mark.smoke
-def test_shape_dtype_protocol_is_runtime_checkable():
-    """ShapeDtypeWorkload should be runtime-checkable for isinstance() use."""
-    good = _DuckShapeDtype((4, 8), torch.float32)
-    bad_no_dtype = _MissingDtype((4, 8))
-    bad_no_shape = _MissingShape(torch.float32)
-
-    assert isinstance(good, ShapeDtypeWorkload)
-    assert not isinstance(bad_no_dtype, ShapeDtypeWorkload)
-    assert not isinstance(bad_no_shape, ShapeDtypeWorkload)
-
-
-# InputGeneratingWorkload protocol tests
-
-
-@pytest.mark.smoke
-def test_input_generating_protocol():
-    """InputGeneratingWorkload accepts objects with gen_inputs()."""
-    gen = _DuckInputGen()
-    assert isinstance(gen, InputGeneratingWorkload)
-
-    no_gen = _DuckShapeDtype((4,), torch.float32)
-    assert not isinstance(no_gen, InputGeneratingWorkload)
-
-
-# BenchmarkWorkload protocol tests
-
-
-@pytest.mark.smoke
-def test_benchmark_workload_protocol():
-    """BenchmarkWorkload requires both shape/dtype and gen_inputs()."""
-    full = _DuckFull((4, 8), torch.float16)
-    assert isinstance(full, BenchmarkWorkload)
-    assert isinstance(full, ShapeDtypeWorkload)
-    assert isinstance(full, InputGeneratingWorkload)
-
-    # Partial implementations should not satisfy the full protocol
-    shape_only = _DuckShapeDtype((4, 8), torch.float16)
-    assert not isinstance(shape_only, BenchmarkWorkload)
-
-    gen_only = _DuckInputGen()
-    assert not isinstance(gen_only, BenchmarkWorkload)
-
-
 # ManifestBenchmark contract tests
 
 
 @pytest.mark.smoke
-def test_manifest_benchmark_accepts_protocol_workload():
-    """ManifestBenchmark should accept any ShapeDtypeWorkload."""
+def test_manifest_benchmark_accepts_duck_typed_workload():
+    """ManifestBenchmark reads roofline off the op, never off the workload."""
     w = _DuckShapeDtype((4, 8, 1024), torch.float16)
     op = _FakeRooflineOp((123, 456))
     bm = ManifestBenchmark("TestOp", op, w)
@@ -141,8 +77,8 @@ def test_manifest_benchmark_accepts_protocol_workload():
 
 
 @pytest.mark.smoke
-def test_workload_base_satisfies_benchmark_workload():
-    """Existing WorkloadBase subclasses should satisfy BenchmarkWorkload."""
+def test_manifest_benchmark_accepts_workload_base_subclass():
+    """A nominal WorkloadBase subclass works the same as a duck-typed one."""
     from workloads.workload_base import WorkloadBase
 
     class _ConcreteWorkload(WorkloadBase):
@@ -154,10 +90,6 @@ def test_workload_base_satisfies_benchmark_workload():
             return (torch.randn(*self.shape, dtype=self.dtype),)
 
     w = _ConcreteWorkload()
-    assert isinstance(w, ShapeDtypeWorkload)
-    assert isinstance(w, BenchmarkWorkload)
-
-    # Should also work with ManifestBenchmark.
     bm = ManifestBenchmark("TestOp", _FakeRooflineOp((4, 8)), w)
     assert bm.calculate_flops() == 4.0
     assert bm.calculate_memory() == 8.0
@@ -252,11 +184,26 @@ def _reset_records():
         BenchmarkReport._records = saved
 
 
-class _FakeKernel:
-    """Stand-in for ``tileops.kernels.kernel_base.Kernel`` with just a config dict."""
+class _FakeKernel(Kernel):
+    """Stand-in for a real kernel with just a config dict."""
 
     def __init__(self, config: dict):
+        super().__init__()
         self.config = config
+
+    def forward(self):
+        return None
+
+
+class _FakeOp(Op):
+    """Minimal concrete ``Op`` so ``iter_kernels`` reaches what the test stores."""
+
+    @property
+    def default_kernel_map(self):
+        return {}
+
+    def forward(self, *args, **kwargs):
+        return None
 
 
 def _result() -> dict:
@@ -268,7 +215,7 @@ def _result() -> dict:
 def test_record_eager_init_op_keeps_kernel_config():
     """Pattern 1: ``op.kernel`` set in ``__init__`` (GemmOp-style)."""
 
-    class _EagerOp:
+    class _EagerOp(_FakeOp):
         def __init__(self):
             self.kernel = _FakeKernel({"block_m": 128, "block_n": 256})
 
@@ -280,12 +227,12 @@ def test_record_eager_init_op_keeps_kernel_config():
 @pytest.mark.full
 @pytest.mark.usefixtures('_reset_records')
 def test_record_lazy_with_dummy_kernel_keeps_kernel_config():
-    """Pattern 2: dummy ``op.kernel`` plus a populated ``_kernel_cache``."""
+    """Pattern 2: dummy ``op.kernel`` plus a populated slot."""
 
-    class _LazyDummyOp:
+    class _LazyDummyOp(_FakeOp):
         def __init__(self):
             self.kernel = _FakeKernel({"block_m": 8})
-            self._kernel_cache = {1: self.kernel}
+            self.get_or_build_kernel("fwd", 1, lambda: self.kernel)
 
     BenchmarkReport.record(_LazyDummyOp(), params={}, result=_result(), tag="t")
     records = BenchmarkReport._records["_LazyDummyOp"]
@@ -295,11 +242,12 @@ def test_record_lazy_with_dummy_kernel_keeps_kernel_config():
 @pytest.mark.full
 @pytest.mark.usefixtures('_reset_records')
 def test_record_pure_lazy_cache_op_keeps_kernel_config():
-    """Pattern 3: only ``_kernel_cache`` is populated."""
+    """Pattern 3: only a slot is populated; ``op.kernel`` is unset."""
 
-    class _PureLazyOp:
+    class _PureLazyOp(_FakeOp):
         def __init__(self):
-            self._kernel_cache = {(32, 256): _FakeKernel({"block_m": 4, "tile_n": 0})}
+            self.get_or_build_kernel(
+                "fwd", (32, 256), lambda: _FakeKernel({"block_m": 4, "tile_n": 0}))
 
     BenchmarkReport.record(_PureLazyOp(), params={}, result=_result(), tag="t")
     records = BenchmarkReport._records["_PureLazyOp"]
@@ -318,6 +266,28 @@ def test_record_op_with_explicit_config_takes_precedence():
     BenchmarkReport.record(_ConfigOp(), params={}, result=_result(), tag="t")
     records = BenchmarkReport._records["_ConfigOp"]
     assert records[0].get("config") == {"explicit": True}
+
+
+@pytest.mark.full
+@pytest.mark.usefixtures('_reset_records')
+def test_record_composite_op_keeps_delegate_kernel_config():
+    """A composite that owns no kernels still reports the delegate's config."""
+
+    class _DelegateOp(_FakeOp):
+        def __init__(self):
+            self.get_or_build_kernel(
+                "fwd", torch.float16, lambda: _FakeKernel({"block_m": 8}))
+
+    class _CompositeOp(_FakeOp):
+        def __init__(self):
+            self._delegate = _DelegateOp()
+
+        def kernel_delegates(self):
+            return (self._delegate,)
+
+    BenchmarkReport.record(_CompositeOp(), params={}, result=_result(), tag="t")
+    records = BenchmarkReport._records["_CompositeOp"]
+    assert records[0].get("config") == {"block_m": 8}
 
 
 @pytest.mark.full

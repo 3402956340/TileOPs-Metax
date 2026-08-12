@@ -12,7 +12,7 @@ import torch
 
 from tests.test_base import FixtureBase, TestBase
 from tileops.ops.moe import MoePermuteNopadFwdOp
-from workloads.moe import MoePermuteTest as _MoePermuteTestWorkload
+from workloads.moe import MoePermuteWorkload
 
 
 def _ref_moe_permute_nopad(
@@ -57,7 +57,7 @@ def _ref_moe_permute_nopad(
     return perm_h, true_offsets_t, true_sizes_t, expert_first_token_offset, fwd_idx_t
 
 
-class MoePermuteNopadTest(_MoePermuteTestWorkload, TestBase):
+class MoePermuteNopadTest(MoePermuteWorkload, TestBase):
     def ref_program(self, hidden_states, topk_ids):
         return _ref_moe_permute_nopad(hidden_states, topk_ids, self.num_experts)
 
@@ -114,7 +114,7 @@ class MoePermuteNopadFixture(FixtureBase):
 @MoePermuteNopadFixture
 def test_moe_permute_nopad_op(total_tokens, top_k, num_experts, hidden_size, dtype):
     test = MoePermuteNopadTest(total_tokens, top_k, num_experts, hidden_size, dtype)
-    op = MoePermuteNopadFwdOp(num_experts=num_experts, dtype=dtype)
+    op = MoePermuteNopadFwdOp(num_experts=num_experts)
     hidden_states, topk_ids = test.gen_inputs()
 
     outputs = op(hidden_states, topk_ids)
@@ -135,7 +135,6 @@ def test_moe_permute_nopad_explicit_shape_mismatch_raises() -> None:
         top_k=2,
         num_experts=4,
         hidden_size=16,
-        dtype=torch.float16,
     )
     with pytest.raises(ValueError, match="Expected total_tokens"):
         op(hidden_states, topk_ids)
