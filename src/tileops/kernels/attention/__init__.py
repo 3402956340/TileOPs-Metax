@@ -7,6 +7,10 @@ from .gqa_bwd import (
     FlashAttnBwdPreprocessKernel,
     GQABwdWgmmaPipelinedKernel,
 )
+from .gqa_bwd_maca import (
+    FlashAttnBwdPostprocessMACAKernel,
+    GQABwdMACAKernel,
+)
 from .gqa_decode import GQADecodeKernel
 from .gqa_decode_bs1 import GQADecodeBs1Kernel
 from .gqa_decode_bs1_paged import GQADecodePagedBs1Kernel
@@ -33,7 +37,9 @@ from .mha_decode import MHADecodeKernel
 from .mha_decode_paged import MHADecodePagedKernel
 
 __all__ = [
+    "FlashAttnBwdPostprocessMACAKernel",
     "FlashAttnBwdPreprocessKernel",
+    "GQABwdMACAKernel",
     "GQABwdWgmmaPipelinedKernel",
     "GQADecodeBs1Kernel",
     "GQADecodeKernel",
