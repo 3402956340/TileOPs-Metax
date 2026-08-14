@@ -941,10 +941,13 @@ class ReduceKernel(Kernel):
         self.N_padded = align_up(N, DEFAULT_ALIGNMENT)
         self._is_welford = op_kind in _WELFORD_KINDS
         self._elem_bytes = torch.tensor([], dtype=dtype).element_size()
-        self._smem_budget = device_smem_budget()
+        nbuf = 2 if self._is_welford else 1
+        # Leave headroom for dyn_smem alignment past the logical tile size.
+        reserve = 2 * DEFAULT_ALIGNMENT * self._elem_bytes * nbuf
+        self._smem_budget = device_smem_budget() - reserve
         self._planner = BlockConfigPlanner(
             self.N_padded, self._elem_bytes, self._smem_budget,
-            num_buffers=2 if self._is_welford else 1,
+            num_buffers=nbuf,
         )
         self._needs_tiling = self._planner.needs_tiling
 
