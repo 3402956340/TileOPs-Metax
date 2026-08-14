@@ -761,14 +761,14 @@ class SoftmaxKernel(Kernel):
             if tile_n == 0:
                 # Single-tile regime: explore multiple block_m values.
                 for bm in [1, 2, 4, 8, 16]:
+                    if bm > max_block_m_no_tile:
+                        continue
                     try:
                         compute_tile_n(bm, self._elem_bytes, self.N_padded, budget=budget)
                     except ValueError:
                         continue
                     bm_tile_n = self._tile_n_for_block_m(bm)
                     if bm_tile_n != 0:
-                        continue
-                    if bm > max_block_m_no_tile:
                         continue
                     for t in threads_list:
                         if not self._planner.layout_ok(bm, self.N_padded, t):

@@ -122,12 +122,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "benchmarks/ops/bench_ada_layer_norm.py::test_ada_layer_norm_bench[dit-xl-2-bfloat16]",
             "benchmarks/ops/bench_ada_layer_norm.py::test_ada_layer_norm_zero_bench[dit-xl-2-float16]",
             "benchmarks/ops/bench_ada_layer_norm.py::test_ada_layer_norm_zero_bench[dit-xl-2-bfloat16]",
-            "benchmarks/ops/bench_softmax.py::test_softmax_bench[attn-weights-4k-float16]",
-            "benchmarks/ops/bench_softmax.py::test_softmax_bench[attn-weights-4k-bfloat16]",
-            "benchmarks/ops/bench_softmax.py::test_softmax_bench[attn-weights-4k-fp32-float32]",
-            "benchmarks/ops/bench_softmax.py::test_log_softmax_bench[attn-weights-4k-float16]",
-            "benchmarks/ops/bench_softmax.py::test_log_softmax_bench[attn-weights-4k-bfloat16]",
-            "benchmarks/ops/bench_softmax.py::test_log_softmax_bench[attn-weights-4k-fp32-float32]",
         ),
     ),
     (
