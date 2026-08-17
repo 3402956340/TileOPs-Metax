@@ -3,7 +3,9 @@ import torch
 
 from tests.test_base import FixtureBase
 from tileops.kernels.gated_deltanet.gated_deltanet_bwd import GatedDeltaNetBwdKernel
+from tileops.kernels.gated_deltanet.gated_deltanet_bwd_maca import GatedDeltaNetBwdMACAKernel
 from tileops.ops import GatedDeltaNetBwdOp
+from tileops.utils import is_maca
 
 
 def _differentiable_fwd(q, k, v, g_raw, beta, chunk_size):
@@ -171,41 +173,75 @@ def test_gated_deltanet_bwd_segmented_carry_matches_sequential_d128(
     fwd_op = GatedDeltaNetFwdOp(chunk_size=BC)
     _o, S_fwd, _Aw, _Au = fwd_op.forward(q, k, v, g, beta)
 
-    common_config = {
-        "num_stages": 2,
-        "threads": 128,
-        "parallel_threads": 256,
-        "recurrence_threads": 128,
-        "recurrence_segment_chunks": 8,
-    }
-    baseline = GatedDeltaNetBwdKernel(
-        B,
-        H,
-        S,
-        BC,
-        DK,
-        DV,
-        str(dtype).removeprefix("torch."),
-        config={
-            **common_config,
-            "recurrence_block_v": 64,
-            "recurrence_segmented_carry": 0,
-        },
-    )
-    split = GatedDeltaNetBwdKernel(
-        B,
-        H,
-        S,
-        BC,
-        DK,
-        DV,
-        str(dtype).removeprefix("torch."),
-        config={
-            **common_config,
+    if is_maca():
+        # MACA: same sequential-vs-segmented check, but on the 64KiB-aware kernel.
+        common_config = {
+            "num_stages": 1,
             "recurrence_block_v": block_v,
-            "recurrence_segmented_carry": 1,
-        },
-    )
+            "recurrence_segment_chunks": 8,
+        }
+        baseline = GatedDeltaNetBwdMACAKernel(
+            B,
+            H,
+            S,
+            BC,
+            DK,
+            DV,
+            str(dtype).removeprefix("torch."),
+            config={
+                **common_config,
+                "recurrence_segmented_carry": 0,
+            },
+        )
+        split = GatedDeltaNetBwdMACAKernel(
+            B,
+            H,
+            S,
+            BC,
+            DK,
+            DV,
+            str(dtype).removeprefix("torch."),
+            config={
+                **common_config,
+                "recurrence_segmented_carry": 1,
+            },
+        )
+    else:
+        common_config = {
+            "num_stages": 2,
+            "threads": 128,
+            "parallel_threads": 256,
+            "recurrence_threads": 128,
+            "recurrence_segment_chunks": 8,
+        }
+        baseline = GatedDeltaNetBwdKernel(
+            B,
+            H,
+            S,
+            BC,
+            DK,
+            DV,
+            str(dtype).removeprefix("torch."),
+            config={
+                **common_config,
+                "recurrence_block_v": 64,
+                "recurrence_segmented_carry": 0,
+            },
+        )
+        split = GatedDeltaNetBwdKernel(
+            B,
+            H,
+            S,
+            BC,
+            DK,
+            DV,
+            str(dtype).removeprefix("torch."),
+            config={
+                **common_config,
+                "recurrence_block_v": block_v,
+                "recurrence_segmented_carry": 1,
+            },
+        )
     baseline_outputs = baseline.forward(do, q, k, v, g, beta, S_fwd)
     split_outputs = split.forward(do, q, k, v, g, beta, S_fwd)
 

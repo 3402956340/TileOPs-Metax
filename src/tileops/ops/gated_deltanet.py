@@ -5,7 +5,9 @@ import torch
 from tileops.kernels.deltanet_call import DeltaNetDecodeCall
 from tileops.kernels.gated_deltanet import (
     GatedDeltaNetBwdKernel,
+    GatedDeltaNetBwdMACAKernel,
     GatedDeltaNetFwdKernel,
+    GatedDeltaNetFwdMACAKernel,
     GatedDeltaNetPrefillFwdKernel,
     GatedDeltaNetPrefillFwdMACAKernel,
 )
@@ -122,8 +124,9 @@ class GatedDeltaNetFwdOp(Op):
 
     @property
     def default_kernel_map(self) -> Dict[str, Kernel]:
+        fwd_cls = GatedDeltaNetFwdMACAKernel if is_maca() else GatedDeltaNetFwdKernel
         return {
-            "GatedDeltaNetFwdKernel": GatedDeltaNetFwdKernel,
+            "GatedDeltaNetFwdKernel": fwd_cls,
         }
 
     def _get_kernel(
@@ -453,8 +456,9 @@ class GatedDeltaNetBwdOp(Op):
 
     @property
     def default_kernel_map(self) -> Dict[str, Kernel]:
+        bwd_cls = GatedDeltaNetBwdMACAKernel if is_maca() else GatedDeltaNetBwdKernel
         return {
-            "GatedDeltaNetBwdKernel": GatedDeltaNetBwdKernel,
+            "GatedDeltaNetBwdKernel": bwd_cls,
         }
 
     def _get_kernel(
@@ -578,9 +582,11 @@ class GatedDeltaNetOp(Op):
 
     @property
     def default_kernel_map(self) -> Dict[str, Kernel]:
+        fwd_cls = GatedDeltaNetFwdMACAKernel if is_maca() else GatedDeltaNetFwdKernel
+        bwd_cls = GatedDeltaNetBwdMACAKernel if is_maca() else GatedDeltaNetBwdKernel
         return {
-            "GatedDeltaNetFwdKernel": GatedDeltaNetFwdKernel,
-            "GatedDeltaNetBwdKernel": GatedDeltaNetBwdKernel,
+            "GatedDeltaNetFwdKernel": fwd_cls,
+            "GatedDeltaNetBwdKernel": bwd_cls,
         }
 
     def _bind_from_inputs(
