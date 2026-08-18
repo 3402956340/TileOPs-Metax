@@ -193,8 +193,11 @@ def test_gated_deltanet_decode_raw_cuda_dispatch_rejects_unsupported_sm100() -> 
 
     with pytest.raises(ValueError, match="no implementation serves this call") as excinfo:
         op.select_kernel_key(GATED_DELTANET_DECODE_KEYS, call)
-    assert "GatedDeltaNetDecodeRawCudaFlaStyleKernel: built for architectures [90]" in (
-        str(excinfo.value))
+    archs = sorted(GatedDeltaNetDecodeRawCudaFlaStyleKernel.supported_archs)
+    assert (
+        f"GatedDeltaNetDecodeRawCudaFlaStyleKernel: built for architectures {archs}"
+        in str(excinfo.value)
+    )
 
 
 @pytest.mark.smoke

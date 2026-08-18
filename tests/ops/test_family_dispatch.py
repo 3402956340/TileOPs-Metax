@@ -12,6 +12,8 @@ import pytest
 import torch
 
 from tileops.kernels.deltanet_call import DeltaNetDecodeCall
+from tileops.kernels.deltanet_recurrence import DeltaNetDecodeRawCudaFlaStyleKernel
+from tileops.kernels.gated_deltanet_recurrence import GatedDeltaNetDecodeRawCudaFlaStyleKernel
 from tileops.kernels.gemm_call import GemmCall
 from tileops.ops.deltanet_recurrence import DELTANET_DECODE_KEYS, DeltaNetDecodeOp
 from tileops.ops.gated_deltanet import GATED_DELTANET_DECODE_KEYS, GatedDeltaNetDecodeOp
@@ -68,7 +70,11 @@ _DELTANET_ROWS = [
     (torch.bfloat16, 128, 128, _SM90, "DeltaNetDecodeRawCudaFlaStyleKernel", "bf16-raw"),
     (torch.float16, 64, 128, _SM90, "DeltaNetDecodeKernel", "dim-k-off"),
     (torch.float16, 128, 64, _SM90, "DeltaNetDecodeKernel", "dim-v-off"),
-    (torch.float16, 128, 128, _SM80, "DeltaNetDecodeKernel", "arch-off"),
+    (torch.float16, 128, 128, _SM80,
+     "DeltaNetDecodeRawCudaFlaStyleKernel"
+     if _SM80 in (DeltaNetDecodeRawCudaFlaStyleKernel.supported_archs or [])
+     else "DeltaNetDecodeKernel",
+     "arch-off"),
 ]
 
 
@@ -96,7 +102,11 @@ _GATED_ROWS = [
     (torch.float16, 128, 128, _SM90, "GatedDeltaNetDecodeKernel", "fp16-not-raw"),
     (torch.bfloat16, 64, 128, _SM90, "GatedDeltaNetDecodeKernel", "dim-k-off"),
     (torch.bfloat16, 128, 64, _SM90, "GatedDeltaNetDecodeKernel", "dim-v-off"),
-    (torch.bfloat16, 128, 128, _SM80, "GatedDeltaNetDecodeKernel", "arch-off"),
+    (torch.bfloat16, 128, 128, _SM80,
+     "GatedDeltaNetDecodeRawCudaFlaStyleKernel"
+     if _SM80 in (GatedDeltaNetDecodeRawCudaFlaStyleKernel.supported_archs or [])
+     else "GatedDeltaNetDecodeKernel",
+     "arch-off"),
 ]
 
 

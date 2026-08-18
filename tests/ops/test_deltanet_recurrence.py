@@ -3,7 +3,6 @@
 import pytest
 import torch
 
-import tileops.ops.deltanet_recurrence as deltanet_ops
 from tests.test_base import FixtureBase, TestBase
 from tileops.kernels.deltanet_call import DeltaNetDecodeCall
 from tileops.kernels.deltanet_recurrence import (
@@ -13,6 +12,7 @@ from tileops.kernels.deltanet_recurrence import (
 )
 from tileops.ops import DeltaNetDecodeOp
 from tileops.ops.deltanet_recurrence import DELTANET_DECODE_KEYS
+from tileops.utils import get_sm_version
 from workloads.linear_attention import DeltaNetDecodeWorkload
 
 
@@ -162,7 +162,7 @@ def _skip_unless_raw_cuda_decode_supported() -> None:
     if not torch.cuda.is_available():
         pytest.skip("CUDA required for raw DeltaNet decode smoke coverage")
     try:
-        sm_version = deltanet_ops.get_sm_version()
+        sm_version = get_sm_version()
     except Exception as exc:
         pytest.skip(f"could not query CUDA architecture: {exc}")
     if sm_version not in DeltaNetDecodeRawCudaFlaStyleKernel.supported_archs:
@@ -296,8 +296,10 @@ def test_deltanet_decode_raw_cuda_dispatch_falls_back_on_unsupported_sm() -> Non
     op = DeltaNetDecodeOp(kernel_map=_dispatch_kernel_map())
 
     key = op.select_kernel_key(DELTANET_DECODE_KEYS, _stated_call(80, torch.bfloat16))
-
-    assert op.kernel_map[key] is _DefaultDispatchKernel
+    if 80 in (DeltaNetDecodeRawCudaFlaStyleKernel.supported_archs or []):
+        assert op.kernel_map[key] is _RawDispatchKernel
+    else:
+        assert op.kernel_map[key] is _DefaultDispatchKernel
 
 
 @pytest.mark.smoke
