@@ -18,6 +18,7 @@ from tileops.kernels.gemm_call import GemmCall
 from tileops.ops.deltanet_recurrence import DELTANET_DECODE_KEYS, DeltaNetDecodeOp
 from tileops.ops.gated_deltanet import GATED_DELTANET_DECODE_KEYS, GatedDeltaNetDecodeOp
 from tileops.ops.gemm import GemmOp
+from tileops.utils import is_maca
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="selection reads the device architecture")
@@ -50,6 +51,7 @@ def test_gemm_dispatch(m: int, n: int, trans_a: bool, trans_b: bool,
     assert op.select_kernel_key(("gemv_kernel", "gemm_kernel"), call) == expected
 
 
+@pytest.mark.skipif(is_maca(), reason="MACA supports gemm on SM80")
 @pytest.mark.smoke
 def test_gemm_is_refused_where_neither_implementation_runs() -> None:
     """Both are SM90-only, so an older architecture has nothing to fall back to."""
