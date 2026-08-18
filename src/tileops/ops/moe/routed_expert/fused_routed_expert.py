@@ -162,16 +162,19 @@ class FusedMoEExpertsNopadPersistent3WGFwdOp(FusedMoEExpertsModular):
         gemm_override = (kernel_map or {}).get("moe_grouped_gemm_kernel")
         self.use_fused_activation = use_fused_activation
         if use_fused_activation and is_maca():
-            ok = (
-                kernel_cls is GroupedGemmPersistentMACAKernel
-                and (gemm_override is None
-                     or gemm_override is GroupedGemmPersistentMACAKernel)
-            )
-            if not ok:
+            # Conflicting override must be refused (same contract as CUDA), not
+            # quietly downgraded. Only kernel-type ineligibility falls back.
+            if (gemm_override is not None
+                    and gemm_override is not GroupedGemmPersistentMACAKernel):
+                raise ValueError(
+                    "use_fused_activation=True cannot honour a moe_grouped_gemm_kernel "
+                    f"override ({gemm_override.__name__}): the fused gate_up wrapper keys off "
+                    "moe_grouped_gemm_fused_act_kernel, so the override would reach the down "
+                    "GEMM alone and leave the pipeline inconsistent")
+            if kernel_cls is not GroupedGemmPersistentMACAKernel:
                 _logger.warning(
                     "use_fused_activation=True not eligible on MACA (requires "
-                    "GroupedGemmPersistentMACAKernel with no conflicting "
-                    "moe_grouped_gemm_kernel override); falling back to unfused "
+                    "GroupedGemmPersistentMACAKernel); falling back to unfused "
                     "activation.",
                 )
                 self.use_fused_activation = False
