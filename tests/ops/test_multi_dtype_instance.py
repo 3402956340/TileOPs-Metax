@@ -8,10 +8,13 @@ This covers the invariant every family owes its L1 kernel slots.
 import pytest
 import torch
 
+from tileops.kernels.attention.gqa_decode_bs1 import GQADecodeBs1Kernel
+from tileops.kernels.attention.gqa_prefill_fwd_ws import GQAPrefillFwdWsPersistentCausalKernel
 from tileops.manifest import load_manifest
 from tileops.ops.norm.layer_norm import LayerNormFwdOp
 from tileops.ops.norm.rms_norm import RMSNormFwdOp
 from tileops.ops.reduction.reduce import SumFwdOp
+from tileops.utils import get_sm_version
 
 _DTYPES = (torch.float16, torch.bfloat16)
 
@@ -83,7 +86,10 @@ def test_attention_decode_reselects_the_kernel_per_dtype():
     op = GroupedQueryAttentionDecodeWithKVCacheFwdOp(1, 32, 4, 8192, 128)
     fp16 = op._get_kernel(torch.float16)
     bf16 = op._get_kernel(torch.bfloat16)
-    assert fp16.__class__.__name__ == "GQADecodeBs1Kernel"
+    assert fp16.__class__.__name__ == (
+        "GQADecodeBs1Kernel"
+        if get_sm_version() in (GQADecodeBs1Kernel.supported_archs or [])
+        else "GQADecodeKernel")
     assert bf16.__class__.__name__ == "GQADecodeKernel"
     _assert_two_entries(op)
 
@@ -98,6 +104,10 @@ def test_attention_square_prefill_reselects_the_kernel_per_dtype():
 
     batch, heads, heads_kv, seq_len, dim = 1, 8, 2, 256, 128
     op = GroupedQueryAttentionFwdOp(batch, heads, heads_kv, seq_len, dim, is_causal=True)
+    expected = (
+        "GQAPrefillFwdWsPersistentCausalKernel"
+        if get_sm_version() in (GQAPrefillFwdWsPersistentCausalKernel.supported_archs or [])
+        else "GQAPrefillFwdKernel")
     for dtype in _DTYPES:
         q = torch.randn(batch, seq_len, heads, dim, dtype=dtype, device="cuda")
         k = torch.randn(batch, seq_len, heads_kv, dim, dtype=dtype, device="cuda")
@@ -105,7 +115,7 @@ def test_attention_square_prefill_reselects_the_kernel_per_dtype():
         output = op(q, k, v)
         assert output.dtype == dtype
         kernel = op._get_kernel(dtype)
-        assert kernel.__class__.__name__ == "GQAPrefillFwdWsPersistentCausalKernel"
+        assert kernel.__class__.__name__ == expected
         assert kernel.dtype == dtype
     _assert_two_entries(op)
 
