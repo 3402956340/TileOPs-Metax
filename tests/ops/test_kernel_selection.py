@@ -10,6 +10,8 @@ one kernel compile per row.
 import pytest
 import torch
 
+from tileops.kernels.attention.gqa_decode_bs1 import GQADecodeBs1Kernel
+from tileops.kernels.attention.gqa_decode_bs1_paged import GQADecodePagedBs1Kernel
 from tileops.kernels.kernel_base import Kernel
 from tileops.ops import (
     GroupedQueryAttentionDecodePagedWithKVCacheFwdOp,
@@ -25,7 +27,7 @@ from tileops.ops.attention.selection import (
     PAGED_DECODE_KEYS,
     PAGED_PREFILL_KEYS,
 )
-from tileops.utils import is_h200
+from tileops.utils import get_sm_version, is_h200
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(),
@@ -144,6 +146,9 @@ def test_decode_dispatch_is_unchanged(ctor: dict, dtype: torch.dtype,
     kwargs.update(ctor)
     op = GroupedQueryAttentionDecodeWithKVCacheFwdOp(**kwargs)
     candidate = op.select_kernel_key(DECODE_KEYS, op.attention_call(dtype))
+    if (expected == "gqa_decode_bs1_kernel"
+            and get_sm_version() not in (GQADecodeBs1Kernel.supported_archs or [])):
+        expected = "gqa_decode_kernel"
     assert candidate == expected
 
 
@@ -165,6 +170,9 @@ def test_paged_decode_dispatch_is_unchanged(ctor: dict, dtype: torch.dtype,
     kwargs.update(ctor)
     op = GroupedQueryAttentionDecodePagedWithKVCacheFwdOp(**kwargs)
     candidate = op.select_kernel_key(PAGED_DECODE_KEYS, op.attention_call(dtype))
+    if (expected == "gqa_decode_paged_bs1_kernel"
+            and get_sm_version() not in (GQADecodePagedBs1Kernel.supported_archs or [])):
+        expected = "gqa_decode_paged_kernel"
     assert candidate == expected
 
 
