@@ -386,7 +386,7 @@ class DeltaNetDecodeRawCudaFlaStyleKernel(Kernel):
     local storage.
     """
 
-    supported_archs: list[int] = [90]
+    supported_archs: list[int] = [80, 89, 90]
 
     @classmethod
     def applies(cls, call) -> bool:

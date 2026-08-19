@@ -107,12 +107,8 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         _CI_EXPECTATION_MISMATCH,
         (
-            "tests/ops/test_deltanet_recurrence.py::test_deltanet_decode_raw_cuda_config_requires_full_warp_mapping",
-            "tests/ops/test_deltanet_recurrence.py::test_deltanet_decode_raw_cuda_config_requires_two_lane_group",
             "tests/ops/test_family_dispatch.py::test_gemm_is_refused_where_neither_implementation_runs",
             "tests/ops/test_fused_moe_experts.py::test_use_fused_activation_refuses_a_conflicting_gemm_override",
-            "tests/ops/test_gated_deltanet_recurrence.py::test_gated_deltanet_decode_raw_cuda_config_requires_full_warp_mapping",
-            "tests/ops/test_gated_deltanet_recurrence.py::test_gated_deltanet_decode_raw_cuda_config_requires_two_lane_group",
             "tests/ops/test_kernel_selection.py::test_decode_dispatch_is_unchanged[bs1-fp16]",
             "tests/ops/test_kernel_selection.py::test_paged_decode_dispatch_is_unchanged[bs1-fp16]",
             "tests/ops/test_multi_dtype_instance.py::test_attention_decode_reselects_the_kernel_per_dtype",

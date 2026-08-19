@@ -410,7 +410,7 @@ class GatedDeltaNetDecodeRawCudaFlaStyleKernel(Kernel):
     single-step decode workload.
     """
 
-    supported_archs: list[int] = [90]
+    supported_archs: list[int] = [80, 89, 90]
 
     @classmethod
     def applies(cls, call) -> bool:
