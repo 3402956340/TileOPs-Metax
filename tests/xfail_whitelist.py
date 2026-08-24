@@ -18,8 +18,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         _UNSUPPORTED_ARCHITECTURE,
         (
-            "tests/ops/attention/test_mha.py::test_mha_bwd[full-bwd-fp16-large]",
-            "tests/ops/attention/test_mha.py::test_mha_bwd[full-bwd-bf16-tuned]",
         ),
     ),
     (
@@ -108,8 +106,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         _CI_EXPECTATION_MISMATCH,
         (
             "tests/ops/test_family_dispatch.py::test_gemm_is_refused_where_neither_implementation_runs",
-            "tests/ops/test_kernel_selection.py::test_decode_dispatch_is_unchanged[bs1-fp16]",
-            "tests/ops/test_kernel_selection.py::test_paged_decode_dispatch_is_unchanged[bs1-fp16]",
         ),
     ),
     (
