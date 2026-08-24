@@ -105,7 +105,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         _CI_EXPECTATION_MISMATCH,
         (
-            "tests/ops/test_family_dispatch.py::test_gemm_is_refused_where_neither_implementation_runs",
         ),
     ),
     (
