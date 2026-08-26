@@ -223,6 +223,7 @@ def _bmm_fp8_kernel(
 
     return _bmm_fp8_func
 
+
 @functools.lru_cache(maxsize=32)
 def _bmm_fp8_kernel_maca(
     batch: int,
@@ -265,15 +266,21 @@ def _bmm_fp8_kernel_maca(
             scale_b: T.Tensor(scale_b_shape, "float32"),  # type: ignore
             c: T.Tensor((batch, m, n), out_dtype),  # type: ignore
         ) -> None:
-            with T.Kernel(T.ceildiv(n, block_n), T.ceildiv(m, block_m), batch, threads=threads) as (bx, by, bz):
+            with T.Kernel(T.ceildiv(n, block_n), T.ceildiv(m, block_m), batch, threads=threads) as (
+                bx,
+                by,
+                bz,
+            ):
                 a_shared = T.alloc_shared((block_m, block_k), dtype)
                 b_shared = T.alloc_shared((block_n, block_k), dtype)
                 c_local = T.alloc_fragment((block_m, block_n), accum_dtype)
 
-                T.annotate_layout({
-                    a_shared: tilelang.layout.make_swizzled_layout(a_shared),
-                    b_shared: tilelang.layout.make_swizzled_layout(b_shared),
-                })
+                T.annotate_layout(
+                    {
+                        a_shared: tilelang.layout.make_swizzled_layout(a_shared),
+                        b_shared: tilelang.layout.make_swizzled_layout(b_shared),
+                    }
+                )
 
                 m_start = by * block_m
                 n_start = bx * block_n
@@ -283,26 +290,49 @@ def _bmm_fp8_kernel_maca(
                     k_start = kk * block_k
 
                     if k_exact and m_exact:
-                        T.copy(a[bz, m_start:m_start + block_m, k_start:k_start + block_k], a_shared)
+                        T.copy(
+                            a[bz, m_start : m_start + block_m, k_start : k_start + block_k],
+                            a_shared,
+                        )
                     else:
                         for i, j in T.Parallel(block_m, block_k):
-                            a_shared[i, j] = T.if_then_else((m_start + i < m) & (k_start + j < k), a[bz, m_start + i, k_start + j], T.cast(0, dtype))
+                            a_shared[i, j] = T.if_then_else(
+                                (m_start + i < m) & (k_start + j < k),
+                                a[bz, m_start + i, k_start + j],
+                                T.cast(0, dtype),
+                            )
 
                     if k_exact and n_exact:
-                        T.copy(b[bz, n_start:n_start + block_n, k_start:k_start + block_k], b_shared)
+                        T.copy(
+                            b[bz, n_start : n_start + block_n, k_start : k_start + block_k],
+                            b_shared,
+                        )
                     else:
                         for i, j in T.Parallel(block_n, block_k):
-                            b_shared[i, j] = T.if_then_else((n_start + i < n) & (k_start + j < k), b[bz, n_start + i, k_start + j], T.cast(0, dtype))
+                            b_shared[i, j] = T.if_then_else(
+                                (n_start + i < n) & (k_start + j < k),
+                                b[bz, n_start + i, k_start + j],
+                                T.cast(0, dtype),
+                            )
 
-                    T.gemm(a_shared, b_shared, c_local, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                    T.gemm(
+                        a_shared,
+                        b_shared,
+                        c_local,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullRow,
+                    )
 
                 for i, j in T.Parallel(block_m, block_n):
                     if m_start + i < m and n_start + j < n:
-                        c[bz, m_start + i, n_start + j] = T.cast(c_local[i, j] * scale_a[0] * scale_b[0], out_dtype)
+                        c[bz, m_start + i, n_start + j] = T.cast(
+                            c_local[i, j] * scale_a[0] * scale_b[0], out_dtype
+                        )
 
         return _bmm_fp8_main
 
     return _bmm_fp8_func
+
 
 @functools.lru_cache(maxsize=32)
 def _bmm_fp8_persistent_kernel(
@@ -954,6 +984,7 @@ class BmmFp8Kernel(Kernel):
             self._compiled_kernel = self.kernel(**self.config)
         return self._compiled_kernel(a, b, scale_a, scale_b)
 
+
 class BmmFp8MACAKernel(Kernel):
     """Batched FP8 GEMM for MACA/SM80 using T.Pipelined + T.gemm."""
 
@@ -974,7 +1005,9 @@ class BmmFp8MACAKernel(Kernel):
         super().__init__()
 
         if k % 32 != 0:
-            raise ValueError(f"BmmFp8MACAKernel requires contraction dim k to be a multiple of 32, got k={k}")
+            raise ValueError(
+                f"BmmFp8MACAKernel requires contraction dim k to be a multiple of 32, got k={k}"
+            )
 
         self.batch = batch
         self.m = m

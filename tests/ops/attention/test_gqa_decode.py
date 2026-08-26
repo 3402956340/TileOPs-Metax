@@ -119,7 +119,7 @@ def test_gqa_decode_rejects_non_positive_seqlen_kv() -> None:
 def test_gqa_decode_bs1_dispatch() -> None:
     """Batch-1 fp16 dim-128 uses the WS kernel where supported, otherwise the generic path."""
     op = GroupedQueryAttentionDecodeWithKVCacheFwdOp(1, 32, 4, 8192, 128)
-    kernel = op._get_kernel(torch.float16)
+    kernel = op._get_kernel((), torch.float16)
     if is_hopper():
         assert kernel.__class__.__name__ == "GQADecodeBs1Kernel"
         assert kernel._select_tier(6000) == "ctx"
@@ -150,6 +150,9 @@ def test_gqa_decode_bs1_runtime_context_switch() -> None:
     kernel = op._get_kernel((), torch.float16)
     expected_kernel = "GQADecodeBs1Kernel" if is_hopper() else "GQADecodeKernel"
     assert kernel.__class__.__name__ == expected_kernel
+    if not is_hopper():
+        return
+
     for real, tier in (
         (6000, "ctx"),
         (3072, "ctx"),

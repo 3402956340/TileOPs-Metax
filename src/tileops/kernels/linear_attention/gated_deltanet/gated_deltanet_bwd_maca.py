@@ -84,9 +84,7 @@ def _bwd_parallel_smem(chunk_size: int, bk: int, bv: int, dtype: str) -> int:
     )
 
 
-def _recurrence_resident_smem(
-    chunk_size: int, dim_k: int, bk: int, bv: int, dtype: str
-) -> int:
+def _recurrence_resident_smem(chunk_size: int, dim_k: int, bk: int, bv: int, dtype: str) -> int:
     elem = _dtype_nbytes(dtype)
     return (
         chunk_size * elem * 2
@@ -125,9 +123,7 @@ def _segment_local_carry_smem(chunk_size: int, bk: int, bv: int, dtype: str) -> 
     return chunk_size * 4 + bk * bv * elem + bk * bv * 4
 
 
-def _correction_from_carry_smem(
-    chunk_size: int, bk: int, bv: int, dtype: str
-) -> int:
+def _correction_from_carry_smem(chunk_size: int, bk: int, bv: int, dtype: str) -> int:
     # g_c float32; dh_buf dtype for GEMM (fp32 carry downcast via fragment).
     elem = _dtype_nbytes(dtype)
     return (
@@ -139,9 +135,7 @@ def _correction_from_carry_smem(
     )
 
 
-def _segmented_path_smem(
-    chunk_size: int, bk: int, bv: int, dtype: str
-) -> int:
+def _segmented_path_smem(chunk_size: int, bk: int, bv: int, dtype: str) -> int:
     return max(
         _segment_summary_smem(chunk_size, bk, bv, dtype),
         _segment_boundary_smem(bk, bv, dtype),
@@ -270,9 +264,7 @@ def _plan_bwd_config(
         rec_bk, rec_bv = _pick_stage_tiles(
             dim_k,
             dim_v,
-            lambda bk, bv: _recurrence_resident_smem(
-                chunk_size, dim_k, bk, bv, dtype
-            ),
+            lambda bk, bv: _recurrence_resident_smem(chunk_size, dim_k, bk, bv, dtype),
             "dh_recurrence_resident",
         )
         rec_k_tiled = 0
@@ -311,9 +303,7 @@ def _plan_bwd_config(
     kv_w = fused_bk if fused_bk >= fused_bv else fused_bv
     fused_threads = _maca_safe_threads(chunk_size, min(chunk_size, kv_w), preferred)
     parallel_threads = _maca_safe_threads(par_bk, par_bv, preferred)
-    recurrence_threads = _maca_safe_threads(
-        chunk_size, min(rec_bk, rec_bv), preferred
-    )
+    recurrence_threads = _maca_safe_threads(chunk_size, min(rec_bk, rec_bv), preferred)
     wu_threads = min(
         _maca_safe_threads(chunk_size, wu_bk, preferred),
         _maca_safe_threads(chunk_size, wu_bv, preferred),
@@ -845,9 +835,7 @@ def _bwd_parallel_tl(
                         T.clear(dh_tile_frag)
                         T.gemm(P, do_c, dh_tile_frag, transpose_A=True)
                         for i, j in T.Parallel(block_C, BK):
-                            P[i, j] = w_c[i, j] * T.exp2(
-                                (g_c[i] + g_c[block_C - 1]) * _LOG2E
-                            )
+                            P[i, j] = w_c[i, j] * T.exp2((g_c[i] + g_c[block_C - 1]) * _LOG2E)
                         T.clear(dh_sub_frag)
                         T.gemm(P, d_v_new_c, dh_sub_frag, transpose_A=True)
                         for i, j in T.Parallel(BK, BV):
@@ -924,14 +912,10 @@ def _bwd_parallel_tl(
                     )
 
                     for i, j in T.Parallel(block_C, BK):
-                        dw_tile[i, j] = dP_acc[i, j] * T.exp2(
-                            (g_c[i] + g_c[block_C - 1]) * _LOG2E
-                        )
+                        dw_tile[i, j] = dP_acc[i, j] * T.exp2((g_c[i] + g_c[block_C - 1]) * _LOG2E)
                     for i, j in T.Parallel(block_C, BK):
                         P[i, j] = (
-                            w_c[i, j]
-                            * T.exp2((g_c[i] + g_c[block_C - 1]) * _LOG2E)
-                            * dP_acc[i, j]
+                            w_c[i, j] * T.exp2((g_c[i] + g_c[block_C - 1]) * _LOG2E) * dP_acc[i, j]
                         )
                     T.copy(
                         dw_tile,
@@ -1113,11 +1097,9 @@ def _dh_recurrence_bwd_tl(
                         T.clear(dP_frag)
                         T.gemm(du_corr_c, dh_buf_k, dP_frag, transpose_B=True)
                         for n, kk in T.Parallel(block_C, BK):
-                            dw_corr[
-                                bid, hid, vid, t_bwd * block_C + n, koff + kk
-                            ] = -dP_frag[n, kk] * T.exp2(
-                                (g_c[n] + g_c[block_C - 1]) * _LOG2E
-                            )
+                            dw_corr[bid, hid, vid, t_bwd * block_C + n, koff + kk] = -dP_frag[
+                                n, kk
+                            ] * T.exp2((g_c[n] + g_c[block_C - 1]) * _LOG2E)
 
                     # dk_corr / dg over K tiles
                     for i in T.Parallel(block_C):
@@ -1145,9 +1127,9 @@ def _dh_recurrence_bwd_tl(
                         T.gemm(v_new_c, dh_buf_k, dP_frag, transpose_B=True)
                         T.copy(dP_frag, dP)
                         for n, kk in T.Parallel(block_C, BK):
-                            dk_corr[
-                                bid, hid, vid, t_bwd * block_C + n, koff + kk
-                            ] = dP[n, kk] * T.exp2((g_c[block_C - 1] - g_c[n]) * _LOG2E)
+                            dk_corr[bid, hid, vid, t_bwd * block_C + n, koff + kk] = dP[
+                                n, kk
+                            ] * T.exp2((g_c[block_C - 1] - g_c[n]) * _LOG2E)
 
                         for n, kk in T.Parallel(block_C, BK):
                             dP[n, kk] = dP[n, kk] * k_scaled[n, kk]
@@ -1226,9 +1208,11 @@ def _dh_recurrence_bwd_kvtile_tl(
             du_corr: T.Tensor([batch, head, num_k_tiles, seq_len, dim_v], dtype),
             dg_corr: T.Tensor([batch, head, num_k_tiles, num_v_tiles, seq_len], dtype),
         ):
-            with T.Kernel(
-                num_k_tiles, num_v_tiles, batch * head, threads=threads
-            ) as (kid, vid, bhid):
+            with T.Kernel(num_k_tiles, num_v_tiles, batch * head, threads=threads) as (
+                kid,
+                vid,
+                bhid,
+            ):
                 bid = bhid // head
                 hid = bhid % head
                 koff = kid * BK
@@ -1322,9 +1306,9 @@ def _dh_recurrence_bwd_kvtile_tl(
                     T.gemm(v_new_c, dh_buf, dP_frag, transpose_B=True)
                     T.copy(dP_frag, dP)
                     for n, kk in T.Parallel(block_C, BK):
-                        dk_corr[
-                            bid, hid, vid, t_bwd * block_C + n, koff + kk
-                        ] = dP[n, kk] * T.exp2((g_c[block_C - 1] - g_c[n]) * _LOG2E)
+                        dk_corr[bid, hid, vid, t_bwd * block_C + n, koff + kk] = dP[n, kk] * T.exp2(
+                            (g_c[block_C - 1] - g_c[n]) * _LOG2E
+                        )
 
                     for n, kk in T.Parallel(block_C, BK):
                         dP[n, kk] = dP[n, kk] * k_scaled[n, kk]
@@ -1423,9 +1407,9 @@ def _dw_corr_from_du_maca_tl(
                         for n, kk in T.Parallel(block_C, BK):
                             dw_acc[n, kk] = dw_acc[n, kk] - dP_frag[n, kk]
                     for n, kk in T.Parallel(block_C, BK):
-                        dw_corr[bid, hid, tid * block_C + n, koff + kk] = dw_acc[
-                            n, kk
-                        ] * T.exp2((g_c[n] + g_c[block_C - 1]) * _LOG2E)
+                        dw_corr[bid, hid, tid * block_C + n, koff + kk] = dw_acc[n, kk] * T.exp2(
+                            (g_c[n] + g_c[block_C - 1]) * _LOG2E
+                        )
 
         return dw_corr_from_du
 
@@ -1579,9 +1563,7 @@ def _compute_w_u_bwd_maca_tl(
                 T.clear(matrix_frag)
                 T.gemm(A_s, matrix_a_s, matrix_frag, transpose_A=True)
                 for i, j in T.Parallel(block_C, block_C):
-                    matrix_a_s[i, j] = T.if_then_else(
-                        i > j, -matrix_frag[i, j], T.float32(0.0)
-                    )
+                    matrix_a_s[i, j] = T.if_then_else(i > j, -matrix_frag[i, j], T.float32(0.0))
                 # Snapshot dL in matrix_frag; scaled dL*beta*exp reuses matrix_a_s.
                 T.copy(matrix_a_s, matrix_frag)
                 for i, j in T.Parallel(block_C, block_C):
@@ -1710,9 +1692,7 @@ def _dh_segment_summary_maca_tl(
                         disable_tma=True,
                     )
                     T.copy(
-                        dh_local[
-                            bid, hid, cid, koff : koff + BK, v_offset : v_offset + BV
-                        ],
+                        dh_local[bid, hid, cid, koff : koff + BK, v_offset : v_offset + BV],
                         dh_loc,
                         disable_tma=True,
                     )
@@ -1784,9 +1764,11 @@ def _dh_segment_boundary_scan_maca_tl(
                 "float32",
             ),
         ):
-            with T.Kernel(
-                num_k_tiles, num_v_tiles, batch * head, threads=threads
-            ) as (kid, vid, bhid):
+            with T.Kernel(num_k_tiles, num_v_tiles, batch * head, threads=threads) as (
+                kid,
+                vid,
+                bhid,
+            ):
                 bid = bhid // head
                 hid = bhid - bid * head
                 local = T.alloc_shared([BK, BV], "float32")
@@ -1903,9 +1885,7 @@ def _dh_segment_local_carry_maca_tl(
                         disable_tma=True,
                     )
                     T.copy(
-                        dh_local[
-                            bid, hid, cid, koff : koff + BK, v_offset : v_offset + BV
-                        ],
+                        dh_local[bid, hid, cid, koff : koff + BK, v_offset : v_offset + BV],
                         dh_loc,
                         disable_tma=True,
                     )
@@ -1962,13 +1942,13 @@ def _dh_correction_from_carry_maca_tl(
             ),
             dk_corr: T.Tensor([batch, head, num_v_tiles, seq_len, dim_k], dtype),
             du_corr: T.Tensor([batch, head, num_k_tiles, seq_len, dim_v], dtype),
-            dg_corr: T.Tensor(
-                [batch, head, num_k_tiles, num_v_tiles, seq_len], dtype
-            ),
+            dg_corr: T.Tensor([batch, head, num_k_tiles, num_v_tiles, seq_len], dtype),
         ):
-            with T.Kernel(
-                num_k_tiles, num_v_tiles, num_chunks * batch * head, threads=threads
-            ) as (kid, vid, cbhid):
+            with T.Kernel(num_k_tiles, num_v_tiles, num_chunks * batch * head, threads=threads) as (
+                kid,
+                vid,
+                cbhid,
+            ):
                 cid = cbhid // (batch * head)
                 bhid = cbhid - cid * batch * head
                 bid = bhid // head
@@ -2034,9 +2014,7 @@ def _dh_correction_from_carry_maca_tl(
                     disable_tma=True,
                 )
                 for pn, sk in T.Parallel(block_C, BK):
-                    k_scaled[pn, sk] = k_c[pn, sk] * T.exp2(
-                        (g_c[block_C - 1] - g_c[pn]) * _LOG2E
-                    )
+                    k_scaled[pn, sk] = k_c[pn, sk] * T.exp2((g_c[block_C - 1] - g_c[pn]) * _LOG2E)
 
                 T.clear(du_corr_frag)
                 T.gemm(k_scaled, dh_buf, du_corr_frag)
@@ -2057,9 +2035,9 @@ def _dh_correction_from_carry_maca_tl(
                 T.gemm(v_new_c, dh_buf, dP_frag, transpose_B=True)
                 T.copy(dP_frag, dP)
                 for n, kk in T.Parallel(block_C, BK):
-                    dk_corr[bid, hid, vid, cid * block_C + n, koff + kk] = dP[
-                        n, kk
-                    ] * T.exp2((g_c[block_C - 1] - g_c[n]) * _LOG2E)
+                    dk_corr[bid, hid, vid, cid * block_C + n, koff + kk] = dP[n, kk] * T.exp2(
+                        (g_c[block_C - 1] - g_c[n]) * _LOG2E
+                    )
 
                 for n, kk in T.Parallel(block_C, BK):
                     dP[n, kk] = dP[n, kk] * k_scaled[n, kk]
@@ -2087,40 +2065,77 @@ def _dh_correction_from_carry_maca_tl(
 
 @torch.library.custom_op("tileops::gated_deltanet_bwd_kernel_maca", mutates_args=())
 def _gated_deltanet_bwd_wrapped_kernel(
-    batch: int, head: int, seq_len: int, chunk_size: int, dim_k: int, dim_v: int,
+    batch: int,
+    head: int,
+    seq_len: int,
+    chunk_size: int,
+    dim_k: int,
+    dim_v: int,
     dtype: str,
-    num_stages: int, threads: int, wu_threads: int,
-    parallel_threads: int, recurrence_threads: int,
-    fused_block_k: int, fused_block_v: int,
-    parallel_block_k: int, parallel_block_v: int,
-    wu_block_k: int, wu_block_v: int,
-    recurrence_block_k: int, recurrence_block_v: int,
+    num_stages: int,
+    threads: int,
+    wu_threads: int,
+    parallel_threads: int,
+    recurrence_threads: int,
+    fused_block_k: int,
+    fused_block_v: int,
+    parallel_block_k: int,
+    parallel_block_v: int,
+    wu_block_k: int,
+    wu_block_v: int,
+    recurrence_block_k: int,
+    recurrence_block_v: int,
     recurrence_k_tiled: int,
     recurrence_segmented_carry: int,
     recurrence_segment_chunks: int,
-    do: torch.Tensor, q: torch.Tensor, k: torch.Tensor,
-    v: torch.Tensor, g: torch.Tensor, beta: torch.Tensor,
+    do: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
     S: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-
     g_cum = _chunk_local_cumsum(g.float(), chunk_size).to(g.dtype)
 
     fused_fn = _fused_prepare_compute_w_u_maca_tl(
-        batch, head, seq_len, chunk_size, dim_k, dim_v, dtype,
-        block_k=fused_block_k, block_v=fused_block_v,
+        batch,
+        head,
+        seq_len,
+        chunk_size,
+        dim_k,
+        dim_v,
+        dtype,
+        block_k=fused_block_k,
+        block_v=fused_block_v,
     )(1, threads)
     bwd_parallel_fn = _bwd_parallel_tl(
-        batch, head, seq_len, chunk_size, dim_k, dim_v, dtype,
-        block_k=parallel_block_k, block_v=parallel_block_v,
+        batch,
+        head,
+        seq_len,
+        chunk_size,
+        dim_k,
+        dim_v,
+        dtype,
+        block_k=parallel_block_k,
+        block_v=parallel_block_v,
     )(parallel_threads)
     wu_bwd_fn = _compute_w_u_bwd_maca_tl(
-        batch, head, seq_len, chunk_size, dim_k, dim_v, dtype,
-        block_k=wu_block_k, block_v=wu_block_v,
+        batch,
+        head,
+        seq_len,
+        chunk_size,
+        dim_k,
+        dim_v,
+        dtype,
+        block_k=wu_block_k,
+        block_v=wu_block_v,
     )(1, wu_threads)
 
     Aw, _Au, w, u = fused_fn(k, v, g_cum, beta)
-    dq, dk_partial, dg_partial, dw, du_partial, v_new, dh_local = \
-        bwd_parallel_fn(do, q, k, g_cum, w, u, S)
+    dq, dk_partial, dg_partial, dw, du_partial, v_new, dh_local = bwd_parallel_fn(
+        do, q, k, g_cum, w, u, S
+    )
 
     rec_bk, rec_bv, rec_k_tiled = _resolve_recurrence_for_bv(
         chunk_size,
@@ -2137,8 +2152,6 @@ def _gated_deltanet_bwd_wrapped_kernel(
         chunk_size, min(recurrence_block_k, recurrence_block_v), recurrence_threads
     )
 
-
-
     if recurrence_segmented_carry != 0:
         seg_kwargs = dict(
             batch=batch,
@@ -2152,18 +2165,21 @@ def _gated_deltanet_bwd_wrapped_kernel(
             block_v=recurrence_block_v,
             segment_chunks=recurrence_segment_chunks,
         )
-        summary_fn = _dh_segment_summary_maca_tl(**seg_kwargs)(
-            num_stages, recurrence_threads
-        )
+        summary_fn = _dh_segment_summary_maca_tl(**seg_kwargs)(num_stages, recurrence_threads)
         boundary_fn = _dh_segment_boundary_scan_maca_tl(**seg_kwargs)(
             num_stages, recurrence_threads
         )
-        local_fn = _dh_segment_local_carry_maca_tl(**seg_kwargs)(
-            num_stages, recurrence_threads
-        )
+        local_fn = _dh_segment_local_carry_maca_tl(**seg_kwargs)(num_stages, recurrence_threads)
         corr_fn = _dh_correction_from_carry_maca_tl(
-            batch, head, seq_len, chunk_size, dim_k, dim_v, dtype,
-            block_k=recurrence_block_k, block_v=recurrence_block_v,
+            batch,
+            head,
+            seq_len,
+            chunk_size,
+            dim_k,
+            dim_v,
+            dtype,
+            block_k=recurrence_block_k,
+            block_v=recurrence_block_v,
         )(recurrence_threads)
         segment_alpha, segment_local = summary_fn(g_cum, dh_local)
 
@@ -2171,9 +2187,7 @@ def _gated_deltanet_bwd_wrapped_kernel(
 
         dh_carry_after = local_fn(g_cum, dh_local, segment_carry_after)
 
-        dk_corr, du_corr, dg_corr = corr_fn(
-            g_cum, k, v_new, S, dh_carry_after
-        )
+        dk_corr, du_corr, dg_corr = corr_fn(g_cum, k, v_new, S, dh_carry_after)
 
         if du_corr.dim() == 5:
             du_corr = du_corr.float().sum(dim=2).to(du_partial.dtype)
@@ -2183,15 +2197,29 @@ def _gated_deltanet_bwd_wrapped_kernel(
             dk_corr = dk_corr.float().sum(dim=2).to(dk_partial.dtype)
 
         dw_corr_fn = _dw_corr_from_du_maca_tl(
-            batch, head, seq_len, chunk_size, dim_k, dim_v, dtype,
-            block_k=recurrence_block_k, block_v=recurrence_block_v,
+            batch,
+            head,
+            seq_len,
+            chunk_size,
+            dim_k,
+            dim_v,
+            dtype,
+            block_k=recurrence_block_k,
+            block_v=recurrence_block_v,
         )(recurrence_threads)
         dw_corr = dw_corr_fn(g_cum, S, du_corr)
 
     elif recurrence_k_tiled:
         dh_fn = _dh_recurrence_bwd_kvtile_tl(
-            batch, head, seq_len, chunk_size, dim_k, dim_v, dtype,
-            block_k=recurrence_block_k, block_v=recurrence_block_v,
+            batch,
+            head,
+            seq_len,
+            chunk_size,
+            dim_k,
+            dim_v,
+            dtype,
+            block_k=recurrence_block_k,
+            block_v=recurrence_block_v,
         )(num_stages, recurrence_threads)
         dk_corr, du_corr, dg_corr = dh_fn(g_cum, k, v_new, S, dh_local)
 
@@ -2203,15 +2231,29 @@ def _gated_deltanet_bwd_wrapped_kernel(
             dk_corr = dk_corr.float().sum(dim=2).to(dk_partial.dtype)
 
         dw_corr_fn = _dw_corr_from_du_maca_tl(
-            batch, head, seq_len, chunk_size, dim_k, dim_v, dtype,
-            block_k=recurrence_block_k, block_v=recurrence_block_v,
+            batch,
+            head,
+            seq_len,
+            chunk_size,
+            dim_k,
+            dim_v,
+            dtype,
+            block_k=recurrence_block_k,
+            block_v=recurrence_block_v,
         )(recurrence_threads)
         dw_corr = dw_corr_fn(g_cum, S, du_corr)
 
     else:
         dh_fn = _dh_recurrence_bwd_tl(
-            batch, head, seq_len, chunk_size, dim_k, dim_v, dtype,
-            block_k=recurrence_block_k, block_v=recurrence_block_v,
+            batch,
+            head,
+            seq_len,
+            chunk_size,
+            dim_k,
+            dim_v,
+            dtype,
+            block_k=recurrence_block_k,
+            block_v=recurrence_block_v,
         )(num_stages, recurrence_threads)
         dk_corr, du_corr, dg_corr, dw_corr = dh_fn(g_cum, k, v_new, S, dh_local)
 
@@ -2220,12 +2262,17 @@ def _gated_deltanet_bwd_wrapped_kernel(
             dg_corr = dg_corr.float().sum(dim=2).to(dg_partial.dtype)
             dw_corr = dw_corr.float().sum(dim=2).to(dw.dtype)
 
-
     dk_wu, dv, dbeta, dg_prepare = wu_bwd_fn(
-        dw, dw_corr, du_partial, du_corr, Aw, k, v, g_cum, beta,
+        dw,
+        dw_corr,
+        du_partial,
+        du_corr,
+        Aw,
+        k,
+        v,
+        g_cum,
+        beta,
     )
-
-
 
     dk = dk_partial + dk_corr + dk_wu
     dg_cum = dg_partial + dg_corr + dg_prepare
@@ -2234,33 +2281,66 @@ def _gated_deltanet_bwd_wrapped_kernel(
     dg = dg_cum.float().reshape(B, H, SL // chunk_size, chunk_size)
     dg = dg.flip(-1).cumsum(-1).flip(-1).reshape(B, H, SL).to(g.dtype)
 
-
     return dq, dk, dv, dg, dbeta
 
 
 @_gated_deltanet_bwd_wrapped_kernel.register_fake
 def _gated_deltanet_bwd_wrapped_kernel_fake(
-    batch: int, head: int, seq_len: int, chunk_size: int, dim_k: int, dim_v: int,
+    batch: int,
+    head: int,
+    seq_len: int,
+    chunk_size: int,
+    dim_k: int,
+    dim_v: int,
     dtype: str,
-    num_stages: int, threads: int, wu_threads: int,
-    parallel_threads: int, recurrence_threads: int,
-    fused_block_k: int, fused_block_v: int,
-    parallel_block_k: int, parallel_block_v: int,
-    wu_block_k: int, wu_block_v: int,
-    recurrence_block_k: int, recurrence_block_v: int,
+    num_stages: int,
+    threads: int,
+    wu_threads: int,
+    parallel_threads: int,
+    recurrence_threads: int,
+    fused_block_k: int,
+    fused_block_v: int,
+    parallel_block_k: int,
+    parallel_block_v: int,
+    wu_block_k: int,
+    wu_block_v: int,
+    recurrence_block_k: int,
+    recurrence_block_v: int,
     recurrence_k_tiled: int,
     recurrence_segmented_carry: int,
     recurrence_segment_chunks: int,
-    do: torch.Tensor, q: torch.Tensor, k: torch.Tensor,
-    v: torch.Tensor, g: torch.Tensor, beta: torch.Tensor,
+    do: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
     S: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     del (
-        dtype, num_stages, threads, wu_threads, parallel_threads, recurrence_threads,
-        fused_block_k, fused_block_v, parallel_block_k, parallel_block_v,
-        wu_block_k, wu_block_v, recurrence_block_k, recurrence_block_v,
-        recurrence_k_tiled, recurrence_segmented_carry, recurrence_segment_chunks,
-        do, k, v, g, beta, S,
+        dtype,
+        num_stages,
+        threads,
+        wu_threads,
+        parallel_threads,
+        recurrence_threads,
+        fused_block_k,
+        fused_block_v,
+        parallel_block_k,
+        parallel_block_v,
+        wu_block_k,
+        wu_block_v,
+        recurrence_block_k,
+        recurrence_block_v,
+        recurrence_k_tiled,
+        recurrence_segmented_carry,
+        recurrence_segment_chunks,
+        do,
+        k,
+        v,
+        g,
+        beta,
+        S,
     )
     dq = torch.empty(batch, head, seq_len, dim_k, dtype=q.dtype, device=q.device)
     dk = torch.empty_like(dq)
@@ -2330,8 +2410,13 @@ class GatedDeltaNetBwdMACAKernel(Kernel):
         cfg = self.config
         defaults = self.default_config
         return _gated_deltanet_bwd_wrapped_kernel(
-            self.batch, self.head, self.seq_len, self.chunk_size,
-            self.dim_k, self.dim_v, self.dtype_str,
+            self.batch,
+            self.head,
+            self.seq_len,
+            self.chunk_size,
+            self.dim_k,
+            self.dim_v,
+            self.dtype_str,
             cfg.get("num_stages", defaults["num_stages"]),
             cfg.get("threads", defaults["threads"]),
             cfg.get("wu_threads", defaults["wu_threads"]),
@@ -2354,5 +2439,11 @@ class GatedDeltaNetBwdMACAKernel(Kernel):
                 "recurrence_segment_chunks",
                 defaults["recurrence_segment_chunks"],
             ),
-            do, q, k, v, g, beta, S,
+            do,
+            q,
+            k,
+            v,
+            g,
+            beta,
+            S,
         )

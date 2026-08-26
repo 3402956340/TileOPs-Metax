@@ -38,13 +38,14 @@ from .fp8_lightning_indexer import FP8LightningIndexerKernel
 from .fp8_quant import FP8QuantKernel
 from .gemm import (
     BmmFp8Kernel,
-    BmmKernel,
     BmmFp8MACAKernel,
+    BmmKernel,
     GemmFp8BlockScaledKernel,
     GemmFp8EpilogueKernel,
     GemmKernel,
     GemvKernel,
 )
+from .gemm_maca import GemmMACAKernel
 from .grouped_gemm import GroupedGemmKernel
 from .kernel_base import Kernel
 from .linear_attention import (
@@ -65,7 +66,6 @@ from .linear_attention import (
     GLADecodeKernel,
     GLAFwdKernel,
 )
-from .gemm_maca import GemmMACAKernel
 from .mhc import MHCPostKernel, MHCPreKernel
 from .moe import MoePermuteAlignKernel
 from .norm import (

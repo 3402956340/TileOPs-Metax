@@ -64,6 +64,7 @@ _DROP_COUNTER_LIVE: Optional[bool] = None
 # work is what lets a kernel with no id at all mean one thing only: a thread the id was
 # never pushed on launched it. Out of range of any iteration index.
 _PREPARE_ID = 1 << 32
+_KERNEL_REGION = "tileops.bench.kernel"
 
 
 # L2 cache flush buffer, allocated lazily.
@@ -467,7 +468,6 @@ def _collect_torch_profiler(
     This path is important on MACA: PyTorch may expose the CUDA-compatible profiler
     backend while the standalone ``cupti`` Python binding is absent.
     """
-    samples: list[Sample] = []
     with torch.profiler.profile(
         activities=[
             torch.profiler.ProfilerActivity.CPU,
@@ -479,7 +479,7 @@ def _collect_torch_profiler(
             with torch.profiler.record_function(_KERNEL_REGION):
                 run_one(i)
             torch.cuda.synchronize()
-    total_us, n_regions = _sum_kernel_time_us(profiler.profiler.kineto_results)
+    total_us, n_regions = _sum_kernel_time_us(profiler.key_averages())
     if n_regions != n_repeat:
         raise _CUPTIAttributionError(
             f"PyTorch profiler projected {n_regions}/{n_repeat} benchmark regions"
@@ -489,6 +489,14 @@ def _collect_torch_profiler(
     # backend does not expose correlation IDs (the normal MACA case).
     per_iter_ms = (total_us / n_repeat) * 1e-3
     return [Sample(per_iter_ms, per_iter_ms, None) for _ in range(n_repeat)]
+
+
+def _sum_kernel_time_us(events) -> tuple[float, int]:
+    """Return the device time and invocation count for benchmark regions."""
+    for event in events:
+        if event.key == _KERNEL_REGION:
+            return float(event.device_time_total), int(event.count)
+    return 0.0, 0
 
 
 def _sample_spread_ms(samples: list[float]) -> tuple[float, float] | tuple[None, None]:

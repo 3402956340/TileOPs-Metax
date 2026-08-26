@@ -612,7 +612,7 @@ class GemmKernel(Kernel):
     accumulation. Hopper-only — TMA + WGMMA require SM90.
     """
 
-    supported_archs: list[int] = [89,90]
+    supported_archs: list[int] = [89, 90]
     general = True
 
     def __init__(

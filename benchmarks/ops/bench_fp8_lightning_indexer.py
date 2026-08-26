@@ -51,6 +51,7 @@ def _one_row_per_shape(workloads: list[dict]) -> list[dict]:
         rows.append(w)
     return rows
 
+
 @pytest.mark.xfail
 @pytest.mark.parametrize(
     "batch, seq_len, heads, index_dim, seq_len_kv, kv_group, clean_logits",

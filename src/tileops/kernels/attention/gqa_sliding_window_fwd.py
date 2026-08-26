@@ -190,7 +190,7 @@ def _gqa_sw_fwd_wgmma_pipelined_kernel(
                     T.sync_threads(3, threads)
                     T.copy(acc_o, o_shared)
                     T.sync_threads(3, threads)
-                    T.copy(o_shared, output[bz, bx * block_m:(bx + 1) * block_m, by, :])
+                    T.copy(o_shared, output[bz, bx * block_m : (bx + 1) * block_m, by, :])
                 for i in T.Parallel(block_m):
                     logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
                 T.copy(logsum, lse[bz, by, bx * block_m : (bx + 1) * block_m])
@@ -310,10 +310,10 @@ class GQASlidingWindowFwdWgmmaPipelinedKernel(Kernel):
     def autotune_configs(self) -> list[dict]:
         if is_maca():
             return [self.default_config]
-        configs = list(itertools.product([64, 128], [64, 128],
-                                         [2, 3], [128, 256]))
-        return [{'block_m': c[0], 'block_n': c[1],
-                 'num_stages': c[2], 'threads': c[3]} for c in configs]
+        configs = list(itertools.product([64, 128], [64, 128], [2, 3], [128, 256]))
+        return [
+            {"block_m": c[0], "block_n": c[1], "num_stages": c[2], "threads": c[3]} for c in configs
+        ]
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         output, _ = _gqa_sw_fwd_wgmma_pipelined_wrapped_kernel(

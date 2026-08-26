@@ -4,7 +4,7 @@ from unittest.mock import Mock
 import pytest
 
 import benchmarks.conftest as benchmark_config
-from benchmarks.xfail_whitelist import MACA_XFAILS, MACA_XFAIL_PREFIXES
+from benchmarks.xfail_whitelist import MACA_XFAIL_PREFIXES, MACA_XFAILS
 
 pytestmark = pytest.mark.smoke
 

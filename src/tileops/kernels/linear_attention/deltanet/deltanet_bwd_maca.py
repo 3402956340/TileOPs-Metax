@@ -91,10 +91,7 @@ def _bwd_parallel_tl_maca(
                 T.clear(attn_frag)
                 T.gemm(q_c, k_c, attn_frag, transpose_B=True)
                 for i, j in T.Parallel(block_C, block_C):
-                    attn[i, j] = T.if_then_else(
-                        i >= j,
-                        attn_frag[i, j],
-                        T.float32(0.0))
+                    attn[i, j] = T.if_then_else(i >= j, attn_frag[i, j], T.float32(0.0))
 
                 T.clear(d_q_c_frag)
                 T.clear(dP_frag)
@@ -104,15 +101,18 @@ def _bwd_parallel_tl_maca(
                     v_off = v0 * BV
                     T.copy(
                         u[bid, hid, tid * block_C : (tid + 1) * block_C, v_off : v_off + BV],
-                        u_c, disable_tma=True,
+                        u_c,
+                        disable_tma=True,
                     )
                     T.copy(
                         do[bid, hid, tid * block_C : (tid + 1) * block_C, v_off : v_off + BV],
-                        do_c, disable_tma=True,
+                        do_c,
+                        disable_tma=True,
                     )
                     T.copy(
                         S[bid, hid, tid, :, v_off : v_off + BV],
-                        h_c, disable_tma=True,
+                        h_c,
+                        disable_tma=True,
                     )
 
                     # v_new = u - w @ h
@@ -122,7 +122,9 @@ def _bwd_parallel_tl_maca(
                         v_new_c[i, j] = u_c[i, j] - ws_frag[i, j]
                     T.copy(
                         v_new_c,
-                        v_new_out[bid, hid, tid * block_C : (tid + 1) * block_C, v_off : v_off + BV],
+                        v_new_out[
+                            bid, hid, tid * block_C : (tid + 1) * block_C, v_off : v_off + BV
+                        ],
                         disable_tma=True,
                     )
 
@@ -132,7 +134,9 @@ def _bwd_parallel_tl_maca(
                     T.copy(d_v_new_frag, d_v_new_c)
                     T.copy(
                         d_v_new_c,
-                        du_partial[bid, hid, tid * block_C : (tid + 1) * block_C, v_off : v_off + BV],
+                        du_partial[
+                            bid, hid, tid * block_C : (tid + 1) * block_C, v_off : v_off + BV
+                        ],
                         disable_tma=True,
                     )
 
@@ -166,14 +170,24 @@ def _bwd_parallel_tl_maca(
 
                 # dq/dk from d_attn
                 T.gemm(d_attn, k_c, d_q_c_frag)
-                T.copy(d_q_c_frag, dq[bid, hid, tid * block_C : (tid + 1) * block_C, :], disable_tma=True)
+                T.copy(
+                    d_q_c_frag,
+                    dq[bid, hid, tid * block_C : (tid + 1) * block_C, :],
+                    disable_tma=True,
+                )
 
                 T.clear(d_k_c_frag)
                 T.gemm(d_attn, q_c, d_k_c_frag, transpose_A=True)
-                T.copy(d_k_c_frag, dk_partial[bid, hid, tid * block_C : (tid + 1) * block_C, :], disable_tma=True)
+                T.copy(
+                    d_k_c_frag,
+                    dk_partial[bid, hid, tid * block_C : (tid + 1) * block_C, :],
+                    disable_tma=True,
+                )
 
                 # dw = dP
-                T.copy(dP_frag, dw[bid, hid, tid * block_C : (tid + 1) * block_C, :], disable_tma=True)
+                T.copy(
+                    dP_frag, dw[bid, hid, tid * block_C : (tid + 1) * block_C, :], disable_tma=True
+                )
 
         return bwd_parallel_kernel_maca
 
@@ -240,25 +254,41 @@ def _dh_recurrence_bwd_tl_maca(
 
                 for t in T.Pipelined(num_chunks, num_stages=num_stages):
                     t_bwd = num_chunks - 1 - t
-                    T.copy(k[bid, hid, t_bwd * block_C : (t_bwd + 1) * block_C, :], k_c, disable_tma=True)
-                    T.copy(w[bid, hid, t_bwd * block_C : (t_bwd + 1) * block_C, :], w_c, disable_tma=True)
+                    T.copy(
+                        k[bid, hid, t_bwd * block_C : (t_bwd + 1) * block_C, :],
+                        k_c,
+                        disable_tma=True,
+                    )
+                    T.copy(
+                        w[bid, hid, t_bwd * block_C : (t_bwd + 1) * block_C, :],
+                        w_c,
+                        disable_tma=True,
+                    )
 
                     T.clear(dP_frag)
 
                     for v0 in T.serial(0, sub_dim_v):
                         v_off = v0 * BV
                         T.copy(
-                            v_new[bid, hid, t_bwd * block_C : (t_bwd + 1) * block_C, v_off : v_off + BV],
-                            v_new_c, disable_tma=True,
+                            v_new[
+                                bid,
+                                hid,
+                                t_bwd * block_C : (t_bwd + 1) * block_C,
+                                v_off : v_off + BV,
+                            ],
+                            v_new_c,
+                            disable_tma=True,
                         )
                         T.copy(
                             dh_local[bid, hid, t_bwd, :, v_off : v_off + BV],
-                            dh_loc, disable_tma=True,
+                            dh_loc,
+                            disable_tma=True,
                         )
 
                         T.copy(
                             dh_carry[:, v_off : v_off + BV],
-                            dh_tile, disable_tma=True,
+                            dh_tile,
+                            disable_tma=True,
                         )
                         T.copy(dh_tile, dh_buf, disable_tma=True)
 
@@ -266,7 +296,12 @@ def _dh_recurrence_bwd_tl_maca(
                         T.gemm(k_c, dh_buf, du_corr_frag)
                         T.copy(
                             du_corr_frag,
-                            du_corr[bid, hid, t_bwd * block_C : (t_bwd + 1) * block_C, v_off : v_off + BV],
+                            du_corr[
+                                bid,
+                                hid,
+                                t_bwd * block_C : (t_bwd + 1) * block_C,
+                                v_off : v_off + BV,
+                            ],
                             disable_tma=True,
                         )
                         T.copy(du_corr_frag, k_dh_shared)
@@ -279,9 +314,7 @@ def _dh_recurrence_bwd_tl_maca(
                         T.clear(wk_dh_frag)
                         T.gemm(w_c, k_dh_shared, wk_dh_frag, transpose_A=True)
                         for i, j in T.Parallel(dim_k, BV):
-                            dh_tile[i, j] = (
-                                dh_tile[i, j] + dh_loc[i, j] - wk_dh_frag[i, j]
-                            )
+                            dh_tile[i, j] = dh_tile[i, j] + dh_loc[i, j] - wk_dh_frag[i, j]
                         T.copy(
                             dh_tile,
                             dh_carry[:, v_off : v_off + BV],
@@ -313,30 +346,60 @@ def _compute_dw_corr(
 
 @torch.library.custom_op("tileops::deltanet_bwd_kernel_maca", mutates_args=())
 def _deltanet_bwd_wrapped_kernel_maca(
-    batch: int, head: int, seq_len: int, chunk_size: int, dim_k: int, dim_v: int,
+    batch: int,
+    head: int,
+    seq_len: int,
+    chunk_size: int,
+    dim_k: int,
+    dim_v: int,
     dtype: str,
-    num_stages: int, threads: int,
-    parallel_threads: int, recurrence_threads: int,
-    do: torch.Tensor, q: torch.Tensor, k: torch.Tensor,
-    v: torch.Tensor, beta: torch.Tensor,
+    num_stages: int,
+    threads: int,
+    parallel_threads: int,
+    recurrence_threads: int,
+    do: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
     S: torch.Tensor,
-    Aw: torch.Tensor, Au: torch.Tensor,
-    w: torch.Tensor, u: torch.Tensor,
+    Aw: torch.Tensor,
+    Au: torch.Tensor,
+    w: torch.Tensor,
+    u: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     from .compute_w_u_bwd_maca import compute_w_u_bwd_tl_maca
 
     bwd_parallel_fn = _bwd_parallel_tl_maca(
-        batch, head, seq_len, chunk_size, dim_k, dim_v, dtype,
+        batch,
+        head,
+        seq_len,
+        chunk_size,
+        dim_k,
+        dim_v,
+        dtype,
     )(parallel_threads)
     dh_recurrence_bwd_fn = _dh_recurrence_bwd_tl_maca(
-        batch, head, seq_len, chunk_size, dim_k, dim_v, dtype,
+        batch,
+        head,
+        seq_len,
+        chunk_size,
+        dim_k,
+        dim_v,
+        dtype,
     )(num_stages, recurrence_threads)
     wu_bwd_fn = compute_w_u_bwd_tl_maca(
-        batch, head, seq_len, chunk_size, dim_k, dim_v, dtype,
+        batch,
+        head,
+        seq_len,
+        chunk_size,
+        dim_k,
+        dim_v,
+        dtype,
     )(num_stages, threads)
 
-    dq, dk_partial, dw, du_partial, v_new, dh_local =         bwd_parallel_fn(do, q, k, w, u, S)
-    dk_corr, du_corr =         dh_recurrence_bwd_fn(k, w, v_new, dh_local)
+    dq, dk_partial, dw, du_partial, v_new, dh_local = bwd_parallel_fn(do, q, k, w, u, S)
+    dk_corr, du_corr = dh_recurrence_bwd_fn(k, w, v_new, dh_local)
 
     du = du_partial + du_corr
     dw_total = dw - _compute_dw_corr(du_corr, S, chunk_size)
@@ -347,15 +410,27 @@ def _deltanet_bwd_wrapped_kernel_maca(
 
 @_deltanet_bwd_wrapped_kernel_maca.register_fake
 def _deltanet_bwd_wrapped_kernel_maca_fake(
-    batch: int, head: int, seq_len: int, chunk_size: int, dim_k: int, dim_v: int,
+    batch: int,
+    head: int,
+    seq_len: int,
+    chunk_size: int,
+    dim_k: int,
+    dim_v: int,
     dtype: str,
-    num_stages: int, threads: int,
-    parallel_threads: int, recurrence_threads: int,
-    do: torch.Tensor, q: torch.Tensor, k: torch.Tensor,
-    v: torch.Tensor, beta: torch.Tensor,
+    num_stages: int,
+    threads: int,
+    parallel_threads: int,
+    recurrence_threads: int,
+    do: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
     S: torch.Tensor,
-    Aw: torch.Tensor, Au: torch.Tensor,
-    w: torch.Tensor, u: torch.Tensor,
+    Aw: torch.Tensor,
+    Au: torch.Tensor,
+    w: torch.Tensor,
+    u: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     dq = torch.empty(batch, head, seq_len, dim_k, dtype=q.dtype, device=q.device)
     dk = torch.empty_like(dq)
@@ -416,7 +491,9 @@ class DeltaNetBwdMACAKernel(Kernel):
         print(f"Autotuning bwd_parallel_maca ({len(parallel_configs)} configs)...")
         parallel_jit = _bwd_parallel_tl_maca(B, H, S, BC, DK, DV, dt)
         _parallel_at = dict(configs=parallel_configs, warmup=warmup, rep=rep)
-        _parallel_dns = list(self._autotune_initial_kwargs(parallel_jit, parallel_configs[0]).keys())
+        _parallel_dns = list(
+            self._autotune_initial_kwargs(parallel_jit, parallel_configs[0]).keys()
+        )
         if _parallel_dns:
             _parallel_at["do_not_specialize"] = _parallel_dns
         tuned_parallel = self._call_autotuned_kernel(
@@ -428,14 +505,13 @@ class DeltaNetBwdMACAKernel(Kernel):
         print(f"  Best: {parallel_best}")
 
         # MACA: pipelined recurrence/wu_bwd use extra smem; only stage count 1.
-        recurrence_configs = [
-            {"num_stages": 1, "threads": t}
-            for t in [128, 256]
-        ]
+        recurrence_configs = [{"num_stages": 1, "threads": t} for t in [128, 256]]
         print(f"Autotuning dh_recurrence_bwd_maca ({len(recurrence_configs)} configs)...")
         recurrence_jit = _dh_recurrence_bwd_tl_maca(B, H, S, BC, DK, DV, dt)
         _recurrence_at = dict(configs=recurrence_configs, warmup=warmup, rep=rep)
-        _recurrence_dns = list(self._autotune_initial_kwargs(recurrence_jit, recurrence_configs[0]).keys())
+        _recurrence_dns = list(
+            self._autotune_initial_kwargs(recurrence_jit, recurrence_configs[0]).keys()
+        )
         if _recurrence_dns:
             _recurrence_at["do_not_specialize"] = _recurrence_dns
         tuned_recurrence = self._call_autotuned_kernel(
@@ -446,10 +522,7 @@ class DeltaNetBwdMACAKernel(Kernel):
         recurrence_best = tuned_recurrence.config
         print(f"  Best: {recurrence_best}")
 
-        wu_bwd_configs = [
-            {"num_stages": 1, "threads": t}
-            for t in [128, 256]
-        ]
+        wu_bwd_configs = [{"num_stages": 1, "threads": t} for t in [128, 256]]
         print(f"Autotuning compute_w_u_bwd_maca ({len(wu_bwd_configs)} configs)...")
         wu_bwd_jit = compute_w_u_bwd_tl_maca(B, H, S, BC, DK, DV, dt)
         _wu_bwd_at = dict(configs=wu_bwd_configs, warmup=warmup, rep=rep)
@@ -486,10 +559,25 @@ class DeltaNetBwdMACAKernel(Kernel):
         u: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return _deltanet_bwd_wrapped_kernel_maca(
-            self.batch, self.head, self.seq_len, self.chunk_size,
-            self.dim_k, self.dim_v, self.dtype_str,
-            self.config.get("num_stages", 1), self.config.get("threads", 256),
+            self.batch,
+            self.head,
+            self.seq_len,
+            self.chunk_size,
+            self.dim_k,
+            self.dim_v,
+            self.dtype_str,
+            self.config.get("num_stages", 1),
+            self.config.get("threads", 256),
             self.config.get("parallel_threads", 256),
             self.config.get("recurrence_threads", 256),
-            do, q, k, v, beta, S, Aw, Au, w, u,
+            do,
+            q,
+            k,
+            v,
+            beta,
+            S,
+            Aw,
+            Au,
+            w,
+            u,
         )

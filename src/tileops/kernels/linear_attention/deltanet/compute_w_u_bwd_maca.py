@@ -88,11 +88,13 @@ def compute_w_u_bwd_tl_maca(
                 for k0 in T.serial(0, sub_dim_k):
                     T.copy(
                         dw[bid, hid, by * block_C : (by + 1) * block_C, k0 * BK : (k0 + 1) * BK],
-                        x0, disable_tma=True,
+                        x0,
+                        disable_tma=True,
                     )
                     T.copy(
                         k[bid, hid, by * block_C : (by + 1) * block_C, k0 * BK : (k0 + 1) * BK],
-                        x1, disable_tma=True,
+                        x1,
+                        disable_tma=True,
                     )
 
                     T.clear(acc_frag)
@@ -115,11 +117,13 @@ def compute_w_u_bwd_tl_maca(
                 for v0 in T.serial(0, sub_dim_v):
                     T.copy(
                         du[bid, hid, by * block_C : (by + 1) * block_C, v0 * BV : (v0 + 1) * BV],
-                        x0, disable_tma=True,
+                        x0,
+                        disable_tma=True,
                     )
                     T.copy(
                         v[bid, hid, by * block_C : (by + 1) * block_C, v0 * BV : (v0 + 1) * BV],
-                        x1, disable_tma=True,
+                        x1,
+                        disable_tma=True,
                     )
 
                     T.clear(acc_frag)
@@ -154,7 +158,8 @@ def compute_w_u_bwd_tl_maca(
                 for k0 in T.serial(0, sub_dim_k):
                     T.copy(
                         k[bid, hid, by * block_C : (by + 1) * block_C, k0 * BK : (k0 + 1) * BK],
-                        x1, disable_tma=True,
+                        x1,
+                        disable_tma=True,
                     )
                     for i, j in T.Parallel(block_C, BK):
                         x0[i, j] = x1[i, j] * beta_s[i]
@@ -175,7 +180,8 @@ def compute_w_u_bwd_tl_maca(
                 for k0 in T.serial(0, sub_dim_k):
                     T.copy(
                         k[bid, hid, by * block_C : (by + 1) * block_C, k0 * BK : (k0 + 1) * BK],
-                        x1, disable_tma=True,
+                        x1,
+                        disable_tma=True,
                     )
                     T.clear(acc_frag)
                     T.gemm(x1, x1, acc_frag, transpose_B=True)

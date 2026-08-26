@@ -14,7 +14,9 @@ import torch
 from tileops.kernels.gemm.call_spec import GemmCall
 from tileops.kernels.linear_attention.deltanet_call import DeltaNetDecodeCall
 from tileops.kernels.linear_attention.deltanet_recurrence import DeltaNetDecodeRawCudaFlaStyleKernel
-from tileops.kernels.linear_attention.gated_deltanet_recurrence import GatedDeltaNetDecodeRawCudaFlaStyleKernel
+from tileops.kernels.linear_attention.gated_deltanet_recurrence import (
+    GatedDeltaNetDecodeRawCudaFlaStyleKernel,
+)
 from tileops.ops.gemm.gemm import GemmFwdOp
 from tileops.ops.linear_attention.deltanet_recurrence import (
     DELTANET_DECODE_KEYS,
@@ -24,6 +26,7 @@ from tileops.ops.linear_attention.gated_deltanet import (
     GATED_DELTANET_DECODE_KEYS,
     GatedDeltaNetDecodeFwdOp,
 )
+from tileops.utils import is_maca
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="selection reads the device architecture"
@@ -60,6 +63,7 @@ def test_gemm_dispatch(m: int, n: int, trans_a: bool, trans_b: bool, expected: s
     assert op.select_kernel_key(("gemv_kernel", "gemm_kernel"), call) == expected
 
 
+@pytest.mark.skipif(is_maca(), reason="MACA supports gemm on SM80")
 @pytest.mark.smoke
 def test_gemm_is_refused_where_neither_implementation_runs() -> None:
     """Both are SM90-only, so an older architecture has nothing to fall back to."""
@@ -80,11 +84,16 @@ _DELTANET_ROWS = [
     (torch.bfloat16, 128, 128, _SM90, "DeltaNetDecodeRawCudaFlaStyleKernel", "bf16-raw"),
     (torch.float16, 64, 128, _SM90, "DeltaNetDecodeKernel", "dim-k-off"),
     (torch.float16, 128, 64, _SM90, "DeltaNetDecodeKernel", "dim-v-off"),
-    (torch.float16, 128, 128, _SM80,
-     "DeltaNetDecodeRawCudaFlaStyleKernel"
-     if _SM80 in (DeltaNetDecodeRawCudaFlaStyleKernel.supported_archs or [])
-     else "DeltaNetDecodeKernel",
-     "arch-off"),
+    (
+        torch.float16,
+        128,
+        128,
+        _SM80,
+        "DeltaNetDecodeRawCudaFlaStyleKernel"
+        if _SM80 in (DeltaNetDecodeRawCudaFlaStyleKernel.supported_archs or [])
+        else "DeltaNetDecodeKernel",
+        "arch-off",
+    ),
 ]
 
 
@@ -111,11 +120,16 @@ _GATED_ROWS = [
     (torch.float16, 128, 128, _SM90, "GatedDeltaNetDecodeKernel", "fp16-not-raw"),
     (torch.bfloat16, 64, 128, _SM90, "GatedDeltaNetDecodeKernel", "dim-k-off"),
     (torch.bfloat16, 128, 64, _SM90, "GatedDeltaNetDecodeKernel", "dim-v-off"),
-    (torch.bfloat16, 128, 128, _SM80,
-     "GatedDeltaNetDecodeRawCudaFlaStyleKernel"
-     if _SM80 in (GatedDeltaNetDecodeRawCudaFlaStyleKernel.supported_archs or [])
-     else "GatedDeltaNetDecodeKernel",
-     "arch-off"),
+    (
+        torch.bfloat16,
+        128,
+        128,
+        _SM80,
+        "GatedDeltaNetDecodeRawCudaFlaStyleKernel"
+        if _SM80 in (GatedDeltaNetDecodeRawCudaFlaStyleKernel.supported_archs or [])
+        else "GatedDeltaNetDecodeKernel",
+        "arch-off",
+    ),
 ]
 
 

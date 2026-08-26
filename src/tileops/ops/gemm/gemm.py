@@ -75,9 +75,7 @@ class GemmFwdOp(Op):
         # Hopper WS (TMA/WGMMA/mbarrier) only on SM90 CUDA; MACA / pre-Hopper
         # use Pipelined+T.gemm. Must stay ``general`` like GemmKernel so
         # select_kernel_key can fall back past GemvKernel.
-        gemm_cls = (
-            GemmMACAKernel if (is_maca() or get_sm_version() < 90) else GemmKernel
-        )
+        gemm_cls = GemmMACAKernel if (is_maca() or get_sm_version() < 90) else GemmKernel
         return {"gemm_kernel": gemm_cls, "gemv_kernel": GemvKernel}
 
     def _infer_mnk(self, a: torch.Tensor, b: torch.Tensor) -> Tuple[int, int, int]:

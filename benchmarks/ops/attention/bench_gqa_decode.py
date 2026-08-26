@@ -165,6 +165,7 @@ def test_gqa_decode_bench(
     if fi_fn is not None:
         try:
             from importlib.metadata import version
+
             from packaging.version import Version
 
             fi_ver = version("flashinfer")

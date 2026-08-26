@@ -226,16 +226,10 @@ def _argreduce_kernel_tiled(M: int, N: int, op_kind: str, dtype: str, tile_n: in
                             take_tile = (
                                 (initialized[i] == 0)
                                 or (tile_is_nan and not row_is_nan)
-                                or (
-                                    tile_is_nan
-                                    and row_is_nan
-                                    and tile_idx[i] < out_idx[i]
-                                )
+                                or (tile_is_nan and row_is_nan and tile_idx[i] < out_idx[i])
                                 or numeric_better
                             )
-                            out_idx[i] = T.if_then_else(
-                                take_tile, tile_idx[i], out_idx[i]
-                            )
+                            out_idx[i] = T.if_then_else(take_tile, tile_idx[i], out_idx[i])
                             row_extreme[i] = T.if_then_else(
                                 take_tile, tile_extreme[i], row_extreme[i]
                             )
@@ -342,16 +336,10 @@ def _argreduce_kernel_tiled(M: int, N: int, op_kind: str, dtype: str, tile_n: in
                             take_tile = (
                                 (initialized[i] == 0)
                                 or (tile_is_nan and not row_is_nan)
-                                or (
-                                    tile_is_nan
-                                    and row_is_nan
-                                    and tile_idx[i] < out_idx[i]
-                                )
+                                or (tile_is_nan and row_is_nan and tile_idx[i] < out_idx[i])
                                 or numeric_better
                             )
-                            out_idx[i] = T.if_then_else(
-                                take_tile, tile_idx[i], out_idx[i]
-                            )
+                            out_idx[i] = T.if_then_else(take_tile, tile_idx[i], out_idx[i])
                             row_extreme[i] = T.if_then_else(
                                 take_tile, tile_extreme[i], row_extreme[i]
                             )
@@ -417,10 +405,15 @@ class ArgreduceMACAKernel(Kernel):
             from tileops.kernels.reduction.argreduce import ArgreduceKernel
 
             return ArgreduceKernel(
-                M, N, op_kind, dtype,
+                M,
+                N,
+                op_kind,
+                dtype,
                 reduce_axes=reduce_axes,
                 keepdim=keepdim,
-                inner_stride=inner_stride, config=config, tune=tune,
+                inner_stride=inner_stride,
+                config=config,
+                tune=tune,
                 device_index=device_index,
             )
         return object.__new__(cls)

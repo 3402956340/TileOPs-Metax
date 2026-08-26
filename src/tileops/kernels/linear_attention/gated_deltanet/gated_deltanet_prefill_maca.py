@@ -146,9 +146,7 @@ def _prefill_h_recurrence_bhtd_tl_maca(
                     )
 
                     for n, j in T.Parallel(block_C, BV):
-                        v_new_c[n, j] = v_new_c[n, j] * T.exp2(
-                            (g_c[block_C - 1] - g_c[n]) * _LOG2E
-                        )
+                        v_new_c[n, j] = v_new_c[n, j] * T.exp2((g_c[block_C - 1] - g_c[n]) * _LOG2E)
                     for i, j in T.Parallel(dim_k, BV):
                         h_next_s[i, j] = T.cast(h_c[i, j], accum_dtype) * T.exp2(
                             g_c[block_C - 1] * _LOG2E
@@ -223,9 +221,11 @@ def _prefill_output_o_bhtd_tl_maca(
         ):
             # V tiles are mapped to grid (not T.Serial) so MACA gemm layout
             # inference keeps a valid thread_bounds / num_warps.
-            with T.Kernel(
-                num_chunks, num_v_tiles, batch * head, threads=threads
-            ) as (tid, vt, bhid):
+            with T.Kernel(num_chunks, num_v_tiles, batch * head, threads=threads) as (
+                tid,
+                vt,
+                bhid,
+            ):
                 bid = bhid // head
                 hid = bhid % head
                 base = tid * block_C
@@ -362,15 +362,17 @@ def _prefill_blocksolve_A_bthd_tl_maca(
                 G33 = T.alloc_fragment([block_c, block_c], accum_dtype)
                 tmp = T.alloc_fragment([block_c, block_c], accum_dtype)
 
-                T.annotate_layout({
-                    k0: tilelang.layout.make_swizzled_layout(k0),
-                    k1: tilelang.layout.make_swizzled_layout(k1),
-                    k2: tilelang.layout.make_swizzled_layout(k2),
-                    k3: tilelang.layout.make_swizzled_layout(k3),
-                    a_s: tilelang.layout.make_swizzled_layout(a_s),
-                    i_s: tilelang.layout.make_swizzled_layout(i_s),
-                    work_s: tilelang.layout.make_swizzled_layout(work_s),
-                })
+                T.annotate_layout(
+                    {
+                        k0: tilelang.layout.make_swizzled_layout(k0),
+                        k1: tilelang.layout.make_swizzled_layout(k1),
+                        k2: tilelang.layout.make_swizzled_layout(k2),
+                        k3: tilelang.layout.make_swizzled_layout(k3),
+                        a_s: tilelang.layout.make_swizzled_layout(a_s),
+                        i_s: tilelang.layout.make_swizzled_layout(i_s),
+                        work_s: tilelang.layout.make_swizzled_layout(work_s),
+                    }
+                )
 
                 T.copy(g[bid, base : base + block_t, hid], g_s, disable_tma=True)
                 T.copy(
@@ -442,18 +444,10 @@ def _prefill_blocksolve_A_bthd_tl_maca(
 
                 for t in T.Parallel(block_t):
                     g_val = T.cast(g_s[t], accum_dtype)
-                    gate0_s[t] = T.exp2(
-                        (g_val - T.cast(g_s[0], accum_dtype)) * _LOG2E
-                    )
-                    gate1_s[t] = T.exp2(
-                        (g_val - T.cast(g_s[block_c], accum_dtype)) * _LOG2E
-                    )
-                    gate2_s[t] = T.exp2(
-                        (g_val - T.cast(g_s[2 * block_c], accum_dtype)) * _LOG2E
-                    )
-                    gate3_s[t] = T.exp2(
-                        (g_val - T.cast(g_s[3 * block_c], accum_dtype)) * _LOG2E
-                    )
+                    gate0_s[t] = T.exp2((g_val - T.cast(g_s[0], accum_dtype)) * _LOG2E)
+                    gate1_s[t] = T.exp2((g_val - T.cast(g_s[block_c], accum_dtype)) * _LOG2E)
+                    gate2_s[t] = T.exp2((g_val - T.cast(g_s[2 * block_c], accum_dtype)) * _LOG2E)
+                    gate3_s[t] = T.exp2((g_val - T.cast(g_s[3 * block_c], accum_dtype)) * _LOG2E)
                     beta_f_s[t] = beta_s[t]
                 T.sync_threads()
 
@@ -661,11 +655,17 @@ def _prefill_blocksolve_A_bthd_tl_maca(
                     A[bid, base + block_c + i, hid, block_c + j] = T.cast(i_s[1, i, j], dtype)
                     A[bid, base + 2 * block_c + i, hid, j] = T.cast(a_s[3, i, j], dtype)
                     A[bid, base + 2 * block_c + i, hid, block_c + j] = T.cast(a_s[4, i, j], dtype)
-                    A[bid, base + 2 * block_c + i, hid, 2 * block_c + j] = T.cast(i_s[2, i, j], dtype)
+                    A[bid, base + 2 * block_c + i, hid, 2 * block_c + j] = T.cast(
+                        i_s[2, i, j], dtype
+                    )
                     A[bid, base + 3 * block_c + i, hid, j] = T.cast(a_s[6, i, j], dtype)
                     A[bid, base + 3 * block_c + i, hid, block_c + j] = T.cast(a_s[7, i, j], dtype)
-                    A[bid, base + 3 * block_c + i, hid, 2 * block_c + j] = T.cast(a_s[8, i, j], dtype)
-                    A[bid, base + 3 * block_c + i, hid, 3 * block_c + j] = T.cast(i_s[3, i, j], dtype)
+                    A[bid, base + 3 * block_c + i, hid, 2 * block_c + j] = T.cast(
+                        a_s[8, i, j], dtype
+                    )
+                    A[bid, base + 3 * block_c + i, hid, 3 * block_c + j] = T.cast(
+                        i_s[3, i, j], dtype
+                    )
 
         return prefill_blocksolve_A_bthd_maca
 
@@ -838,9 +838,7 @@ def _run_bhtd_prefill_maca(
     if chunk_size == 64 and batch * head > 64:
         from .gated_deltanet_prefill import _prefill_chunk_local_cumsum_bhtd_tl
 
-        g_cum = _prefill_chunk_local_cumsum_bhtd_tl(
-            batch, head, seq_len, chunk_size, dtype
-        )(g)
+        g_cum = _prefill_chunk_local_cumsum_bhtd_tl(batch, head, seq_len, chunk_size, dtype)(g)
     else:
         g_cum = _chunk_local_cumsum(g.float(), chunk_size).to(g.dtype)
 
@@ -857,9 +855,9 @@ def _run_bhtd_prefill_maca(
         dtype,
         block_v=h_block_v,
     )(h_num_stages, h_threads)
-    o_fn = _prefill_output_o_bhtd_tl_maca(
-        batch, head, seq_len, chunk_size, dim_k, dim_v, dtype
-    )(o_threads)
+    o_fn = _prefill_output_o_bhtd_tl_maca(batch, head, seq_len, chunk_size, dim_k, dim_v, dtype)(
+        o_threads
+    )
     S_0 = torch.zeros(batch, head, dim_k, dim_v, dtype=q.dtype, device=q.device)
     w, u = prepare_fn(k, v, g_cum, beta)
     states, v_new = h_fn(k, g_cum, w, u, S_0)
@@ -894,14 +892,9 @@ def _run_bthd_prefill_maca(
         _prefill_prepare_w_u_bthd_tl,
     )
 
-    g_cum = _prefill_chunk_local_cumsum_bthd_tl(
-        batch, head, seq_len, chunk_size, dtype
-    )(g)
+    g_cum = _prefill_chunk_local_cumsum_bthd_tl(batch, head, seq_len, chunk_size, dtype)(g)
     use_blocksolve_prepare = (
-        chunk_size == 64
-        and dim_k == 128
-        and dim_v == 128
-        and dtype == "float16"
+        chunk_size == 64 and dim_k == 128 and dim_v == 128 and dtype == "float16"
     )
 
     if use_blocksolve_prepare:
@@ -931,9 +924,9 @@ def _run_bthd_prefill_maca(
         dtype,
         block_v=h_block_v,
     )(h_num_stages, h_threads)
-    o_fn = _prefill_output_o_bhtd_tl_maca(
-        batch, head, seq_len, chunk_size, dim_k, dim_v, dtype
-    )(o_threads)
+    o_fn = _prefill_output_o_bhtd_tl_maca(batch, head, seq_len, chunk_size, dim_k, dim_v, dtype)(
+        o_threads
+    )
     S_0 = torch.zeros(batch, head, dim_k, dim_v, dtype=q.dtype, device=q.device)
     states, v_new_h = h_fn(k_h, g_h, w_h, u_h, S_0)
     o_h = o_fn(q_h, k_h, g_h, states, v_new_h)

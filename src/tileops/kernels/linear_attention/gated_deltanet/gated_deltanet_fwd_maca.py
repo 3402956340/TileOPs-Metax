@@ -453,9 +453,7 @@ def _h_recurrence_maca_tl(
                     )
 
                     for n, j in T.Parallel(block_C, BV):
-                        v_new_c[n, j] = v_new_c[n, j] * T.exp2(
-                            (g_c[block_C - 1] - g_c[n]) * _LOG2E
-                        )
+                        v_new_c[n, j] = v_new_c[n, j] * T.exp2((g_c[block_C - 1] - g_c[n]) * _LOG2E)
                     for kt in T.serial(0, num_k_tiles):
                         koff = kt * BK
                         T.copy(
@@ -469,9 +467,7 @@ def _h_recurrence_maca_tl(
                             disable_tma=True,
                         )
                         for i, j in T.Parallel(BK, BV):
-                            h_next_frag[i, j] = h_c[koff + i, j] * T.exp2(
-                                g_c[block_C - 1] * _LOG2E
-                            )
+                            h_next_frag[i, j] = h_c[koff + i, j] * T.exp2(g_c[block_C - 1] * _LOG2E)
                         T.gemm(
                             k_c,
                             v_new_c,
@@ -533,9 +529,11 @@ def _output_o_maca_tl(
             v_new: T.Tensor([batch, head, seq_len, dim_v], dtype),
             o: T.Tensor([batch, head, seq_len, dim_v], dtype),
         ):
-            with T.Kernel(
-                num_chunks, num_v_tiles, batch * head, threads=threads
-            ) as (tid, vt, bhid):
+            with T.Kernel(num_chunks, num_v_tiles, batch * head, threads=threads) as (
+                tid,
+                vt,
+                bhid,
+            ):
                 bid = bhid // head
                 hid = bhid % head
                 base = tid * block_C
@@ -734,9 +732,7 @@ def _gated_deltanet_fwd_wrapped_kernel_maca_fake(
     )
     num_chunks = seq_len // chunk_size
     o = torch.empty(batch, head, seq_len, dim_v, dtype=q.dtype, device=q.device)
-    S = torch.empty(
-        batch, head, num_chunks + 1, dim_k, dim_v, dtype=q.dtype, device=q.device
-    )
+    S = torch.empty(batch, head, num_chunks + 1, dim_k, dim_v, dtype=q.dtype, device=q.device)
     Aw = torch.empty(batch, head, seq_len, chunk_size, dtype=q.dtype, device=q.device)
     Au = torch.empty_like(Aw)
     return o, S, Aw, Au
@@ -771,9 +767,7 @@ class GatedDeltaNetFwdMACAKernel(Kernel):
 
     @property
     def default_config(self) -> dict:
-        return _plan_fwd_config(
-            self.chunk_size, self.dim_k, self.dim_v, self.dtype_str
-        )
+        return _plan_fwd_config(self.chunk_size, self.dim_k, self.dim_v, self.dtype_str)
 
     def forward(
         self,

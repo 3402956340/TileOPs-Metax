@@ -438,21 +438,24 @@ def _sparse_mla_kernel(
 
     return _sparse_mla_fwd_func
 
+
 @functools.lru_cache(maxsize=32)
-def _sparse_mla_kernel_maca(batch: int,
-                            seq_len: int,
-                            seq_len_kv: int,
-                            heads: int,
-                            dim: int,
-                            tail_dim: int,
-                            topk: int,
-                            kv_stride: int,
-                            q_start_index_s: int,
-                            kv_group: int = 1,
-                            sm_scale: float = None,
-                            is_causal: bool = True,
-                            cp0: bool = True,
-                            dtype: str = "float16") -> None:
+def _sparse_mla_kernel_maca(
+    batch: int,
+    seq_len: int,
+    seq_len_kv: int,
+    heads: int,
+    dim: int,
+    tail_dim: int,
+    topk: int,
+    kv_stride: int,
+    q_start_index_s: int,
+    kv_group: int = 1,
+    sm_scale: float = None,
+    is_causal: bool = True,
+    cp0: bool = True,
+    dtype: str = "float16",
+) -> None:
     """
     Sparse MLA implementation for MACA / SM80-class devices.
 
@@ -467,8 +470,8 @@ def _sparse_mla_kernel_maca(batch: int,
     if tail_dim != tilelang.math.next_power_of_2(tail_dim):
         raise ValueError(f"haven't check padding correctness yet, dim={tail_dim}")
     if not is_causal:
-        raise ValueError('non-causal is not supported')
-    sm_scale = ((1.0 / (dim + tail_dim))**0.5 if sm_scale is None else sm_scale) * LOG2E
+        raise ValueError("non-causal is not supported")
+    sm_scale = ((1.0 / (dim + tail_dim)) ** 0.5 if sm_scale is None else sm_scale) * LOG2E
 
     head_kv = heads // kv_group
     ori_heads = heads
@@ -484,7 +487,6 @@ def _sparse_mla_kernel_maca(batch: int,
         block_i: int = 32,
         threads: int = 256,
     ) -> None:
-
         q_shape = (batch, seq_len, ori_heads, dim + tail_dim)
         kv_shape = (batch, seq_len_kv, kv_group, dim + tail_dim)
         o_shape = (batch, seq_len, ori_heads, dim)
@@ -494,15 +496,14 @@ def _sparse_mla_kernel_maca(batch: int,
         padded_h = max(tilelang.math.next_power_of_2(head_kv), 16)
         if padded_h != heads and kv_group != 1:
             raise ValueError(
-                'here we solve the heads padding automatically, '
-                'other wise you should handle q copy and output copy '
-                'with your mask (when kv_group == 1, use g_i * padded_h:(g_i+1) * '
-                'padded_h would be handled automatically)')
+                "here we solve the heads padding automatically, "
+                "other wise you should handle q copy and output copy "
+                "with your mask (when kv_group == 1, use g_i * padded_h:(g_i+1) * "
+                "padded_h would be handled automatically)"
+            )
 
         if topk % block_i != 0:
-                    raise ValueError(
-                        f"topk={topk} must be divisible by block_i={block_i}"
-                    )
+            raise ValueError(f"topk={topk} must be divisible by block_i={block_i}")
         i_block = block_i
         n_i = tilelang.cdiv(topk, block_i)
         d = dim
@@ -525,9 +526,12 @@ def _sparse_mla_kernel_maca(batch: int,
             indices: T.Tensor(indices_shape, indices_dtype),  # type: ignore
             output: T.Tensor(o_shape, dtype),  # type: ignore
         ) -> None:
-
-            with T.Kernel((seq_len - stride_kv + 1 if cp0 else seq_len) * replicate_h, batch, kv_group, threads=threads) as (bx, by, bz):
-
+            with T.Kernel(
+                (seq_len - stride_kv + 1 if cp0 else seq_len) * replicate_h,
+                batch,
+                kv_group,
+                threads=threads,
+            ) as (bx, by, bz):
                 q_local_l = T.alloc_fragment([h_per_block, d // 2], dtype)
                 q_local_r = T.alloc_fragment([h_per_block, d // 2], dtype)
                 q_tail_local = T.alloc_fragment([h_per_block, d_tail], dtype)
@@ -555,37 +559,76 @@ def _sparse_mla_kernel_maca(batch: int,
                 h0 = g_i * head_kv + head_replica * h_per_block
 
                 for h_i, d_i in T.Parallel(h_per_block, d // 2):
-                    q_local_l[h_i, d_i] = T.if_then_else(h0 + h_i < ori_heads, q[b_i, s_i, h0 + h_i, d_i], T.cast(0, dtype))
-                    q_local_r[h_i, d_i] = T.if_then_else(h0 + h_i < ori_heads, q[b_i, s_i, h0 + h_i, d // 2 + d_i], T.cast(0, dtype))
+                    q_local_l[h_i, d_i] = T.if_then_else(
+                        h0 + h_i < ori_heads, q[b_i, s_i, h0 + h_i, d_i], T.cast(0, dtype)
+                    )
+                    q_local_r[h_i, d_i] = T.if_then_else(
+                        h0 + h_i < ori_heads, q[b_i, s_i, h0 + h_i, d // 2 + d_i], T.cast(0, dtype)
+                    )
 
                 for h_i, d_i in T.Parallel(h_per_block, d_tail):
-                    q_tail_local[h_i, d_i] = T.if_then_else(h0 + h_i < ori_heads, q[b_i, s_i, h0 + h_i, d + d_i], T.cast(0, dtype))
+                    q_tail_local[h_i, d_i] = T.if_then_else(
+                        h0 + h_i < ori_heads, q[b_i, s_i, h0 + h_i, d + d_i], T.cast(0, dtype)
+                    )
 
                 T.fill(acc_o_l, 0)
                 T.fill(acc_o_r, 0)
                 T.fill(sumexp, 0)
-                T.fill(m_i, -2**30)
+                T.fill(m_i, -(2**30))
 
                 for kk in T.Pipelined(n_i, num_stages=1):
-
                     for bi_i in T.Parallel(i_block):
                         kv_index = indices[b_i, s_i, g_i, kk * i_block + bi_i]
                         indices_shared[bi_i] = kv_index
-                        is_kv_valid[bi_i] = (kv_index >= 0) & (kv_index < seq_len_kv) & (kv_index <= max_kv_i)
+                        is_kv_valid[bi_i] = (
+                            (kv_index >= 0) & (kv_index < seq_len_kv) & (kv_index <= max_kv_i)
+                        )
 
                     for bi_i, d_i in T.Parallel(i_block, d // 2):
-                        kv_shared_l[bi_i, d_i] = T.if_then_else(is_kv_valid[bi_i], kv[b_i, indices_shared[bi_i], g_i, d_i], T.cast(0, dtype))
-                        kv_shared_r[bi_i, d_i] = T.if_then_else(is_kv_valid[bi_i], kv[b_i, indices_shared[bi_i], g_i, d // 2 + d_i], T.cast(0, dtype))
+                        kv_shared_l[bi_i, d_i] = T.if_then_else(
+                            is_kv_valid[bi_i],
+                            kv[b_i, indices_shared[bi_i], g_i, d_i],
+                            T.cast(0, dtype),
+                        )
+                        kv_shared_r[bi_i, d_i] = T.if_then_else(
+                            is_kv_valid[bi_i],
+                            kv[b_i, indices_shared[bi_i], g_i, d // 2 + d_i],
+                            T.cast(0, dtype),
+                        )
 
                     for bi_i, d_i in T.Parallel(i_block, d_tail):
-                        kv_tail_shared[bi_i, d_i] = T.if_then_else(is_kv_valid[bi_i], kv[b_i, indices_shared[bi_i], g_i, d + d_i], T.cast(0, dtype))
+                        kv_tail_shared[bi_i, d_i] = T.if_then_else(
+                            is_kv_valid[bi_i],
+                            kv[b_i, indices_shared[bi_i], g_i, d + d_i],
+                            T.cast(0, dtype),
+                        )
 
                     for h_i, bi_i in T.Parallel(h_per_block, i_block):
-                        acc_s[h_i, bi_i] = T.if_then_else(is_kv_valid[bi_i], T.cast(0, accum_dtype), -T.infinity(accum_dtype))
+                        acc_s[h_i, bi_i] = T.if_then_else(
+                            is_kv_valid[bi_i], T.cast(0, accum_dtype), -T.infinity(accum_dtype)
+                        )
 
-                    T.gemm(q_local_l, kv_shared_l, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-                    T.gemm(q_local_r, kv_shared_r, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-                    T.gemm(q_tail_local, kv_tail_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                    T.gemm(
+                        q_local_l,
+                        kv_shared_l,
+                        acc_s,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullRow,
+                    )
+                    T.gemm(
+                        q_local_r,
+                        kv_shared_r,
+                        acc_s,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullRow,
+                    )
+                    T.gemm(
+                        q_tail_local,
+                        kv_tail_shared,
+                        acc_s,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullRow,
+                    )
 
                     T.copy(m_i, m_i_prev)
                     T.reduce_max(acc_s, m_i, dim=1, clear=False)
@@ -618,6 +661,7 @@ def _sparse_mla_kernel_maca(batch: int,
         return _sparse_mla_fwd_main
 
     return _sparse_mla_fwd_func
+
 
 @torch.library.custom_op("tileops::sparse_mla_fwd_wrapped_kernel", mutates_args=())
 def _sparse_mla_wrapped_kernel(
@@ -662,15 +706,41 @@ def _sparse_mla_wrapped_kernel(
 
 @torch.library.custom_op("tileops::sparse_mla_maca_fwd_wrapped_kernel", mutates_args=())
 def _sparse_mla_maca_wrapped_kernel(
-    batch: int, seq_len: int, seq_len_kv: int, heads: int, dim: int, tail_dim: int,
-    topk: int, kv_stride: int, q_start_index_s: int, kv_group: int,
-    sm_scale: Optional[float], is_causal: bool, cp0: bool, dtype: str,
-    block_i: int, threads: int, q: torch.Tensor, kv: torch.Tensor,
+    batch: int,
+    seq_len: int,
+    seq_len_kv: int,
+    heads: int,
+    dim: int,
+    tail_dim: int,
+    topk: int,
+    kv_stride: int,
+    q_start_index_s: int,
+    kv_group: int,
+    sm_scale: Optional[float],
+    is_causal: bool,
+    cp0: bool,
+    dtype: str,
+    block_i: int,
+    threads: int,
+    q: torch.Tensor,
+    kv: torch.Tensor,
     indices: torch.Tensor,
 ) -> torch.Tensor:
     return _sparse_mla_kernel_maca(
-        batch, seq_len, seq_len_kv, heads, dim, tail_dim, topk, kv_stride,
-        q_start_index_s, kv_group, sm_scale, is_causal, cp0, dtype,
+        batch,
+        seq_len,
+        seq_len_kv,
+        heads,
+        dim,
+        tail_dim,
+        topk,
+        kv_stride,
+        q_start_index_s,
+        kv_group,
+        sm_scale,
+        is_causal,
+        cp0,
+        dtype,
     )(block_i, threads)(q, kv, indices)
 
 
@@ -951,9 +1021,20 @@ class SparseMlaMACAKernel(Kernel):
         self.is_causal = is_causal
         self.cp0 = cp0
         self.kernel = _sparse_mla_kernel_maca(
-            self.batch, self.seq_len, self.seq_len_kv, self.heads, self.dim, self.tail_dim,
-            self.topk, self.kv_stride, self.q_start_index_s, self.kv_group, self.sm_scale,
-            self.is_causal, self.cp0, self.dtype_str,
+            self.batch,
+            self.seq_len,
+            self.seq_len_kv,
+            self.heads,
+            self.dim,
+            self.tail_dim,
+            self.topk,
+            self.kv_stride,
+            self.q_start_index_s,
+            self.kv_group,
+            self.sm_scale,
+            self.is_causal,
+            self.cp0,
+            self.dtype_str,
         )
         self.init_config(config, tune)
 
@@ -967,24 +1048,49 @@ class SparseMlaMACAKernel(Kernel):
 
     def forward(self, q: torch.Tensor, kv: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
         return _sparse_mla_maca_wrapped_kernel(
-            self.batch, self.seq_len, self.seq_len_kv, self.heads, self.dim, self.tail_dim,
-            self.topk, self.kv_stride, self.q_start_index_s, self.kv_group, self.sm_scale,
-            self.is_causal, self.cp0, self.dtype_str, self.config["block_i"],
-            self.config["threads"], q, kv, indices,
+            self.batch,
+            self.seq_len,
+            self.seq_len_kv,
+            self.heads,
+            self.dim,
+            self.tail_dim,
+            self.topk,
+            self.kv_stride,
+            self.q_start_index_s,
+            self.kv_group,
+            self.sm_scale,
+            self.is_causal,
+            self.cp0,
+            self.dtype_str,
+            self.config["block_i"],
+            self.config["threads"],
+            q,
+            kv,
+            indices,
         )
 
     def supply_prog(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         q = torch.randn(
-            self.batch, self.seq_len, self.heads, self.dim + self.tail_dim,
-            device="cuda", dtype=self.dtype,
+            self.batch,
+            self.seq_len,
+            self.heads,
+            self.dim + self.tail_dim,
+            device="cuda",
+            dtype=self.dtype,
         )
         kv = torch.randn(
-            self.batch, self.seq_len_kv, self.kv_group, self.dim + self.tail_dim,
-            device="cuda", dtype=self.dtype,
+            self.batch,
+            self.seq_len_kv,
+            self.kv_group,
+            self.dim + self.tail_dim,
+            device="cuda",
+            dtype=self.dtype,
         )
         indices = torch.full(
-            (self.batch, self.seq_len, self.kv_group, self.topk), self.seq_len_kv,
-            dtype=torch.int32, device="cuda",
+            (self.batch, self.seq_len, self.kv_group, self.topk),
+            self.seq_len_kv,
+            dtype=torch.int32,
+            device="cuda",
         )
         for b in range(self.batch):
             for t in range(self.seq_len):

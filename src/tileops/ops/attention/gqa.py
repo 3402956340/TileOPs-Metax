@@ -1295,7 +1295,11 @@ class GroupedQueryAttentionBwdOp(Op):
 
         def build_postprocess() -> Kernel:
             return FlashAttnBwdPostprocessMACAKernel(
-                self.batch, self.heads, self.seq_len, self.dim, dtype,
+                self.batch,
+                self.heads,
+                self.seq_len,
+                self.dim,
+                dtype,
                 tune=self.tune,
             )
 
@@ -1310,16 +1314,15 @@ class GroupedQueryAttentionBwdOp(Op):
                 key=dtype,
                 build=build_postprocess,
             )
-            if use_maca else None,
+            if use_maca
+            else None,
         )
 
     @property
     def default_kernel_map(self) -> Dict[str, Kernel]:
         return {
-            "gqa_bwd_preprocess_kernel":
-                FlashAttnBwdPreprocessKernel,
-            "gqa_bwd_kernel":
-                GQABwdMACAKernel if is_maca() else GQABwdWgmmaPipelinedKernel,
+            "gqa_bwd_preprocess_kernel": FlashAttnBwdPreprocessKernel,
+            "gqa_bwd_kernel": GQABwdMACAKernel if is_maca() else GQABwdWgmmaPipelinedKernel,
         }
 
     def _infer_output_shapes(

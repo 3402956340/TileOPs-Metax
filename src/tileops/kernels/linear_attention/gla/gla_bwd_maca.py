@@ -49,7 +49,8 @@ def _gla_bwd_dh_kernel_maca(
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     def _dh_func(num_stages, threads=128):
         q_shape = [batch, seq_len, heads, dim_k]
         g_cumsum_shape = [batch, seq_len, heads, dim_k]
@@ -67,8 +68,7 @@ def _gla_bwd_dh_kernel_maca(
             dh_out: T.Tensor(dh_out_shape, accum_dtype),
             dh0: T.Tensor(dh0_shape, accum_dtype),
         ):
-            with T.Kernel(batch * heads * num_v_partitions,
-                          threads=threads) as bx:
+            with T.Kernel(batch * heads * num_v_partitions, threads=threads) as bx:
                 i_b = bx // (heads * num_v_partitions)
                 i_h = (bx // num_v_partitions) % heads
                 i_vp = bx % num_v_partitions
@@ -87,16 +87,26 @@ def _gla_bwd_dh_kernel_maca(
                     i_c = num_chunks - 1 - t
                     chunk_start = i_c * chunk_size
 
-                    T.copy(q[i_b, chunk_start:chunk_start + chunk_size,
-                             i_h, :],
-                           q_s, disable_tma=True)
-                    T.copy(do[i_b, chunk_start:chunk_start + chunk_size,
-                              i_h, v_offset:v_offset + dim_v_part],
-                           do_s, disable_tma=True)
-                    T.copy(g_cumsum[i_b,
-                                    chunk_start:chunk_start + chunk_size,
-                                    i_h, :],
-                           g_cumsum_s, disable_tma=True)
+                    T.copy(
+                        q[i_b, chunk_start : chunk_start + chunk_size, i_h, :],
+                        q_s,
+                        disable_tma=True,
+                    )
+                    T.copy(
+                        do[
+                            i_b,
+                            chunk_start : chunk_start + chunk_size,
+                            i_h,
+                            v_offset : v_offset + dim_v_part,
+                        ],
+                        do_s,
+                        disable_tma=True,
+                    )
+                    T.copy(
+                        g_cumsum[i_b, chunk_start : chunk_start + chunk_size, i_h, :],
+                        g_cumsum_s,
+                        disable_tma=True,
+                    )
 
                     g_last = T.alloc_fragment([dim_k], accum_dtype)
                     for i_k in T.Parallel(dim_k):
@@ -104,27 +114,25 @@ def _gla_bwd_dh_kernel_maca(
 
                     # Store incoming ∂L/∂h_{c+1} (FLA; used by dk/dv/dg inter).
                     for i_k, i_v in T.Parallel(dim_k, dim_v_part):
-                        dh_out[i_b, i_c, i_h, i_k,
-                               v_offset + i_v] = dh_s[i_k, i_v]
+                        dh_out[i_b, i_c, i_h, i_k, v_offset + i_v] = dh_s[i_k, i_v]
 
                     for i_k, i_v in T.Parallel(dim_k, dim_v_part):
-                        dh_s[i_k, i_v] = (dh_s[i_k, i_v]
-                                          * T.exp2(g_last[i_k] * LOG2_E))
+                        dh_s[i_k, i_v] = dh_s[i_k, i_v] * T.exp2(g_last[i_k] * LOG2_E)
 
                     for i_t, i_k in T.Parallel(chunk_size, dim_k):
                         q_gated_s[i_t, i_k] = T.cast(
                             T.cast(q_s[i_t, i_k], accum_dtype)
                             * T.exp2(g_cumsum_s[i_t, i_k] * LOG2_E),
-                            dtype)
+                            dtype,
+                        )
 
-                    dh_delta = T.alloc_fragment([dim_k, dim_v_part],
-                                               accum_dtype)
+                    dh_delta = T.alloc_fragment([dim_k, dim_v_part], accum_dtype)
                     T.fill(dh_delta, 0.0)
-                    T.gemm(q_gated_s, do_s, dh_delta, transpose_A=True,
-                           policy=T.GemmWarpPolicy.FullRow)
+                    T.gemm(
+                        q_gated_s, do_s, dh_delta, transpose_A=True, policy=T.GemmWarpPolicy.FullRow
+                    )
                     for i_k, i_v in T.Parallel(dim_k, dim_v_part):
-                        dh_s[i_k, i_v] = (dh_s[i_k, i_v]
-                                          + scale * dh_delta[i_k, i_v])
+                        dh_s[i_k, i_v] = dh_s[i_k, i_v] + scale * dh_delta[i_k, i_v]
 
                 if has_initial_state:
                     for i_k, i_v in T.Parallel(dim_k, dim_v_part):
@@ -163,7 +171,8 @@ def _gla_bwd_dq_kernel_maca(
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     def _dq_func(num_stages, threads=64):
         k_shape = [batch, seq_len, heads, dim_k]
         v_shape = [batch, seq_len, heads, dim_v]
@@ -200,9 +209,9 @@ def _gla_bwd_dq_kernel_maca(
                 k_shifted = T.alloc_shared([BC, dim_k], dtype)
                 h_s = T.alloc_shared([dim_k, dim_v], dtype)
 
-                T.copy(do[i_b, q_start:q_start + BC, i_h, :], do_s, disable_tma=True)
+                T.copy(do[i_b, q_start : q_start + BC, i_h, :], do_s, disable_tma=True)
                 T.copy(
-                    g_cumsum[i_b, q_start:q_start + BC, i_h, :],
+                    g_cumsum[i_b, q_start : q_start + BC, i_h, :],
                     g_i_s,
                     disable_tma=True,
                 )
@@ -214,17 +223,17 @@ def _gla_bwd_dq_kernel_maca(
                 for s_j in T.Serial(s_i):
                     k_start = chunk_start + s_j * BC
                     T.copy(
-                        k[i_b, k_start:k_start + BC, i_h, :],
+                        k[i_b, k_start : k_start + BC, i_h, :],
                         k_s,
                         disable_tma=True,
                     )
                     T.copy(
-                        v[i_b, k_start:k_start + BC, i_h, :],
+                        v[i_b, k_start : k_start + BC, i_h, :],
                         v_s,
                         disable_tma=True,
                     )
                     T.copy(
-                        g_cumsum[i_b, k_start:k_start + BC, i_h, :],
+                        g_cumsum[i_b, k_start : k_start + BC, i_h, :],
                         g_j_s,
                         disable_tma=True,
                     )
@@ -244,8 +253,7 @@ def _gla_bwd_dq_kernel_maca(
                     for i_t, i_k in T.Parallel(BC, dim_k):
                         k_shifted[i_t, i_k] = T.cast(
                             T.cast(k_s[i_t, i_k], accum_dtype)
-                            * T.exp2(
-                                (g_i_s[0, i_k] - g_j_s[i_t, i_k]) * LOG2_E),
+                            * T.exp2((g_i_s[0, i_k] - g_j_s[i_t, i_k]) * LOG2_E),
                             dtype,
                         )
                     dq_sub = T.alloc_fragment([BC, dim_k], accum_dtype)
@@ -257,18 +265,16 @@ def _gla_bwd_dq_kernel_maca(
                         policy=T.GemmWarpPolicy.FullRow,
                     )
                     for i_t, i_k in T.Parallel(BC, dim_k):
-                        dq_frag[i_t, i_k] = (
-                            dq_frag[i_t, i_k]
-                            + dq_sub[i_t, i_k]
-                            * T.exp2(
-                                (g_i_s[i_t, i_k] - g_i_s[0, i_k]) * LOG2_E))
+                        dq_frag[i_t, i_k] = dq_frag[i_t, i_k] + dq_sub[i_t, i_k] * T.exp2(
+                            (g_i_s[i_t, i_k] - g_i_s[0, i_k]) * LOG2_E
+                        )
 
                 # Diagonal band: fragment path (matches CUDA bf16-safe form)
                 k_start = chunk_start + s_i * BC
-                T.copy(k[i_b, k_start:k_start + BC, i_h, :], k_s, disable_tma=True)
-                T.copy(v[i_b, k_start:k_start + BC, i_h, :], v_s, disable_tma=True)
+                T.copy(k[i_b, k_start : k_start + BC, i_h, :], k_s, disable_tma=True)
+                T.copy(v[i_b, k_start : k_start + BC, i_h, :], v_s, disable_tma=True)
                 T.copy(
-                    g_cumsum[i_b, k_start:k_start + BC, i_h, :],
+                    g_cumsum[i_b, k_start : k_start + BC, i_h, :],
                     g_j_s,
                     disable_tma=True,
                 )
@@ -304,12 +310,9 @@ def _gla_bwd_dq_kernel_maca(
                         k_row[i_k] = T.cast(k_s[j_local, i_k], accum_dtype)
                         g_j[i_k] = g_j_s[j_local, i_k]
                     for i_local, i_k in T.Parallel(BC, dim_k):
-                        dq_frag[i_local, i_k] = (
-                            dq_frag[i_local, i_k]
-                            + dA_col[i_local]
-                            * k_row[i_k]
-                            * T.exp2(
-                                (g_i_s[i_local, i_k] - g_j[i_k]) * LOG2_E))
+                        dq_frag[i_local, i_k] = dq_frag[i_local, i_k] + dA_col[i_local] * k_row[
+                            i_k
+                        ] * T.exp2((g_i_s[i_local, i_k] - g_j[i_k]) * LOG2_E)
 
                 # Inter-chunk: dq += scale * (do @ h.T) * exp(g)
                 for i_k, i_v in T.Parallel(dim_k, dim_v):
@@ -324,11 +327,9 @@ def _gla_bwd_dq_kernel_maca(
                     policy=T.GemmWarpPolicy.FullRow,
                 )
                 for i_t, i_k in T.Parallel(BC, dim_k):
-                    dq_frag[i_t, i_k] = (
-                        dq_frag[i_t, i_k]
-                        + scale
-                        * dq_inter[i_t, i_k]
-                        * T.exp2(g_i_s[i_t, i_k] * LOG2_E))
+                    dq_frag[i_t, i_k] = dq_frag[i_t, i_k] + scale * dq_inter[i_t, i_k] * T.exp2(
+                        g_i_s[i_t, i_k] * LOG2_E
+                    )
 
                 for i_t, i_k in T.Parallel(BC, dim_k):
                     dq_out[i_b, q_start + i_t, i_h, i_k] = dq_frag[i_t, i_k]
@@ -363,7 +364,8 @@ def _gla_bwd_dkdv_kernel_maca(
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     def _dkdv_func(num_stages, threads=64):
         q_shape = [batch, seq_len, heads, dim_k]
         k_shape = [batch, seq_len, heads, dim_k]
@@ -410,10 +412,10 @@ def _gla_bwd_dkdv_kernel_maca(
                 dh_s = T.alloc_shared([dim_k, dim_v], accum_dtype)
                 g_last = T.alloc_fragment([dim_k], accum_dtype)
 
-                T.copy(k[i_b, k_start:k_start + BC, i_h, :], k_s, disable_tma=True)
-                T.copy(v[i_b, k_start:k_start + BC, i_h, :], v_s, disable_tma=True)
+                T.copy(k[i_b, k_start : k_start + BC, i_h, :], k_s, disable_tma=True)
+                T.copy(v[i_b, k_start : k_start + BC, i_h, :], v_s, disable_tma=True)
                 T.copy(
-                    g_cumsum[i_b, k_start:k_start + BC, i_h, :],
+                    g_cumsum[i_b, k_start : k_start + BC, i_h, :],
                     g_j_s,
                     disable_tma=True,
                 )
@@ -432,23 +434,22 @@ def _gla_bwd_dkdv_kernel_maca(
                     s_i = s_j + 1 + s_off
                     q_start = chunk_start + s_i * BC
                     T.copy(
-                        q[i_b, q_start:q_start + BC, i_h, :],
+                        q[i_b, q_start : q_start + BC, i_h, :],
                         q_s,
                         disable_tma=True,
                     )
                     T.copy(
-                        do[i_b, q_start:q_start + BC, i_h, :],
+                        do[i_b, q_start : q_start + BC, i_h, :],
                         do_s,
                         disable_tma=True,
                     )
                     T.copy(
-                        g_cumsum[i_b, q_start:q_start + BC, i_h, :],
+                        g_cumsum[i_b, q_start : q_start + BC, i_h, :],
                         g_i_s,
                         disable_tma=True,
                     )
                     for i_t, i_v in T.Parallel(BC, dim_v):
-                        do_acc[i_t, i_v] = T.cast(
-                            do_s[i_t, i_v], accum_dtype)
+                        do_acc[i_t, i_v] = T.cast(do_s[i_t, i_v], accum_dtype)
 
                     dA_frag = T.alloc_fragment([BC, BC], accum_dtype)
                     T.fill(dA_frag, 0.0)
@@ -463,11 +464,9 @@ def _gla_bwd_dkdv_kernel_maca(
                         dA_s[i_t, i_j] = scale * dA_frag[i_t, i_j]
 
                     for i_t, i_k in T.Parallel(BC, dim_k):
-                        q_shifted[i_t, i_k] = (
-                            T.cast(q_s[i_t, i_k], accum_dtype)
-                            * T.exp2(
-                                (g_i_s[i_t, i_k] - g_j_s[BC - 1, i_k])
-                                * LOG2_E))
+                        q_shifted[i_t, i_k] = T.cast(q_s[i_t, i_k], accum_dtype) * T.exp2(
+                            (g_i_s[i_t, i_k] - g_j_s[BC - 1, i_k]) * LOG2_E
+                        )
                     dk_sub = T.alloc_fragment([BC, dim_k], accum_dtype)
                     T.fill(dk_sub, 0.0)
                     T.gemm(
@@ -478,12 +477,9 @@ def _gla_bwd_dkdv_kernel_maca(
                         policy=T.GemmWarpPolicy.FullRow,
                     )
                     for j_t, i_k in T.Parallel(BC, dim_k):
-                        dk_frag[j_t, i_k] = (
-                            dk_frag[j_t, i_k]
-                            + dk_sub[j_t, i_k]
-                            * T.exp2(
-                                (g_j_s[BC - 1, i_k] - g_j_s[j_t, i_k])
-                                * LOG2_E))
+                        dk_frag[j_t, i_k] = dk_frag[j_t, i_k] + dk_sub[j_t, i_k] * T.exp2(
+                            (g_j_s[BC - 1, i_k] - g_j_s[j_t, i_k]) * LOG2_E
+                        )
 
                     A_frag = T.alloc_fragment([BC, BC], accum_dtype)
                     T.fill(A_frag, 0.0)
@@ -492,9 +488,8 @@ def _gla_bwd_dkdv_kernel_maca(
                             A_frag[i_t, i_j] = A_frag[i_t, i_j] + (
                                 T.cast(q_s[i_t, i_k], accum_dtype)
                                 * T.cast(k_s[i_j, i_k], accum_dtype)
-                                * T.exp2(
-                                    (g_i_s[i_t, i_k] - g_j_s[i_j, i_k])
-                                    * LOG2_E))
+                                * T.exp2((g_i_s[i_t, i_k] - g_j_s[i_j, i_k]) * LOG2_E)
+                            )
                     for i_t, i_j in T.Parallel(BC, BC):
                         A_s[i_t, i_j] = A_frag[i_t, i_j] * scale
                     T.gemm(
@@ -508,17 +503,17 @@ def _gla_bwd_dkdv_kernel_maca(
                 # Diagonal band
                 q_start = k_start
                 T.copy(
-                    q[i_b, q_start:q_start + BC, i_h, :],
+                    q[i_b, q_start : q_start + BC, i_h, :],
                     q_s,
                     disable_tma=True,
                 )
                 T.copy(
-                    do[i_b, q_start:q_start + BC, i_h, :],
+                    do[i_b, q_start : q_start + BC, i_h, :],
                     do_s,
                     disable_tma=True,
                 )
                 T.copy(
-                    g_cumsum[i_b, q_start:q_start + BC, i_h, :],
+                    g_cumsum[i_b, q_start : q_start + BC, i_h, :],
                     g_i_s,
                     disable_tma=True,
                 )
@@ -551,17 +546,12 @@ def _gla_bwd_dkdv_kernel_maca(
                             T.float32(0.0),
                         )
                     for i_k in T.Parallel(dim_k):
-                        q_row[i_k] = T.cast(
-                            q_s[i_local, i_k], accum_dtype)
+                        q_row[i_k] = T.cast(q_s[i_local, i_k], accum_dtype)
                         g_i[i_k] = g_i_s[i_local, i_k]
                     for j_local, i_k in T.Parallel(BC, dim_k):
-                        dk_frag[j_local, i_k] = (
-                            dk_frag[j_local, i_k]
-                            + dA_row[j_local]
-                            * q_row[i_k]
-                            * T.exp2(
-                                (g_i[i_k] - g_j_s[j_local, i_k])
-                                * LOG2_E))
+                        dk_frag[j_local, i_k] = dk_frag[j_local, i_k] + dA_row[j_local] * q_row[
+                            i_k
+                        ] * T.exp2((g_i[i_k] - g_j_s[j_local, i_k]) * LOG2_E)
 
                 A_frag = T.alloc_fragment([BC, BC], accum_dtype)
                 T.fill(A_frag, 0.0)
@@ -570,9 +560,8 @@ def _gla_bwd_dkdv_kernel_maca(
                         A_frag[i_t, i_j] = A_frag[i_t, i_j] + (
                             T.cast(q_s[i_t, i_k], accum_dtype)
                             * T.cast(k_s[i_j, i_k], accum_dtype)
-                            * T.exp2(
-                                (g_i_s[i_t, i_k] - g_j_s[i_j, i_k])
-                                * LOG2_E))
+                            * T.exp2((g_i_s[i_t, i_k] - g_j_s[i_j, i_k]) * LOG2_E)
+                        )
                 for i_t, i_j in T.Parallel(BC, BC):
                     A_s[i_t, i_j] = T.if_then_else(
                         i_j <= i_t,
@@ -591,10 +580,9 @@ def _gla_bwd_dkdv_kernel_maca(
                     dh_s[i_k, i_v] = dh[i_b, i_c, i_h, i_k, i_v]
 
                 for i_t, i_k in T.Parallel(BC, dim_k):
-                    k_gated[i_t, i_k] = (
-                        T.cast(k_s[i_t, i_k], accum_dtype)
-                        * T.exp2(
-                            (g_last[i_k] - g_j_s[i_t, i_k]) * LOG2_E))
+                    k_gated[i_t, i_k] = T.cast(k_s[i_t, i_k], accum_dtype) * T.exp2(
+                        (g_last[i_k] - g_j_s[i_t, i_k]) * LOG2_E
+                    )
                 T.gemm(
                     k_gated,
                     dh_s,
@@ -612,11 +600,9 @@ def _gla_bwd_dkdv_kernel_maca(
                     policy=T.GemmWarpPolicy.FullRow,
                 )
                 for i_t, i_k in T.Parallel(BC, dim_k):
-                    dk_frag[i_t, i_k] = (
-                        dk_frag[i_t, i_k]
-                        + dk_inter[i_t, i_k]
-                        * T.exp2(
-                            (g_last[i_k] - g_j_s[i_t, i_k]) * LOG2_E))
+                    dk_frag[i_t, i_k] = dk_frag[i_t, i_k] + dk_inter[i_t, i_k] * T.exp2(
+                        (g_last[i_k] - g_j_s[i_t, i_k]) * LOG2_E
+                    )
 
                 for i_t, i_k in T.Parallel(BC, dim_k):
                     dk_out[i_b, k_start + i_t, i_h, i_k] = dk_frag[i_t, i_k]
@@ -652,7 +638,8 @@ def _gla_bwd_dg_kernel_maca(
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     def _dg_func(num_stages, threads=64):
         q_shape = [batch, seq_len, heads, dim_k]
         k_shape = [batch, seq_len, heads, dim_k]
@@ -704,17 +691,18 @@ def _gla_bwd_dg_kernel_maca(
                     for i_k in T.Parallel(dim_k):
                         dg_inter[i_k] = dg_inter[i_k] + (
                             h[i_b, i_c, i_h, i_k, i_v2]
-                            * T.cast(dh[i_b, i_c, i_h, i_k, i_v2], accum_dtype))
+                            * T.cast(dh[i_b, i_c, i_h, i_k, i_v2], accum_dtype)
+                        )
                 for i_k in T.Parallel(dim_k):
                     dg_inter[i_k] = dg_inter[i_k] * T.exp2(g_last[i_k] * LOG2_E)
 
                 # corr += k * dk_inter_raw * exp(g_last - g)
                 for s in T.Serial(NS):
                     t0 = chunk_start + s * BC
-                    T.copy(k[i_b, t0:t0 + BC, i_h, :], k_s, disable_tma=True)
-                    T.copy(v[i_b, t0:t0 + BC, i_h, :], v_s, disable_tma=True)
+                    T.copy(k[i_b, t0 : t0 + BC, i_h, :], k_s, disable_tma=True)
+                    T.copy(v[i_b, t0 : t0 + BC, i_h, :], v_s, disable_tma=True)
                     T.copy(
-                        g_cumsum[i_b, t0:t0 + BC, i_h, :],
+                        g_cumsum[i_b, t0 : t0 + BC, i_h, :],
                         g_s,
                         disable_tma=True,
                     )
@@ -731,33 +719,31 @@ def _gla_bwd_dg_kernel_maca(
                         dg_s[s * BC + i_t, i_k] = (
                             T.cast(k_s[i_t, i_k], accum_dtype)
                             * dk_inter[i_t, i_k]
-                            * T.exp2(
-                                (g_last[i_k] - g_s[i_t, i_k]) * LOG2_E))
+                            * T.exp2((g_last[i_k] - g_s[i_t, i_k]) * LOG2_E)
+                        )
                 for i_t in T.Serial(BT):
                     for i_k in T.Parallel(dim_k):
                         dg_inter[i_k] = dg_inter[i_k] + dg_s[i_t, i_k]
 
                 for s in T.Serial(NS):
                     t0 = chunk_start + s * BC
-                    T.copy(q[i_b, t0:t0 + BC, i_h, :], q_s, disable_tma=True)
-                    T.copy(k[i_b, t0:t0 + BC, i_h, :], k_s, disable_tma=True)
-                    T.copy(dq[i_b, t0:t0 + BC, i_h, :], dq_s, disable_tma=True)
-                    T.copy(dk[i_b, t0:t0 + BC, i_h, :], dk_s, disable_tma=True)
+                    T.copy(q[i_b, t0 : t0 + BC, i_h, :], q_s, disable_tma=True)
+                    T.copy(k[i_b, t0 : t0 + BC, i_h, :], k_s, disable_tma=True)
+                    T.copy(dq[i_b, t0 : t0 + BC, i_h, :], dq_s, disable_tma=True)
+                    T.copy(dk[i_b, t0 : t0 + BC, i_h, :], dk_s, disable_tma=True)
                     for i_t, i_k in T.Parallel(BC, dim_k):
                         dg_s[s * BC + i_t, i_k] = (
                             T.cast(q_s[i_t, i_k], accum_dtype) * dq_s[i_t, i_k]
-                            - T.cast(k_s[i_t, i_k], accum_dtype)
-                            * dk_s[i_t, i_k])
+                            - T.cast(k_s[i_t, i_k], accum_dtype) * dk_s[i_t, i_k]
+                        )
 
                 for s in T.Serial(BT - 1):
                     i_t_rev = BT - 2 - s
                     for i_k in T.Parallel(dim_k):
-                        dg_s[i_t_rev, i_k] = (
-                            dg_s[i_t_rev, i_k] + dg_s[i_t_rev + 1, i_k])
+                        dg_s[i_t_rev, i_k] = dg_s[i_t_rev, i_k] + dg_s[i_t_rev + 1, i_k]
 
                 for i_t, i_k in T.Parallel(BT, dim_k):
-                    dg_out[i_b, chunk_start + i_t, i_h, i_k] = (
-                        dg_s[i_t, i_k] + dg_inter[i_k])
+                    dg_out[i_b, chunk_start + i_t, i_h, i_k] = dg_s[i_t, i_k] + dg_inter[i_k]
 
         return _main
 
@@ -818,13 +804,15 @@ class GLABwdMACAKernel(Kernel):
         for ns in [1, 2]:
             for t_seq in [128, 256]:
                 for nvp in [2, 4]:
-                    configs.append({
-                        "num_stages": ns,
-                        "threads_par": 64,
-                        "threads_seq": t_seq,
-                        "num_v_partitions": nvp,
-                        "sub_chunk_size": 16,
-                    })
+                    configs.append(
+                        {
+                            "num_stages": ns,
+                            "threads_par": 64,
+                            "threads_seq": t_seq,
+                            "num_v_partitions": nvp,
+                            "sub_chunk_size": 16,
+                        }
+                    )
         return configs
 
     def _build_kernels(self, config: dict) -> None:
@@ -901,8 +889,9 @@ class GLABwdMACAKernel(Kernel):
     def autotune(self, warmup: int = 10, rep: int = 10) -> None:
         if self.autotune_configs is None:
             return
-        print(f"Start autotuning {self.__class__.__name__} "
-              f"({len(self.autotune_configs)} configs)...")
+        print(
+            f"Start autotuning {self.__class__.__name__} ({len(self.autotune_configs)} configs)..."
+        )
 
         B, T, H, K, V = (
             self.batch,
@@ -919,8 +908,7 @@ class GLABwdMACAKernel(Kernel):
         k = torch.randn(B, T, H, K, device="cuda", dtype=dtype_torch) * 0.1
         v = torch.randn(B, T, H, V, device="cuda", dtype=dtype_torch) * 0.1
         g = -torch.rand(B, T, H, K, device="cuda", dtype=dtype_torch).abs()
-        h = torch.randn(
-            B, NT + 1, H, K, V, device="cuda", dtype=torch.float32) * 0.01
+        h = torch.randn(B, NT + 1, H, K, V, device="cuda", dtype=torch.float32) * 0.01
         do = torch.randn(B, T, H, V, device="cuda", dtype=dtype_torch) * 0.1
         dht = torch.zeros(B, H, K, V, dtype=torch.float32, device="cuda")
 

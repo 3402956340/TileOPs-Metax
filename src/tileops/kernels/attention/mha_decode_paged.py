@@ -289,7 +289,7 @@ def _mha_decode_split_kernel(batch, heads, seqlen_q, seqlen_kv, dim, page_size, 
                 offset = 0 if sid == 0 else split_length_shared[sid - 1] // block_N
 
                 for k in T.Pipelined(loop_range, num_stages=2):
-                    #k_global += split_length_shared[sid - 1] // block_N
+                    # k_global += split_length_shared[sid - 1] // block_N
                     k_global = k + offset
 
                     page_idx = k_global // num_blockn_in_page

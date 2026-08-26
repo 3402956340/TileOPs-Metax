@@ -40,8 +40,10 @@ def _act_expr(name):
     if name == "silu_and_mul":
         return lambda g: g / (T.float32(1.0) + T.exp(-g))
     if name == "gelu_and_mul":
-        return lambda g: T.float32(0.5) * g * (
-            T.float32(1.0) + T.erf(g * T.float32(0.7071067811865476))
+        return (
+            lambda g: T.float32(0.5)
+            * g
+            * (T.float32(1.0) + T.erf(g * T.float32(0.7071067811865476)))
         )
     raise ValueError(f"unsupported activation {name!r}")
 
@@ -60,12 +62,15 @@ def _estimate_moe_grouped_gemm_fused_act_maca_smem_bytes(
 
 
 def _config_fits_smem(cfg: dict, smem_budget: int) -> bool:
-    return _estimate_moe_grouped_gemm_fused_act_maca_smem_bytes(
-        block_m=cfg["block_m"],
-        block_n=cfg["block_n"],
-        block_k=cfg["block_k"],
-        num_stages=cfg["num_stages"],
-    ) <= smem_budget
+    return (
+        _estimate_moe_grouped_gemm_fused_act_maca_smem_bytes(
+            block_m=cfg["block_m"],
+            block_n=cfg["block_n"],
+            block_k=cfg["block_k"],
+            num_stages=cfg["num_stages"],
+        )
+        <= smem_budget
+    )
 
 
 def _build_persistent_fused_act_maca(
@@ -117,11 +122,13 @@ def _build_persistent_fused_act_maca(
                 lo = T.alloc_local((1,), "int32")
                 hi = T.alloc_local((1,), "int32")
 
-                T.annotate_layout({
-                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                    B_gate_shared: tilelang.layout.make_swizzled_layout(B_gate_shared),
-                    B_up_shared: tilelang.layout.make_swizzled_layout(B_up_shared),
-                })
+                T.annotate_layout(
+                    {
+                        A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+                        B_gate_shared: tilelang.layout.make_swizzled_layout(B_gate_shared),
+                        B_up_shared: tilelang.layout.make_swizzled_layout(B_up_shared),
+                    }
+                )
 
                 tx = T.get_thread_binding()
 
@@ -150,8 +157,7 @@ def _build_persistent_fused_act_maca(
                             pid_in_group = flat_id % T.int32(num_pid_in_group)
                             group_id = flat_id // T.int32(num_pid_in_group)
                             first_pid_m = group_id * T.int32(group_size_m)
-                            actual_gsm = T.min(m_tiles_total - first_pid_m,
-                                               T.int32(group_size_m))
+                            actual_gsm = T.min(m_tiles_total - first_pid_m, T.int32(group_size_m))
                             m_tile = first_pid_m + pid_in_group % actual_gsm
                             n_tile = pid_in_group // actual_gsm
 
@@ -170,10 +176,8 @@ def _build_persistent_fused_act_maca(
                         row_in_expert = (m_tile - s_cum[expert_id]) * T.int32(block_m)
                         m_start = true_offsets[expert_id] + row_in_expert
                         n_start = n_tile * T.int32(block_n)
-                        actual_rows = T.min(T.int32(block_m),
-                                            true_sizes[expert_id] - row_in_expert)
-                        actual_cols = T.min(T.int32(block_n),
-                                            T.int32(ffn) - n_start)
+                        actual_rows = T.min(T.int32(block_m), true_sizes[expert_id] - row_in_expert)
+                        actual_cols = T.min(T.int32(block_n), T.int32(ffn) - n_start)
 
                         T.clear(C_gate_local)
                         T.clear(C_up_local)
@@ -182,19 +186,25 @@ def _build_persistent_fused_act_maca(
                             k_start = k * block_k
                             if actual_rows == T.int32(block_m) and actual_cols == T.int32(block_n):
                                 T.copy(
-                                    A[m_start:m_start + block_m, k_start:k_start + block_k],
+                                    A[m_start : m_start + block_m, k_start : k_start + block_k],
                                     A_shared,
                                     disable_tma=True,
                                 )
                                 T.copy(
-                                    B[expert_id, n_start:n_start + block_n,
-                                      k_start:k_start + block_k],
+                                    B[
+                                        expert_id,
+                                        n_start : n_start + block_n,
+                                        k_start : k_start + block_k,
+                                    ],
                                     B_gate_shared,
                                     disable_tma=True,
                                 )
                                 T.copy(
-                                    B[expert_id, ffn + n_start:ffn + n_start + block_n,
-                                      k_start:k_start + block_k],
+                                    B[
+                                        expert_id,
+                                        ffn + n_start : ffn + n_start + block_n,
+                                        k_start : k_start + block_k,
+                                    ],
                                     B_up_shared,
                                     disable_tma=True,
                                 )
@@ -202,14 +212,20 @@ def _build_persistent_fused_act_maca(
                                 for i, j in T.Parallel(block_m, block_k):
                                     A_shared[i, j] = T.if_then_else(
                                         i < actual_rows and j < K - k * block_k,
-                                        A[m_start + i, k * block_k + j], 0)
+                                        A[m_start + i, k * block_k + j],
+                                        0,
+                                    )
                                 for i, j in T.Parallel(block_n, block_k):
                                     B_gate_shared[i, j] = T.if_then_else(
                                         j < K - k * block_k and i < actual_cols,
-                                        B[expert_id, n_start + i, k * block_k + j], 0)
+                                        B[expert_id, n_start + i, k * block_k + j],
+                                        0,
+                                    )
                                     B_up_shared[i, j] = T.if_then_else(
                                         j < K - k * block_k and i < actual_cols,
-                                        B[expert_id, ffn + n_start + i, k * block_k + j], 0)
+                                        B[expert_id, ffn + n_start + i, k * block_k + j],
+                                        0,
+                                    )
                             T.gemm(
                                 A_shared,
                                 B_gate_shared,
@@ -232,6 +248,7 @@ def _build_persistent_fused_act_maca(
                                     act(C_gate_local[i, j]) * C_up_local[i, j],
                                 )
     else:
+
         @T.prim_func
         def _gemma_main_fused(
             A: T.Tensor(A_shape, dtype),
@@ -254,11 +271,13 @@ def _build_persistent_fused_act_maca(
                 lo = T.alloc_local((1,), "int32")
                 hi = T.alloc_local((1,), "int32")
 
-                T.annotate_layout({
-                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                    B_gate_shared: tilelang.layout.make_swizzled_layout(B_gate_shared),
-                    B_up_shared: tilelang.layout.make_swizzled_layout(B_up_shared),
-                })
+                T.annotate_layout(
+                    {
+                        A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+                        B_gate_shared: tilelang.layout.make_swizzled_layout(B_gate_shared),
+                        B_up_shared: tilelang.layout.make_swizzled_layout(B_up_shared),
+                    }
+                )
 
                 tx = T.get_thread_binding()
 
@@ -287,8 +306,7 @@ def _build_persistent_fused_act_maca(
                             pid_in_group = flat_id % T.int32(num_pid_in_group)
                             group_id = flat_id // T.int32(num_pid_in_group)
                             first_pid_m = group_id * T.int32(group_size_m)
-                            actual_gsm = T.min(m_tiles_total - first_pid_m,
-                                               T.int32(group_size_m))
+                            actual_gsm = T.min(m_tiles_total - first_pid_m, T.int32(group_size_m))
                             m_tile = first_pid_m + pid_in_group % actual_gsm
                             n_tile = pid_in_group // actual_gsm
 
@@ -307,27 +325,30 @@ def _build_persistent_fused_act_maca(
                         row_in_expert = (m_tile - s_cum[expert_id]) * T.int32(block_m)
                         m_start = true_offsets[expert_id] + row_in_expert
                         n_start = n_tile * T.int32(block_n)
-                        actual_rows = T.min(T.int32(block_m),
-                                            true_sizes[expert_id] - row_in_expert)
-                        actual_cols = T.min(T.int32(block_n),
-                                            T.int32(ffn) - n_start)
+                        actual_rows = T.min(T.int32(block_m), true_sizes[expert_id] - row_in_expert)
+                        actual_cols = T.min(T.int32(block_n), T.int32(ffn) - n_start)
 
                         T.clear(C_gate_local)
                         T.clear(C_up_local)
 
-                        for k in T.Pipelined(T.ceildiv(K, block_k),
-                                             num_stages=num_stages):
+                        for k in T.Pipelined(T.ceildiv(K, block_k), num_stages=num_stages):
                             for i, j in T.Parallel(block_m, block_k):
                                 A_shared[i, j] = T.if_then_else(
                                     i < actual_rows and j < K - k * block_k,
-                                    A[m_start + i, k * block_k + j], 0)
+                                    A[m_start + i, k * block_k + j],
+                                    0,
+                                )
                             for i, j in T.Parallel(block_n, block_k):
                                 B_gate_shared[i, j] = T.if_then_else(
                                     j < K - k * block_k and i < actual_cols,
-                                    B[expert_id, n_start + i, k * block_k + j], 0)
+                                    B[expert_id, n_start + i, k * block_k + j],
+                                    0,
+                                )
                                 B_up_shared[i, j] = T.if_then_else(
                                     j < K - k * block_k and i < actual_cols,
-                                    B[expert_id, ffn + n_start + i, k * block_k + j], 0)
+                                    B[expert_id, ffn + n_start + i, k * block_k + j],
+                                    0,
+                                )
                             T.gemm(
                                 A_shared,
                                 B_gate_shared,
@@ -377,7 +398,7 @@ def _persistent_moe_grouped_gemm_fused_act_maca_kernel(
         max_tiles = numel // block_m + num_experts
         total_ctas_ub = max_tiles * num_pid_n
         max_iters = (total_ctas_ub + sm_count - 1) // sm_count + 2
-        k_aligned = (K % block_k == 0)
+        k_aligned = K % block_k == 0
         return _build_persistent_fused_act_maca(
             numel=numel,
             num_experts=num_experts,
@@ -478,8 +499,14 @@ class MoeGroupedGemmPersistentFusedActMACAKernel(Kernel):
         if self.K % block_k == 0:
             A = F.pad(A, (0, 0, 0, block_m))
         gemm_fn = _persistent_moe_grouped_gemm_fused_act_maca_kernel(
-            self.numel, self.num_experts, self.N, self.K,
-            self.dtype_str, self.activation, self.sm_count, block_k,
+            self.numel,
+            self.num_experts,
+            self.N,
+            self.K,
+            self.dtype_str,
+            self.activation,
+            self.sm_count,
+            block_k,
         )(
             block_m,
             self.config["block_n"],

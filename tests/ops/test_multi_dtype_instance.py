@@ -89,7 +89,8 @@ def test_attention_decode_reselects_the_kernel_per_dtype():
     assert fp16.__class__.__name__ == (
         "GQADecodeBs1Kernel"
         if get_sm_version() in (GQADecodeBs1Kernel.supported_archs or [])
-        else "GQADecodeKernel")
+        else "GQADecodeKernel"
+    )
     assert bf16.__class__.__name__ == "GQADecodeKernel"
     _assert_two_entries(op)
 
@@ -107,7 +108,8 @@ def test_attention_square_prefill_reselects_the_kernel_per_dtype():
     expected = (
         "GQAPrefillFwdWsPersistentCausalKernel"
         if get_sm_version() in (GQAPrefillFwdWsPersistentCausalKernel.supported_archs or [])
-        else "GQAPrefillFwdKernel")
+        else "GQAPrefillFwdKernel"
+    )
     for dtype in _DTYPES:
         q = torch.randn(batch, seq_len, heads, dim, dtype=dtype, device="cuda")
         k = torch.randn(batch, seq_len, heads_kv, dim, dtype=dtype, device="cuda")

@@ -298,22 +298,14 @@ _MACA_XFAIL_PREFIX_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # ),
 )
 
-MACA_XFAILS = {
-    nodeid: reason
-    for reason, nodeids in _MACA_XFAIL_GROUPS
-    for nodeid in nodeids
-}
+MACA_XFAILS = {nodeid: reason for reason, nodeids in _MACA_XFAIL_GROUPS for nodeid in nodeids}
 
 MACA_XFAIL_PREFIXES = {
-    prefix: reason
-    for reason, prefixes in _MACA_XFAIL_PREFIX_GROUPS
-    for prefix in prefixes
+    prefix: reason for reason, prefixes in _MACA_XFAIL_PREFIX_GROUPS for prefix in prefixes
 }
 
 if len(MACA_XFAILS) != sum(len(nodeids) for _, nodeids in _MACA_XFAIL_GROUPS):
     raise ValueError("duplicate node ID in the MACA benchmark xfail allowlist")
 
-if len(MACA_XFAIL_PREFIXES) != sum(
-    len(prefixes) for _, prefixes in _MACA_XFAIL_PREFIX_GROUPS
-):
+if len(MACA_XFAIL_PREFIXES) != sum(len(prefixes) for _, prefixes in _MACA_XFAIL_PREFIX_GROUPS):
     raise ValueError("duplicate node ID prefix in the MACA benchmark xfail allowlist")

@@ -869,7 +869,9 @@ class ReduceKernel(Kernel):
         reserve = 2 * DEFAULT_ALIGNMENT * self._elem_bytes * nbuf
         self._smem_budget = device_smem_budget() - reserve
         self._planner = BlockConfigPlanner(
-            self.N_padded, self._elem_bytes, self._smem_budget,
+            self.N_padded,
+            self._elem_bytes,
+            self._smem_budget,
             num_buffers=nbuf,
         )
         self._needs_tiling = self._planner.needs_tiling

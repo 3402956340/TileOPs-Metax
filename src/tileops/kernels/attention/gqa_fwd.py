@@ -6,6 +6,7 @@ import tilelang.language as T
 import torch
 
 from tileops.kernels.kernel_base import Kernel
+from tileops.utils import is_maca
 
 from ._config import tile_stage_thread_configs
 from .call_spec import dense_prefill_region, fp8_dtype
@@ -17,8 +18,6 @@ from .online_softmax import (
     make_online_softmax_with_mask_guard,
     make_rescale,
 )
-from tileops.utils import is_maca
-
 from .packed_prefill import PackedPrefillKernel
 from .paged_prefill import PagedPrefillKernel
 

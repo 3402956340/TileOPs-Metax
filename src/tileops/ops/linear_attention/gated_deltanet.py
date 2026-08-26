@@ -496,9 +496,7 @@ class GatedDeltaNetPrefillBTHDFwdOp(Op):
     def default_kernel_map(self) -> Dict[str, Kernel]:
         return {
             "GatedDeltaNetPrefillFwdKernel": (
-                GatedDeltaNetPrefillFwdMACAKernel
-                if is_maca()
-                else GatedDeltaNetPrefillFwdKernel
+                GatedDeltaNetPrefillFwdMACAKernel if is_maca() else GatedDeltaNetPrefillFwdKernel
             ),
         }
 

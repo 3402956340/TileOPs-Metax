@@ -5,7 +5,9 @@ from tests.test_base import FixtureBase
 from tileops.kernels.linear_attention.gated_deltanet.gated_deltanet_bwd import (
     GatedDeltaNetBwdKernel,
 )
-from tileops.kernels.linear_attention.gated_deltanet.gated_deltanet_bwd_maca import GatedDeltaNetBwdMACAKernel
+from tileops.kernels.linear_attention.gated_deltanet.gated_deltanet_bwd_maca import (
+    GatedDeltaNetBwdMACAKernel,
+)
 from tileops.ops import GatedDeltaNetBwdOp
 from tileops.utils import is_maca
 

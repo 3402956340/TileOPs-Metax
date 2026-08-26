@@ -9,6 +9,7 @@ import tilelang.language as T
 import torch
 
 from tileops.kernels.kernel_base import Kernel
+from tileops.utils import is_maca
 
 from .online_softmax import (
     LOG2E,
@@ -16,7 +17,6 @@ from .online_softmax import (
     make_online_softmax,
     make_rescale,
 )
-from tileops.utils import is_maca
 
 __all__ = ["GQADecodePagedKernel"]
 

@@ -11,10 +11,10 @@ from tileops.kernels.grouped_gemm import (
 )
 from tileops.kernels.kernel_base import Kernel
 from tileops.kernels.moe.moe_grouped_gemm_nopad import MoeGroupedGemmNopadKernel
+from tileops.utils import is_maca
 
 from ...compile_boundary import get_instance
 from ...op_base import Op
-from tileops.utils import is_maca
 from ._common import GroupedOperandEagerForward
 
 __all__ = ["MoeGroupedGemmNopadFwdOp"]

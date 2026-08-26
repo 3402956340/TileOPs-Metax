@@ -2,10 +2,9 @@ from typing import Dict, Optional, Tuple
 
 import torch
 
-from tileops.utils import is_maca
 from tileops.kernels.kernel_base import Kernel
-from tileops.kernels.linear_attention.gla import GLABwdMACAKernel
-from tileops.kernels.linear_attention.gla import GLABwdKernel, GLAFwdKernel
+from tileops.kernels.linear_attention.gla import GLABwdKernel, GLABwdMACAKernel, GLAFwdKernel
+from tileops.utils import is_maca
 
 from .._validation import check_tensor_shape
 from ..op_base import Op

@@ -128,9 +128,15 @@ def _mhc_pre_kernel(batch: int, n_expand: int, c_x: int, x_dtype: str = "bfloat1
                 for i, j in T.Parallel(block_x_b, n_expand * n_expand + 2 * n_expand):
                     if j < n_expand:
                         h_pre_shared[i, j] = 1 / (
-                            1 + T.exp2(
-                                -(1 / r[bx * block_x_b + i] * alpha_pre * h_pre_shared[i, j] +
-                                  b_shared[j]) * LOG2E))
+                            1
+                            + T.exp2(
+                                -(
+                                    1 / r[bx * block_x_b + i] * alpha_pre * h_pre_shared[i, j]
+                                    + b_shared[j]
+                                )
+                                * LOG2E
+                            )
+                        )
                         H_pre[bx * block_x_b + i, j] = h_pre_shared[i, j]
 
                     elif j < 2 * n_expand:

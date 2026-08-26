@@ -308,14 +308,18 @@ def test_conv1d_dilation_matches_torch(dilation, use_bias: bool) -> None:
     out = op(x, weight, bias) if use_bias else op(x, weight)
     # MACA: GPU F.conv backend disagrees with CPU f32 for dilation>1 + randn bias
     if is_maca() and use_bias and dilation > 1:
-        ref = F.conv1d(
-            x.cpu(),
-            weight.cpu(),
-            bias=bias.cpu(),
-            stride=stride,
-            padding=padding,
-            dilation=2,
-        ).to(device=x.device, dtype=x.dtype).contiguous()
+        ref = (
+            F.conv1d(
+                x.cpu(),
+                weight.cpu(),
+                bias=bias.cpu(),
+                stride=stride,
+                padding=padding,
+                dilation=2,
+            )
+            .to(device=x.device, dtype=x.dtype)
+            .contiguous()
+        )
     else:
         ref = F.conv1d(
             x,
@@ -937,14 +941,18 @@ def test_conv3d_no_bias_matches_torch() -> None:
     weight = torch.randn(16, 8, 3, 3, 3, device="cuda", dtype=torch.float16).contiguous()
     out = op(x, weight)
     if is_maca():
-        ref = F.conv3d(
-            x.cpu(),
-            weight.cpu(),
-            bias=None,
-            stride=2,
-            padding=2,
-            dilation=2,
-        ).to(device=x.device, dtype=x.dtype).contiguous()
+        ref = (
+            F.conv3d(
+                x.cpu(),
+                weight.cpu(),
+                bias=None,
+                stride=2,
+                padding=2,
+                dilation=2,
+            )
+            .to(device=x.device, dtype=x.dtype)
+            .contiguous()
+        )
     else:
         ref = F.conv3d(
             x,
@@ -983,13 +991,17 @@ def test_conv3d_accepts_zero_bias() -> None:
     bias = torch.zeros(16, device="cuda", dtype=torch.float16).contiguous()
     out = op(x, weight, bias)
     if is_maca():
-        ref = F.conv3d(
-            x.cpu(),
-            weight.cpu(),
-            bias=bias.cpu(),
-            stride=2,
-            padding=1,
-        ).to(device=x.device, dtype=x.dtype).contiguous()
+        ref = (
+            F.conv3d(
+                x.cpu(),
+                weight.cpu(),
+                bias=bias.cpu(),
+                stride=2,
+                padding=1,
+            )
+            .to(device=x.device, dtype=x.dtype)
+            .contiguous()
+        )
     else:
         ref = F.conv3d(
             x,

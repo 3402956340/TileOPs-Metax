@@ -137,10 +137,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         nodeid = _normalized_benchmark_nodeid(item)
         path = nodeid.split("::", 1)[0]
 
-        if (
-            path == "benchmarks/ops/bench_elementwise_fp8.py"
-            and _is_fp8_e4m3_benchmark(item)
-        ):
+        if path == "benchmarks/ops/bench_elementwise_fp8.py" and _is_fp8_e4m3_benchmark(item):
             item.add_marker(fp8_e4m3_skip)
 
     _apply_maca_xfails(items)

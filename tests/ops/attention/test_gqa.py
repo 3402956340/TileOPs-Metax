@@ -1075,6 +1075,7 @@ def test_gqa_bwd(
     atol = 6e-3 if dtype == torch.bfloat16 else 5e-3
     test.check(op, *test.gen_inputs(), atol=atol, rtol=1e-5)
 
+
 # The square BSHD wrapper reaches a dense-prefill kernel by itself: it states
 # its call, selects a key, and builds through the shared step. These pin that
 # it holds no child op, builds once, and passes exactly what the packed op does.

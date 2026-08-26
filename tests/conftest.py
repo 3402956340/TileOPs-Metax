@@ -133,7 +133,7 @@ def _apply_maca_xfails(items: list[pytest.Item]) -> None:
         if reason is not None:
             item.add_marker(pytest.mark.xfail(reason=f"MACA: {reason}", strict=False))
 
-            
+
 def _is_hopper() -> bool:
     """Whether this machine's first CUDA device is compute capability 9.x."""
     if not torch.cuda.is_available():

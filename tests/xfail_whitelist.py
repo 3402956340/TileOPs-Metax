@@ -17,8 +17,7 @@ _TRACE_RUNTIME_ERROR = "known MACA trace payload runtime error"
 _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         _UNSUPPORTED_ARCHITECTURE,
-        (
-        ),
+        (),
     ),
     (
         _COMPILATION_FAILURE,
@@ -121,6 +120,7 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/ops/test_convolution.py::test_conv3d[full-video-stage-downsample-k3-s2-fp16]",
             "tests/ops/test_convolution.py::test_conv3d[full-3d-aspp-3x3x3-d2-fp16]",
             "tests/ops/test_convolution.py::test_conv3d[full-3d-resnext-grouped-k3-fp16]",
+            "tests/ops/test_convolution.py::test_conv3d_no_bias_grouped_matches_torch",
             "tests/ops/test_convolution.py::test_conv2d_cold_traces_fullgraph_and_owns_its_graph_nodes[no-bias]",
             "tests/ops/test_convolution.py::test_conv2d_cold_traces_fullgraph_and_owns_its_graph_nodes[bias]",
             "tests/ops/test_convolution.py::test_conv1d_cold_traces_fullgraph_and_owns_its_graph_nodes",
@@ -141,13 +141,8 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         _CI_EXPECTATION_MISMATCH,
         (
-            "tests/ops/test_family_dispatch.py::test_gemm_is_refused_where_neither_implementation_runs",
-            # Incomplete merge: Op.get_or_build_kernel / decode dispatch API drift
-            "tests/ops/attention/test_gqa_decode.py::test_gqa_decode_bs1_dispatch",
-            "tests/ops/attention/test_gqa_decode.py::test_gqa_decode_bs1_runtime_context_switch",
             "tests/ops/test_grouped_gemm.py::test_selection_prefers_the_persistent_kernel_where_it_applies[4096-4096-False-True-grouped_gemm_persistent_3wg_kernel]",
             "tests/ops/test_moe_shared_fused_moe.py::test_a_replaced_shared_expert_kernel_is_the_one_built",
-            "tests/test_reclaim_action.py::test_manifest_gate_covers_every_manifest_file",
         ),
     ),
     (
@@ -159,11 +154,7 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
 )
 
-MACA_XFAILS = {
-    nodeid: reason
-    for reason, nodeids in _MACA_XFAIL_GROUPS
-    for nodeid in nodeids
-}
+MACA_XFAILS = {nodeid: reason for reason, nodeids in _MACA_XFAIL_GROUPS for nodeid in nodeids}
 
 if len(MACA_XFAILS) != sum(len(nodeids) for _, nodeids in _MACA_XFAIL_GROUPS):
     raise ValueError("duplicate node ID in the MACA xfail allowlist")

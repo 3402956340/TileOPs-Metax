@@ -18,6 +18,8 @@ import tilelang
 import tilelang.language as T
 import torch
 
+from tileops.utils import is_maca
+
 from .call_spec import uses_sliding_window
 from .online_softmax import (
     make_log2e_scale,
@@ -25,7 +27,6 @@ from .online_softmax import (
     make_rescale,
 )
 from .packed_prefill import PackedPrefillKernel
-from tileops.utils import is_maca
 
 __all__ = [
     "GQASlidingWindowVarlenFwdWgmmaPipelinedKernel",
@@ -397,6 +398,7 @@ def _(
 
 class GQASlidingWindowVarlenFwdWgmmaPipelinedKernel(_GQASlidingWindowVarlenFwdKernelBase):
     """Variable-length GQA sliding window forward kernel, WGMMA pipelined (sm90)."""
+
     supported_archs: list[int] = [80, 89, 90]
 
     @property
