@@ -95,7 +95,7 @@ Lookup is **class-based**, not filename-based — many TileOPs ops share a file 
 
 Names match the reference verbatim. Include every reference param even if the kernel ignores it. Exclude `float64` and `complex32/64/128` (TileOPs is GPU-only).
 
-For references with `Optional[Tensor]` inputs, the caller has decided which slice corresponds to `op_name` (primary = required only; variant = primary + chosen optional). The skill emits inputs accordingly.
+A reference input the op may be called without is emitted with `optional: true` (R18) on the single entry, after the required inputs.
 
 ### 5. DRAFT_ENTRY
 
@@ -103,7 +103,7 @@ Snapshot present (re-align) → preserve human-curated fields verbatim. Snapshot
 
 - `signature.inputs`: ordered dict in the reference's positional order. Per input: `dtype` = supported set joined with `|` (reference dtypes minus `float64` and complex types); `shape` only if fixed rank; `layout` only if non-default; `constraints` if applicable.
 - `signature.outputs`: same shape as inputs. Use `same_as(<ref>)` where applicable.
-- `signature.params`: ordered dict, each `{type, default}`.
+- `signature.params`: ordered dict, each `{type, default}`. `type` mirrors the reference's annotation; write `| None` when the parameter accepts it, which `default: null` requires.
 - `signature.shape_rules`: Python expressions for derived dims and inter-tensor constraints.
 - `signature.dtype_combos`: only if supported set ⊂ Cartesian product; else omit.
 - `roofline`: required by L0. Well-known op (conv / pool / matmul / norm / reduction): standard formula. Fixed-rank: shape names auto-bind, use `elem_bytes`. Arbitrary-rank: `vars` mapping. Not derivable → BLOCKED `evidence_needed: roofline.flops|bytes for <op_name>`.

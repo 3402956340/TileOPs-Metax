@@ -20,6 +20,11 @@ RUN python -m pip install --no-cache-dir \
     "transformers==4.45.2" \
     -i https://repos.metax-tech.com/r/maca-pypi/simple \
     --trusted-host repos.metax-tech.com
+# Benchmark-only baselines.  Keep dependency resolution disabled so the image's
+# Metax torch/runtime stack is never replaced by their upstream requirements.
+RUN python -m pip install --no-cache-dir --no-deps \
+    "sqlalchemy==2.0.52" \
+    "flag_gems==5.0.2"
 RUN python - <<'PY'
 import transformers
 assert transformers.__version__ == "4.45.2", transformers.__version__

@@ -36,7 +36,9 @@ def _to_tuple(outputs):
     raise ValueError(f"Unsupported output type: {type(outputs)}")
 
 
-def allclose_compare(output: torch.Tensor, output_ref: torch.Tensor, atol: float = 1e-8, rtol: float = 1e-5) -> None:
+def allclose_compare(
+    output: torch.Tensor, output_ref: torch.Tensor, atol: float = 1e-8, rtol: float = 1e-5
+) -> None:
     """Default comparison using torch.allclose."""
     output, output_ref = torch.broadcast_tensors(output, output_ref)
     torch.testing.assert_close(
@@ -56,28 +58,27 @@ def exact_compare(output: torch.Tensor, output_ref: torch.Tensor) -> None:
 class TestBase(WorkloadBase):
     """Abstract base class for op correctness testing.
 
-    Inherits gen_inputs() from WorkloadBase.
-    Subclasses must implement ref_program() for correctness checking.
+    Inherits gen_inputs() from WorkloadBase, and ref_program() too when the
+    workload is named for one op; a test on a shape-only workload defines
+    ref_program itself.
     Provides check() for comparing op output against reference.
     """
+
     __test__ = False
 
     @abstractmethod
     def ref_program(self, *inputs: Any) -> Any:
         """Reference implementation for correctness checking.
 
-        Must be overridden by every concrete test subclass.
-        Should return the same outputs as the op under test, using a
-        simpler/trusted implementation (e.g. PyTorch built-ins).
+        Supplied by the workload for ops whose workload names them, otherwise
+        by the test subclass. Returns the same outputs as the op under test,
+        using a simpler/trusted implementation (e.g. PyTorch built-ins).
         """
         raise NotImplementedError
 
-    def check(self,
-              op,
-              *inputs: torch.Tensor,
-              compare=None,
-              atol: float = 1e-08,
-              rtol: float = 1e-05) -> None:
+    def check(
+        self, op, *inputs: torch.Tensor, compare=None, atol: float = 1e-08, rtol: float = 1e-05
+    ) -> None:
         """Check the correctness of the op against ref_program.
 
         Args:
@@ -109,8 +110,9 @@ class TestBase(WorkloadBase):
 
         outputs = _to_tuple(outputs)
 
-        assert len(outputs) == len(outputs_ref), \
+        assert len(outputs) == len(outputs_ref), (
             f"outputs: {len(outputs)} and outputs_ref: {len(outputs_ref)} have different size"
+        )
 
         # Compute error metrics before comparison (so we report even on failure).
         max_abs_err = 0.0
@@ -134,5 +136,6 @@ class TestBase(WorkloadBase):
             if output_ref is not None:
                 cmp(output, output_ref)
 
-        _logger.info("op=%s module=%s status=pass max_abs_err=%.2e",
-                      op_name, op_module, max_abs_err)
+        _logger.info(
+            "op=%s module=%s status=pass max_abs_err=%.2e", op_name, op_module, max_abs_err
+        )

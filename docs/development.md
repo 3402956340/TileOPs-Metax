@@ -25,12 +25,12 @@ PIP_NO_BUILD_ISOLATION=1 pip install -e '.[dev]' -c constraints.txt
 
 ## Dev Docker image
 
-The prebuilt dev image ships the whole stack — CUDA 12.9, PyTorch 2.10 (cu129), the TileLang commit CI validates, and the benchmark baselines — so nothing needs resolving locally:
+The prebuilt dev image ships the whole stack — CUDA 13.2, PyTorch 2.13 (cu132), the TileLang commit CI validates, and the benchmark baselines — so nothing needs resolving locally:
 
 ```bash
 docker run --rm -it --gpus all \
   -v "$(pwd)":/workspace -w /workspace \
-  ghcr.io/tile-ai/tileops-runner:afcebed1-torch2.10-dev
+  ghcr.io/tile-ai/tileops-runner:cu132-torch2.13-tl-afcebed1-dev
 
 # inside the container
 pip install -e . --no-deps
@@ -72,6 +72,49 @@ The `packaging` marker is separate from the tiers: it is a minimal wheel-install
 ```bash
 pre-commit run --all-files
 ```
+
+## Docstrings
+
+Docstrings are the API reference on
+[the docs site](https://tile-ai.github.io/TileOPs.github.io/), and mkdocstrings
+renders them **as Markdown** — reStructuredText reaches the page as literal text.
+
+Three docstrings per op, each answering one question:
+
+| Docstring  | Answers             | Sections                                               |
+| ---------- | ------------------- | ------------------------------------------------------ |
+| the class  | what the op is      | prose: the formula, the shapes, when a kernel rebuilds |
+| `__init__` | how to construct it | `Args:`                                                |
+| `forward`  | how to call it      | `Args:`, `Returns:`, `Raises:`, `Example:` last        |
+
+Both members need one: the page gives every member an entry, so a missing
+docstring publishes a heading with nothing under it. Parameters go on `__init__`,
+not in the class's `Args:`, and the example goes last in `forward` — a class
+docstring renders above both signatures.
+
+How to write each element:
+
+| Element                | Write                                                              | Not                                                              |
+| ---------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| Code example           | a fenced block inside `Example:`: ```` ```python linenums="1" ```` | `>>>` prompts — `>` is a Markdown blockquote                     |
+| Tensor shape           | `$[B \\times M \\times K]$`                                        | `` `[B, M, K]` ``                                                |
+| Formula                | `$d_i = a_i \\mathbin{@} b_i$`, or `$$…$$` on its own line         | `.. math::`                                                      |
+| Four or more variants  | a table                                                            | an indented bullet list, which Markdown folds into one paragraph |
+| Callout                | `!!! note "Title"`, body indented four spaces                      | `.. note::`                                                      |
+| Cross-reference        | `` `torch.nn.functional.rms_norm` ``                               | `:func:` and the other roles                                     |
+| Identifier, path, flag | inline code                                                        | math                                                             |
+
+Two that bite:
+
+- **Double every backslash.** A docstring is a regular string literal, so
+  `\\times` is a tab followed by `imes`. Write `\\\\times`, or make the docstring raw.
+- **A shape is a product of dimensions.** `` `(flops, bytes)` `` is a return pair
+  and stays code.
+
+[`bmm.py`](../src/tileops/ops/gemm/bmm.py) carries all of it and is the one to copy
+from. `scripts/lint/op_docstrings_lint.py` fails a missing docstring,
+reStructuredText, or an `Args:` left on a class; it runs as the
+`op-docstrings-lint` pre-commit hook and in the `pre-commit` CI job.
 
 ## Benchmarks
 

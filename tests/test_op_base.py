@@ -52,6 +52,11 @@ def _make_op_subclass(*, static_axes=frozenset(), override_cache_key=False):
         "_static_axes": static_axes,
         "default_kernel_map": property(lambda self: {}),
         "forward": lambda self, *a, **kw: None,
+        # The three manifest-driven methods are abstract on Op; these doubles
+        # exercise the get-or-build plumbing, so a minimal body is the contract.
+        "_infer_output_shapes": lambda self, *shapes: {},
+        "_validate_dtypes": lambda self, *args: None,
+        "eval_roofline": lambda self: (0, 0),
     }
     if override_cache_key:
         attrs["_cache_key"] = lambda self, *shapes: ("overridden",)
@@ -104,9 +109,7 @@ class TestCacheKeyWarning:
 
     def test_override_suppresses_warning(self):
         """When the subclass overrides _cache_key, no warning fires."""
-        Cls = _make_op_subclass(
-            static_axes=frozenset(), override_cache_key=True
-        )
+        Cls = _make_op_subclass(static_axes=frozenset(), override_cache_key=True)
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -181,6 +184,15 @@ class _SlottedOp(Op):
     def default_kernel_map(self):
         return {}
 
+    def _infer_output_shapes(self, *shapes):
+        return {}
+
+    def _validate_dtypes(self, *args):
+        return None
+
+    def eval_roofline(self):
+        return (0, 0)
+
     def forward(self, *a, **kw):
         return None
 
@@ -189,7 +201,7 @@ class _SlottedOp(Op):
             self.builds.append((role, key))
             return _RecordingKernel(name, self._tuned)
 
-        return self.get_or_build_kernel(role, key, factory)
+        return self.get_or_build_kernel(role, (), key=key, build=factory)
 
 
 class TestGetOrBuildKernel:
@@ -241,11 +253,17 @@ class TestIterKernels:
         class BundleOp(_SlottedOp):
             def populate(self):
                 self.get_or_build_kernel(
-                    "pair", torch.float16,
-                    lambda: (_RecordingKernel("pre", tuned), _RecordingKernel("bwd", tuned)))
+                    "pair",
+                    (),
+                    key=torch.float16,
+                    build=lambda: (_RecordingKernel("pre", tuned), _RecordingKernel("bwd", tuned)),
+                )
                 self.get_or_build_kernel(
-                    "entry", torch.bfloat16,
-                    lambda: Entry(_RecordingKernel("record", tuned), torch.float32))
+                    "entry",
+                    (),
+                    key=torch.bfloat16,
+                    build=lambda: Entry(_RecordingKernel("record", tuned), torch.float32),
+                )
 
         op = BundleOp(tuned)
         op.populate()
@@ -308,7 +326,7 @@ class TestIterKernels:
                 return (delegate,)
 
         composite = CompositeOp(tuned)
-        composite.get_or_build_kernel("fwd", torch.float16, lambda: shared)
+        composite.get_or_build_kernel("fwd", (), key=torch.float16, build=lambda: shared)
         assert [k.name for k in composite.iter_kernels()] == ["shared"]
 
 
@@ -358,6 +376,15 @@ class _TunableOp(Op):
     def forward(self, *a, **kw):
         return None
 
+    def _infer_output_shapes(self, *shapes):
+        return {}
+
+    def _validate_dtypes(self, *args):
+        return None
+
+    def eval_roofline(self):
+        return (0, 0)
+
     def build(self, dtype):
         def factory():
             kernel = _RecordingKernel(str(dtype), self._tuned)
@@ -365,7 +392,7 @@ class _TunableOp(Op):
                 kernel.autotune()
             return kernel
 
-        return self.get_or_build_kernel("fwd", dtype, factory)
+        return self.get_or_build_kernel("fwd", (), key=dtype, build=factory)
 
 
 class TestTunedMode:
@@ -374,7 +401,7 @@ class TestTunedMode:
     def test_a_kernel_built_after_autotune_is_tuned(self):
         tuned: list[str] = []
         op = _TunableOp(tuned)
-        op.autotune()          # nothing built yet
+        op.autotune()  # nothing built yet
         assert tuned == []
         op.build(torch.float16)
         assert tuned == ["torch.float16"]
@@ -432,3 +459,63 @@ class TestInstanceKeys:
             gc.collect()
 
         assert len(keys) == 50
+
+    def test_a_key_names_the_class_it_belongs_to(self):
+        """Graph dumps and guard failures show the key, not the instance."""
+
+        class _Dummy:
+            pass
+
+        assert op_base.register_instance(_Dummy()).startswith("_Dummy")
+
+
+def test_no_abstract_op_class_is_instantiated_anywhere():
+    """An abstract Op cannot be constructed, so nothing in the tree may try.
+
+    A class is abstract when it does not answer the manifest-driven contract:
+    ``_infer_output_shapes``, ``_validate_dtypes``, ``eval_roofline``. Those are
+    the family bases and the modular interfaces; a call site naming one is a call
+    site that wanted a concrete op.
+    """
+    import importlib
+    import inspect
+    import pkgutil
+    import re
+    from pathlib import Path
+
+    import tileops.ops as ops_pkg
+
+    abstract = set()
+    for module in pkgutil.walk_packages(ops_pkg.__path__, ops_pkg.__name__ + "."):
+        try:
+            mod = importlib.import_module(module.name)
+        except Exception:  # a family whose kernels need a GPU-only import
+            continue
+        for obj in vars(mod).values():
+            if (
+                inspect.isclass(obj)
+                and issubclass(obj, Op)
+                and getattr(obj, "__abstractmethods__", None)
+            ):
+                abstract.add(obj.__name__)
+    assert abstract, "no abstract Op classes resolved — the scan is not looking at the tree"
+
+    root = Path(__file__).resolve().parents[1]
+    offenders = []
+    for path in (
+        list((root / "src").rglob("*.py"))
+        + list((root / "tests").rglob("*.py"))
+        + list((root / "benchmarks").rglob("*.py"))
+    ):
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            stripped = line.strip()
+            if (
+                stripped.startswith(("class ", "#", "*", '"'))
+                or "import" in stripped
+                or "``" in stripped  # prose naming a class, not a call
+            ):
+                continue
+            for name in abstract:
+                if re.search(rf"(?<![\w.]){name}\(", line):
+                    offenders.append(f"{path.relative_to(root)}:{lineno} {name}")
+    assert offenders == [], offenders

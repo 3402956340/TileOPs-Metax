@@ -8,7 +8,7 @@ import tilelang.language as T
 import torch
 
 from tileops.kernels.kernel_base import Kernel
-from tileops.kernels.online_softmax import LOG2E
+from .online_softmax import LOG2E
 
 from ._config import tile_stage_thread_configs
 

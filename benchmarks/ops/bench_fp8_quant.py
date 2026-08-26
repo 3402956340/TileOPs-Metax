@@ -8,13 +8,14 @@ byte counts come from the op's ``eval_roofline()`` via
 import pytest
 import torch
 
+from benchmarks.baselines import TORCH_COMPILE_TAG, compiled_reference
 from benchmarks.benchmark_base import (
-    BenchmarkReport,
     ManifestBenchmark,
-    workload_field_params,
+    fields,
+    workload_params,
 )
 from tileops.manifest import load_workloads
-from tileops.ops import FP8QuantOp
+from tileops.ops import FP8QuantFwdOp
 from workloads.fp8_quant import FP8QuantWorkload
 
 # Autotuning is a bench-run policy, not a workload property; manifest
@@ -22,39 +23,31 @@ from workloads.fp8_quant import FP8QuantWorkload
 _TUNE = True
 
 
-class FP8QuantTestBaseline(FP8QuantWorkload):
-    """Adds baseline ref_program for benchmark profiling."""
-
-    def ref_program(self, input_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # input_tensor: (batch, seq_len_kv, kv_group, index_dim)
-        amax_value = torch.abs(input_tensor).amax(dim=-1, keepdim=True).clamp(min=1e-4)
-        scale_tensor = amax_value / 448.0
-        output_tensor = torch.clamp(input_tensor / scale_tensor, min=-448.0, max=448.0)
-        output_tensor = output_tensor.to(torch.float8_e4m3fn)
-        return scale_tensor.squeeze(dim=-1), output_tensor
-
-
-_FP8_QUANT_OP = "FP8QuantOp"
-_FP8_QUANT_PARAMS = workload_field_params(
+_FP8_QUANT_OP = "FP8QuantFwdOp"
+_FP8_QUANT_PARAMS = workload_params(
     load_workloads(_FP8_QUANT_OP),
-    ("batch", "seq_len_kv", "kv_group", "index_dim", "in_dtype"),
+    fields("batch", "seq_len_kv", "kv_group", "index_dim", "in_dtype"),
+    smoke_first=True,
 )
 
 
 @pytest.mark.parametrize("batch, seq_len_kv, kv_group, index_dim, in_dtype", _FP8_QUANT_PARAMS)
-def test_fp8_quant_bench(batch: int, seq_len_kv: int, kv_group: int, index_dim: int,
-                         in_dtype: torch.dtype) -> None:
-    test = FP8QuantTestBaseline(batch, seq_len_kv, kv_group, index_dim, in_dtype)
+def test_fp8_quant_bench(
+    batch: int, seq_len_kv: int, kv_group: int, index_dim: int, in_dtype: torch.dtype
+) -> None:
+    test = FP8QuantWorkload(batch, seq_len_kv, kv_group, index_dim, in_dtype)
     inputs = test.gen_inputs()
 
-    op = FP8QuantOp(tune=_TUNE)
+    op = FP8QuantFwdOp(tune=_TUNE)
     bm = ManifestBenchmark(_FP8_QUANT_OP, op, test)
-    result = bm.profile(op, *inputs)
-    BenchmarkReport.record(op, locals(), result, tag="tileops")
 
-    result_bl = bm.profile(test.ref_program, *inputs)
-    BenchmarkReport.record(op, locals(), result_bl, tag="torch-ref")
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])
+    bm.compare(
+        {
+            "tileops": op,
+            "torch-ref": test.ref_program,
+            TORCH_COMPILE_TAG: compiled_reference(test.ref_program),
+        },
+        *inputs,
+        record_as=op,
+        params=locals(),
+    )

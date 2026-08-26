@@ -35,7 +35,7 @@ WhereFwdOp:
     func: "tileops.perf.formulas.where_fwd_roofline"
 
   source:
-    kernel: tileops/kernels/elementwise.py
+    kernel: tileops/kernels/elementwise/where.py
     kernel_map:
       where: WhereFwdKernel
     op: tileops/ops/elementwise/where.py
@@ -53,7 +53,6 @@ LerpTensorFwdOp:
   family: elementwise
   status: implemented
   torch_compile_fullgraph: true
-  variant_of: LerpFwdOp
 
   signature:
     inputs:
@@ -73,7 +72,7 @@ LerpTensorFwdOp:
     func: "tileops.perf.formulas.lerp_tensor_fwd_roofline"
 
   source:
-    kernel: tileops/kernels/elementwise.py
+    kernel: tileops/kernels/elementwise/arithmetic.py
     kernel_map:
       lerp_tensor: LerpTensorFwdKernel
     op: tileops/ops/elementwise/arithmetic.py

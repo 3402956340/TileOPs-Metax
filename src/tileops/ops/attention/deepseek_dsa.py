@@ -20,40 +20,45 @@ class DeepSeekSparseAttentionDecodeWithKVCacheFwdOp(Op):
 
     The layout of the operation is BSHD.
 
-    Args:
-        batch (int): The batch size.
-        heads (int): The number of attention heads.
-        seq_len (int): The length of the input sequence.
-        seq_len_kv (int): The length of the key-value sequence.
-        dim (int): The dimension of the attention vectors.
-        dim_tail (int): The dimension of the tail portion of the attention vectors.
-        topk (int): The number of top elements to consider in sparse attention.
-        stride_kv (int): The stride for the key-value sequence.
-        heads_kv (int): The number of key-value heads.
-        q_start_index_s (int): The start index for queries in the sequence.
-        sm_scale (Optional[float], default=None): Scaling factor for the softmax function.
-        is_causal (bool, default=True): Whether the attention is causal
-                    (True for causal, False for non-causal).
-        kernel_map (Optional[Dict[str, Kernel]], default=None):
-                    Optional mapping for custom kernels.
-        tune (bool, default=False): Whether to enable kernel tuning.
     """
 
-    def __init__(self,
-                 batch: int,
-                 heads: int,
-                 seq_len: int,
-                 seq_len_kv: int,
-                 dim: int,
-                 dim_tail: int,
-                 topk: int,
-                 stride_kv: int,
-                 heads_kv: int,
-                 q_start_index_s: int,
-                 sm_scale: Optional[float] = None,
-                 is_causal: bool = True,
-                 kernel_map: Optional[Dict[str, Kernel]] = None,
-                 tune: bool = False) -> None:
+    def __init__(
+        self,
+        batch: int,
+        heads: int,
+        seq_len: int,
+        seq_len_kv: int,
+        dim: int,
+        dim_tail: int,
+        topk: int,
+        stride_kv: int,
+        heads_kv: int,
+        q_start_index_s: int,
+        sm_scale: Optional[float] = None,
+        is_causal: bool = True,
+        kernel_map: Optional[Dict[str, Kernel]] = None,
+        tune: bool = False,
+    ) -> None:
+        """Build the op. Shapes and dtype are taken from the first call.
+
+        Args:
+            batch (int): The batch size.
+            heads (int): The number of attention heads.
+            seq_len (int): The length of the input sequence.
+            seq_len_kv (int): The length of the key-value sequence.
+            dim (int): The dimension of the attention vectors.
+            dim_tail (int): The dimension of the tail portion of the attention vectors.
+            topk (int): The number of top elements to consider in sparse attention.
+            stride_kv (int): The stride for the key-value sequence.
+            heads_kv (int): The number of key-value heads.
+            q_start_index_s (int): The start index for queries in the sequence.
+            sm_scale (Optional[float], default=None): Scaling factor for the softmax function.
+            is_causal (bool, default=True): Whether the attention is causal
+                        (True for causal, False for non-causal).
+            kernel_map (Optional[Dict[str, Kernel]], default=None):
+                        Optional mapping for custom kernels.
+            tune (bool, default=False): Whether to enable kernel tuning.
+        """
         self.batch = batch
         self.heads = heads
         self.seq_len = seq_len
@@ -67,11 +72,13 @@ class DeepSeekSparseAttentionDecodeWithKVCacheFwdOp(Op):
         self.is_causal = is_causal
 
         if q_start_index_s != 0 and q_start_index_s <= stride_kv:
-            raise ValueError(f"Invalid q_start_index_s={q_start_index_s}:"
-                             f"must be > stride_kv={stride_kv}. "
-                             "This indicates incorrect cp0 masking."
-                             "Ensure queries with pos < stride_kv are masked "
-                             "to avoid NaNs in early outputs.")
+            raise ValueError(
+                f"Invalid q_start_index_s={q_start_index_s}:"
+                f"must be > stride_kv={stride_kv}. "
+                "This indicates incorrect cp0 masking."
+                "Ensure queries with pos < stride_kv are masked "
+                "to avoid NaNs in early outputs."
+            )
 
         cp0 = q_start_index_s == 0
         self.q_start_index_s = q_start_index_s
@@ -80,11 +87,12 @@ class DeepSeekSparseAttentionDecodeWithKVCacheFwdOp(Op):
         self.tune = tune
         self.dispatch_kernel(kernel_map)
 
-    def _get_kernel(self, dtype: torch.dtype) -> Kernel:
+    def _get_kernel(self, inputs: "tuple[torch.Tensor | None, ...]", dtype: torch.dtype) -> Kernel:
         return self.get_or_build_kernel(
             "sparse_mla_kernel",
-            dtype,
-            lambda: self.kernel_map["sparse_mla_kernel"](
+            inputs,
+            key=dtype,
+            build=lambda: self.kernel_map["sparse_mla_kernel"](
                 self.batch,
                 self.seq_len,
                 self.seq_len_kv,
@@ -99,7 +107,8 @@ class DeepSeekSparseAttentionDecodeWithKVCacheFwdOp(Op):
                 self.sm_scale,
                 self.is_causal,
                 self._cp0,
-                tune=self.tune),
+                tune=self.tune,
+            ),
         )
 
     @property
@@ -124,6 +133,15 @@ class DeepSeekSparseAttentionDecodeWithKVCacheFwdOp(Op):
 
         return {"sparse_mla_kernel": kernel_cls}
 
+    def _infer_output_shapes(
+        self,
+        q_shape: tuple[int, ...],
+        kv_shape: tuple[int, ...],
+        indices_shape: tuple[int, ...],
+    ) -> dict[str, tuple[int, ...]]:
+        """Manifest ``shape_rules``: ``o`` drops the tail dims ``q`` carries."""
+        return {"o": tuple(q_shape[:-1]) + (q_shape[-1] - self.dim_tail,)}
+
     def forward(self, q: torch.Tensor, kv: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
         """
         Performs the forward pass of the sparse attention operation.
@@ -141,4 +159,4 @@ class DeepSeekSparseAttentionDecodeWithKVCacheFwdOp(Op):
         """
         self._validate_dtypes(q, kv, indices)
         self.dtype = q.dtype
-        return self._get_kernel(q.dtype)(q, kv, indices)
+        return self._get_kernel((q, kv, indices), q.dtype)(q, kv, indices)

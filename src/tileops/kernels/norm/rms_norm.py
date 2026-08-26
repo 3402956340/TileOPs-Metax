@@ -16,25 +16,19 @@ import torch
 import torch.nn.functional as F
 
 from tileops.kernels.kernel_base import Kernel
+from tileops.kernels.tiling import ALIGNMENT, align_up
 
 from ._config import select_row_config, select_row_configs
 
 __all__ = ["RMSNormKernel"]
 
-ALIGNMENT = 256
-
-
-def _align_up(n: int, alignment: int) -> int:
-    return ((n + alignment - 1) // alignment) * alignment
-
 
 @functools.lru_cache(maxsize=32)
 def _rms_norm_kernel(M, N, eps, dtype):
-    N_padded = _align_up(N, ALIGNMENT)
+    N_padded = align_up(N, ALIGNMENT)
 
     @tilelang.jit(out_idx=[2])
     def _func(block_m, threads):
-
         @T.prim_func
         def main(
             x: T.Tensor[(M, N_padded), dtype],
@@ -54,8 +48,8 @@ def _rms_norm_kernel(M, N, eps, dtype):
 
                 # Compute x^2 in fp32
                 for i, j in T.Parallel(block_m, N_padded):
-                    xsq_f32[i, j] = (
-                        T.cast(x_local[i, j], "float32") * T.cast(x_local[i, j], "float32")
+                    xsq_f32[i, j] = T.cast(x_local[i, j], "float32") * T.cast(
+                        x_local[i, j], "float32"
                     )
 
                 # Sum of squares along hidden dim
@@ -80,26 +74,6 @@ def _rms_norm_kernel(M, N, eps, dtype):
     return _func
 
 
-@torch.library.custom_op("top::rms_norm_fwd", mutates_args=())
-def _rms_norm_wrapped(
-    M: int,
-    N: int,
-    eps: float,
-    dtype_str: str,
-    block_m: int,
-    threads: int,
-    x: torch.Tensor,
-    weight: torch.Tensor,
-) -> torch.Tensor:
-    return _rms_norm_kernel(M, N, eps, dtype_str)(block_m, threads)(x, weight)
-
-
-@_rms_norm_wrapped.register_fake
-def _(M, N, eps, dtype_str, block_m, threads, x, weight):
-    N_padded = _align_up(N, ALIGNMENT)
-    return torch.empty((M, N_padded), dtype=x.dtype, device=x.device)
-
-
 class RMSNormKernel(Kernel):
     """RMS Norm kernel.
 
@@ -112,21 +86,24 @@ class RMSNormKernel(Kernel):
 
     def __init__(
         self,
-        M: int,
         N: int,
         eps: float,
         dtype: torch.dtype,
         config: Optional[dict] = None,
         tune: bool = False,
     ):
+        """Build for a hidden size and dtype.
+
+        The program for a given row count is resolved in ``forward``, memoized by
+        ``_rms_norm_kernel``.
+        """
         super().__init__()
-        self.M = M
         self.N = N
         self.eps = eps
         self.dtype = dtype
-        self.N_padded = _align_up(N, ALIGNMENT)
-        self.kernel = _rms_norm_kernel(self.M, self.N, self.eps, self.dtype_str)
-        self.init_config(config, tune)
+        self.N_padded = align_up(N, ALIGNMENT)
+        self._tune_pending = tune  # tuning needs a program, so it waits for the first call
+        self.init_config(config, tune=False)
 
     @property
     def default_config(self) -> dict:
@@ -137,29 +114,43 @@ class RMSNormKernel(Kernel):
         return select_row_configs(self.N_padded, self.dtype)
 
     def forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        """Normalize ``x`` row-wise.
+        """Normalize ``x`` over its trailing ``N`` elements.
+
+        Flattening to 2-D rows and a flat weight happens here, as does the alignment
+        padding the prim_func requires.
 
         Args:
-            x: Input of shape ``(M, N)``.
-            weight: Affine scale of shape ``(N,)``.
+            x: Input whose trailing axes multiply to ``N``, contiguous, on a CUDA device.
+            weight: Affine scale holding ``N`` elements, contiguous, on the same device.
 
         Returns:
-            Tensor of shape ``(M, N)``. The alignment padding the prim_func
-            requires is applied and trimmed here, so callers only ever see
-            the semantic ``N``-wide result.
+            Tensor shaped like *x*.
+
+        Raises:
+            ValueError: Either input is not on a CUDA device.
         """
+        if not (x.is_cuda and weight.is_cuda):
+            raise ValueError(
+                f"{type(self).__name__} is a CUDA kernel; got x on {x.device} and weight on "
+                f"{weight.device}. Another target's backend serves other devices."
+            )
+
+        original_shape = x.shape
+        rows = x.reshape(-1, self.N)
+        weight = weight.reshape(self.N)
+        m = rows.shape[0]
+
+        # Exposed as ``self.kernel`` because that is what autotune and profiling read.
+        self.kernel = _rms_norm_kernel(m, self.N, self.eps, self.dtype_str)
+        if self._tune_pending:
+            self._tune_pending = False
+            self.autotune()
+
         pad = self.N_padded - self.N
         if pad:
-            x = F.pad(x, (0, pad))
+            rows = F.pad(rows, (0, pad))
             weight = F.pad(weight, (0, pad))
-        y = _rms_norm_wrapped(
-            self.M,
-            self.N,
-            self.eps,
-            self.dtype_str,
-            self.config["block_m"],
-            self.config["threads"],
-            x,
-            weight,
-        )
-        return y[:, : self.N] if pad else y
+        y = self.kernel(self.config["block_m"], self.config["threads"])(rows, weight)
+        if pad:
+            y = y[:, : self.N]
+        return y.reshape(original_shape)

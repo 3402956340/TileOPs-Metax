@@ -4,9 +4,44 @@ from typing import Any, Callable, Dict, Optional, Union
 import torch
 from tilelang.autotuner import autotune
 
+__all__ = ["Kernel"]
+
 #: Sentinel for ``tune_jit_kernel(supply_prog=...)``: inherit the whole-kernel
 #: supplier. Distinct from ``None``, which means "no supplier".
 _INHERIT_SUPPLY_PROG = object()
+
+
+def _int_tensor_input_names(jit_kernel: Any, seeds: Dict[str, Any]) -> list[str]:
+    """Integer tensor parameters *jit_kernel* takes as inputs, outputs excluded.
+
+    Raises:
+        ValueError: When the parameters cannot be read, which the caller treats
+            as unproven rather than safe.
+    """
+    get_tir = getattr(jit_kernel, "get_tir", None)
+    if not callable(get_tir):
+        raise ValueError(
+            f"{jit_kernel!r} does not expose get_tir, so its parameters cannot be read"
+        )
+    try:
+        prim_func = get_tir(**seeds)
+    except Exception as exc:
+        raise ValueError(f"the parameters of {jit_kernel!r} cannot be read: {exc}") from exc
+
+    out_idx = getattr(jit_kernel, "out_idx", None) or []
+    if isinstance(out_idx, int):
+        out_idx = [out_idx]
+    count = len(prim_func.params)
+    outputs = {i + count if i < 0 else i for i in out_idx}
+
+    names = []
+    for i, param in enumerate(prim_func.params):
+        if i in outputs:
+            continue
+        buffer = prim_func.buffer_map.get(param)
+        if buffer is not None and "int" in str(buffer.dtype):
+            names.append(str(param.name))
+    return names
 
 
 class Kernel(ABC):
@@ -21,9 +56,16 @@ class Kernel(ABC):
         "num_per_thread_arg": "num_per_thread",
     }
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, device_index: "int | None" = None, **kwargs) -> None:
+        self.device_index = device_index
         self._check_arch()
         self.config = {}
+
+    #: Set True when this kernel's integer tensor inputs are data or masks, so
+    #: autotuning may generate them from ``randint(-2, 3)``. A kernel whose
+    #: integer values decide how much work runs overrides
+    #: ``autotune_supply_prog`` instead; left False, autotuning refuses.
+    autotune_accepts_random_int_inputs: bool = False
 
     #: Whether this implementation is the one behind the specialised ones.
     #: A dispatch key may have at most one general implementation applying to a
@@ -69,32 +111,52 @@ class Kernel(ABC):
             return "does not serve this call"
         return None
 
-    @classmethod
-    def _check_arch(cls) -> None:
+    def _check_arch(self) -> None:
         """Reject construction on a device this kernel is not built for.
 
-        The device is probed only by a class that constrains the architecture,
-        and only here — kernel construction is deferred to the first forward,
-        so a device is present by the time this runs. The op layer performs no
-        architecture check of its own; a role served by several kernels filters
-        candidates during selection instead.
+        Read from ``device_index``, the device the op handed over — not from whichever
+        device happens to be current, which need not be the one the input lives on. The op
+        layer performs no architecture check of its own; a role served by several kernels
+        filters candidates during selection instead.
+
+        ``device_index`` is ``None`` for a kernel whose op does not pass one yet, and the
+        current device answers instead. That is the pre-migration behaviour, kept so a
+        family that has not moved yet is unaffected; a migrated kernel states the device.
 
         Raises:
-            ValueError: When the current device architecture is not among
-                ``supported_archs``. Selection raises the same class when no
-                candidate for a dispatch key can serve a call, so a caller
-                catches one exception type whether the key has one
-                implementation or several.
+            ValueError: The device's architecture is not among ``supported_archs``.
+                Selection raises the same class when no candidate for a dispatch key can
+                serve a call, so a caller catches one exception type whether the key has
+                one implementation or several.
         """
+        cls = type(self)
         if cls.supported_archs is None:
             return
         from tileops.utils import get_sm_version
-        arch = get_sm_version()
+
+        arch = get_sm_version(self.device_index)
         if arch not in cls.supported_archs:
+            where = (
+                "the current device" if self.device_index is None else f"cuda:{self.device_index}"
+            )
             raise ValueError(
                 f"{cls.__name__} is built for architectures "
-                f"{sorted(cls.supported_archs)}, but the current device reports "
-                f"{arch}")
+                f"{sorted(cls.supported_archs)}, but {where} reports {arch}"
+            )
+
+    def _require_cuda(self, **tensors: Optional[torch.Tensor]) -> None:
+        """Raise unless every named tensor is on a CUDA device.
+
+        The op layer checks that a call's tensors agree on a device; which devices a set of
+        kernels runs on is the kernel's own statement. An ``optional: true`` input the call
+        did not pass arrives as ``None`` and is skipped.
+        """
+        for name, tensor in tensors.items():
+            if tensor is not None and not tensor.is_cuda:
+                raise ValueError(
+                    f"{type(self).__name__} is a CUDA kernel; got {name} on {tensor.device}. "
+                    "Another target's backend serves other devices."
+                )
 
     def init_config(self, config: Optional[Dict[str, Any]] = None, tune: bool = False) -> None:
         if tune and self.autotune_configs is None:
@@ -102,15 +164,18 @@ class Kernel(ABC):
 
             warnings.warn(  # noqa: B028
                 f"{self.__class__.__name__} does not define autotune_configs; "
-                "falling back to the provided config or default_config.")
+                "falling back to the provided config or default_config."
+            )
             tune = False
 
         if tune:
             if config is not None:
                 import warnings
+
                 warnings.warn(  # noqa: B028
                     "Both 'config' and 'tune' are set. "
-                    "'config' will be ignored in favor of autotuning.")
+                    "'config' will be ignored in favor of autotuning."
+                )
             self.autotune()
         else:
             if config is not None:
@@ -129,7 +194,7 @@ class Kernel(ABC):
     @staticmethod
     def dtype_to_str(dtype: torch.dtype) -> str:
         """Convert a torch dtype to the TileLang dtype string."""
-        return str(dtype).split('.')[-1]
+        return str(dtype).split(".")[-1]
 
     @property
     def default_config(self) -> Dict[str, Any]:
@@ -211,8 +276,26 @@ class Kernel(ABC):
         kernel: Optional[Callable] = None,
         config: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        return autotuned_kernel_fn(
-            **self._autotune_initial_kwargs(kernel=kernel, config=config)
+        return autotuned_kernel_fn(**self._autotune_initial_kwargs(kernel=kernel, config=config))
+
+    def _refuse_random_int_inputs(self, jit_kernel: Callable, seeds: Dict[str, Any]) -> None:
+        """Refuse to tune *jit_kernel* on integer inputs TileLang would randomise.
+
+        Raises:
+            ValueError: When the kernel takes integer tensor inputs, supplies
+                none of them, and has not declared random values safe.
+        """
+        if self.autotune_accepts_random_int_inputs:
+            return
+        names = _int_tensor_input_names(jit_kernel, seeds)
+        if not names:
+            return
+        raise ValueError(
+            f"{type(self).__name__} autotunes with integer tensor inputs "
+            f"{', '.join(names)} and no supply_prog, so TileLang would generate them "
+            f"from randint(-2, 3). Override autotune_supply_prog to build them, or set "
+            f"autotune_accepts_random_int_inputs = True where random values cannot "
+            f"change what the candidates measure."
         )
 
     def tune_jit_kernel(
@@ -258,6 +341,8 @@ class Kernel(ABC):
             supply_prog = self.autotune_supply_prog
         if supply_prog is not None:
             autotune_kwargs["supply_prog"] = supply_prog
+        else:
+            self._refuse_random_int_inputs(jit_kernel, seeds)
         autotuned_kernel_fn = autotune(**autotune_kwargs)(jit_kernel)
 
         return self._call_autotuned_kernel(autotuned_kernel_fn, jit_kernel, seed_config)
@@ -265,14 +350,16 @@ class Kernel(ABC):
     def autotune(self, warmup: int = 25, rep: int = 50) -> None:
         if self.autotune_configs is None:
             return  # kernel doesn't support autotuning
-        if not hasattr(self, 'kernel') or self.kernel is None:
+        if not hasattr(self, "kernel") or self.kernel is None:
             raise AttributeError(
                 f"Cannot autotune {self.__class__.__name__}: 'self.kernel' is not set. "
-                "Set 'self.kernel' in __init__ before calling init_config with tune=True.")
-        print(f'Start autotuning {self.__class__.__name__}...')
+                "Set 'self.kernel' in __init__ before calling init_config with tune=True."
+            )
+        print(f"Start autotuning {self.__class__.__name__}...")
 
         tuned_kernel = self.tune_jit_kernel(
-            self.kernel, self.autotune_configs, warmup=warmup, rep=rep)
+            self.kernel, self.autotune_configs, warmup=warmup, rep=rep
+        )
 
         self.config = tuned_kernel.config
-        print(f'Best config: {self.config}')
+        print(f"Best config: {self.config}")

@@ -1,63 +1,21 @@
-
-
 import pytest
 import torch
 
 from tests.test_base import FixtureBase, TestBase
-from tileops.kernels.deltanet_call import DeltaNetDecodeCall
-from tileops.kernels.gated_deltanet_recurrence import GatedDeltaNetDecodeRawCudaFlaStyleKernel
-from tileops.ops import GatedDeltaNetDecodeOp
-from tileops.ops.gated_deltanet import GATED_DELTANET_DECODE_KEYS
+from tileops.kernels.linear_attention.deltanet_call import DeltaNetDecodeCall
+from tileops.kernels.linear_attention.gated_deltanet_recurrence import (
+    GatedDeltaNetDecodeRawCudaFlaStyleKernel,
+)
+from tileops.ops import GatedDeltaNetDecodeFwdOp
+from tileops.ops.linear_attention.gated_deltanet import GATED_DELTANET_DECODE_KEYS
 from workloads.linear_attention import (
     GatedDeltaNetDecodeWorkload,
+    gated_deltanet_decode_torch,
 )
 
 
-def gated_deltanet_decode_torch(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,
-    beta: torch.Tensor,
-    state: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Pure-PyTorch reference for single-step gated delta rule."""
-    q, k, v = q.float(), k.float(), v.float()
-    g, beta = g.float(), beta.float()
-    state = state.float()
-
-    alpha = torch.exp(g)
-    old_val = torch.einsum("bhkv,bhk->bhv", state, k)
-
-    beta_unsq = beta.unsqueeze(-1)
-    alpha_unsq = alpha.unsqueeze(-1)
-    v_new = beta_unsq * v - alpha_unsq * beta_unsq * old_val
-
-    o_inter = alpha_unsq * torch.einsum("bhkv,bhk->bhv", state, q)
-    qk_dot = torch.einsum("bhk,bhk->bh", q, k).unsqueeze(-1)
-    o_intra = qk_dot * v_new
-    o = o_inter + o_intra
-
-    new_state = alpha_unsq.unsqueeze(-1) * state + k.unsqueeze(-1) * v_new.unsqueeze(-2)
-
-    return o, new_state
-
-
 class GatedDeltaNetDecodeTest(GatedDeltaNetDecodeWorkload, TestBase):
-    def ref_program(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        g: torch.Tensor,
-        beta: torch.Tensor,
-        state: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        o, new_state = gated_deltanet_decode_torch(q, k, v, g, beta, state)
-        return o.to(self.dtype), new_state.to(self.dtype)
-
-
-# Torch reference implementation (test-only)
+    pass
 
 
 # Correctness tests
@@ -76,16 +34,19 @@ def _get_tolerances(dtype: torch.dtype) -> dict:
 
 class GatedDeltaNetDecodeFixture(FixtureBase):
     PARAMS = [
-        ("batch, heads, dim_k, dim_v, dtype, tune", [
-            pytest.param(1, 4, 64, 64, torch.float32, False, marks=pytest.mark.smoke),
-            pytest.param(1, 4, 64, 64, torch.float16, False, marks=pytest.mark.smoke),
-            pytest.param(1, 4, 64, 64, torch.bfloat16, False, marks=pytest.mark.smoke),
-            pytest.param(2, 8, 64, 64, torch.float32, False, marks=pytest.mark.full),
-            pytest.param(2, 4, 128, 128, torch.float32, False, marks=pytest.mark.full),
-            pytest.param(2, 8, 64, 64, torch.float16, False, marks=pytest.mark.full),
-            pytest.param(2, 8, 64, 64, torch.bfloat16, False, marks=pytest.mark.full),
-            pytest.param(1, 32, 128, 128, torch.bfloat16, False, marks=pytest.mark.full),
-        ]),
+        (
+            "batch, heads, dim_k, dim_v, dtype, tune",
+            [
+                pytest.param(1, 4, 64, 64, torch.float32, False, marks=pytest.mark.smoke),
+                pytest.param(1, 4, 64, 64, torch.float16, False, marks=pytest.mark.smoke),
+                pytest.param(1, 4, 64, 64, torch.bfloat16, False, marks=pytest.mark.smoke),
+                pytest.param(2, 8, 64, 64, torch.float32, False, marks=pytest.mark.full),
+                pytest.param(2, 4, 128, 128, torch.float32, False, marks=pytest.mark.full),
+                pytest.param(2, 8, 64, 64, torch.float16, False, marks=pytest.mark.full),
+                pytest.param(2, 8, 64, 64, torch.bfloat16, False, marks=pytest.mark.full),
+                pytest.param(1, 32, 128, 128, torch.bfloat16, False, marks=pytest.mark.full),
+            ],
+        ),
     ]
 
 
@@ -100,7 +61,7 @@ def test_gated_deltanet_decode(
 ) -> None:
     torch.manual_seed(42)
     test = GatedDeltaNetDecodeTest(batch, heads, dim_k, dim_v, dtype)
-    op = GatedDeltaNetDecodeOp(tune=tune)
+    op = GatedDeltaNetDecodeFwdOp(tune=tune)
     tols = _get_tolerances(dtype)
     test.check(op, *test.gen_inputs(), **tols)
 
@@ -119,7 +80,7 @@ def test_gated_deltanet_decode_multi_step(
     num_steps = 8
     B, H, DK, DV = batch, heads, dim_k, dim_v
 
-    op = GatedDeltaNetDecodeOp(tune=tune)
+    op = GatedDeltaNetDecodeFwdOp(tune=tune)
     tols = _get_tolerances(dtype)
 
     state_op = torch.zeros(B, H, DK, DV, device="cuda", dtype=dtype)
@@ -187,9 +148,10 @@ def test_gated_deltanet_decode_raw_cuda_dispatch_rejects_unsupported_sm100() -> 
     than run on any of them — and the refusal names the raw kernel as one that
     declined for its architecture, which is what this pins.
     """
-    op = GatedDeltaNetDecodeOp()
-    call = DeltaNetDecodeCall(arch=100, batch=1, heads=4, dim_k=128, dim_v=128,
-                              dtype=torch.bfloat16)
+    op = GatedDeltaNetDecodeFwdOp()
+    call = DeltaNetDecodeCall(
+        arch=100, batch=1, heads=4, dim_k=128, dim_v=128, dtype=torch.bfloat16
+    )
 
     with pytest.raises(ValueError, match="no implementation serves this call") as excinfo:
         op.select_kernel_key(GATED_DELTANET_DECODE_KEYS, call)
@@ -202,7 +164,7 @@ def test_gated_deltanet_decode_raw_cuda_dispatch_rejects_unsupported_sm100() -> 
 
 @pytest.mark.smoke
 def test_gated_deltanet_decode_rejects_manifest_shape_mismatch() -> None:
-    op = object.__new__(GatedDeltaNetDecodeOp)
+    op = object.__new__(GatedDeltaNetDecodeFwdOp)
     op.batch = 2
     op.heads = 3
     op.dim_k = 4
@@ -218,7 +180,3 @@ def test_gated_deltanet_decode_rejects_manifest_shape_mismatch() -> None:
 
     with pytest.raises(ValueError, match="g must have shape"):
         op.forward(q, k, v, g, beta, state)
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])

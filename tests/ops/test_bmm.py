@@ -2,94 +2,140 @@ import pytest
 import torch
 
 from tests.test_base import FixtureBase, TestBase
-from tileops.ops import BmmFp8Op, BmmFwdOp
+from tileops.ops import BmmFp8KNFwdOp, BmmFp8NKFwdOp, BmmFwdOp
 from tileops.utils import is_maca
 from workloads.bmm import BmmFp8Workload, BmmWorkload
 
 # Covering the [B,K,N] path is the point of these tests, so the perf hint
-# BmmFp8Op emits for it is expected output, not a signal.
-pytestmark = pytest.mark.filterwarnings("ignore:BmmFp8Op")
+# BmmFp8KNFwdOp emits for it is expected output, not a signal.
+pytestmark = pytest.mark.filterwarnings("ignore:BmmFp8KNFwdOp")
 
 
 class BmmTest(BmmWorkload, TestBase):
-    def ref_program(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        return torch.bmm(a, b)
+    pass
 
 
 class BmmFp8Test(BmmFp8Workload, TestBase):
-    def ref_program(self, *inputs: torch.Tensor) -> torch.Tensor:
-        a, b, scale_a, scale_b = inputs
-        # per_tensor: 0-D fp32 scalars (matching flashinfer.bmm_fp8).
-        assert scale_a.dim() == 0 and scale_b.dim() == 0, (
-            f"BmmFp8Test only supports per-tensor scales, got "
-            f"{tuple(scale_a.shape)} / {tuple(scale_b.shape)}"
-        )
-        # b is [B, K, N] (torch.bmm layout, matching BmmFp8Op).
-        a_f = a.float() * scale_a
-        b_f = b.float() * scale_b
-        out = torch.bmm(a_f, b_f)
-        return out.to(self.out_dtype)
+    pass
 
 
 class BmmFixture(FixtureBase):
     PARAMS = [
-        ("batch, m, n, k, dtype, tune", [
-            pytest.param(
-                4, 128, 128, 128, torch.float16, False,
-                marks=[pytest.mark.smoke, pytest.mark.packaging],
-                id="smoke-fp16-b4-128",
-            ),
-            pytest.param(
-                4, 128, 128, 128, torch.bfloat16, False,
-                marks=pytest.mark.smoke,
-                id="smoke-bf16-b4-128",
-            ),
-            pytest.param(
-                8, 512, 512, 512, torch.float16, False,
-                marks=pytest.mark.full,
-                id="full-fp16-b8-512",
-            ),
-            pytest.param(
-                8, 512, 512, 512, torch.bfloat16, False,
-                marks=pytest.mark.full,
-                id="full-bf16-b8-512",
-            ),
-            pytest.param(
-                16, 256, 256, 256, torch.float16, False,
-                marks=pytest.mark.full,
-                id="full-fp16-b16-256",
-            ),
-            pytest.param(
-                1, 1024, 1024, 1024, torch.float16, False,
-                marks=pytest.mark.full,
-                id="full-fp16-b1-1k",
-            ),
-            pytest.param(
-                32, 128, 512, 128, torch.float16, False,
-                marks=pytest.mark.full,
-                id="full-fp16-b32-mha-qk",
-            ),
-            pytest.param(
-                8, 128, 128, 2048, torch.float16, False,
-                marks=pytest.mark.full,
-                id="full-fp16-b8-mha-pv",
-            ),
-            pytest.param(
-                8, 128, 128, 2048, torch.bfloat16, False,
-                marks=pytest.mark.full,
-                id="full-bf16-b8-mha-pv",
-            ),
-            pytest.param(
-                32, 256, 256, 1024, torch.bfloat16, False,
-                marks=pytest.mark.full,
-                id="full-bf16-b32-moe",
-            ),
-            pytest.param(
-                4, 200, 300, 128, torch.float16, False,
-                marks=pytest.mark.full,
-                id="full-fp16-b4-mn-nonaligned",
-            ),
-        ]),
+        (
+            "batch, m, n, k, dtype, tune",
+            [
+                pytest.param(
+                    4,
+                    128,
+                    128,
+                    128,
+                    torch.float16,
+                    False,
+                    marks=[pytest.mark.smoke, pytest.mark.packaging],
+                    id="smoke-fp16-b4-128",
+                ),
+                pytest.param(
+                    4,
+                    128,
+                    128,
+                    128,
+                    torch.bfloat16,
+                    False,
+                    marks=pytest.mark.smoke,
+                    id="smoke-bf16-b4-128",
+                ),
+                pytest.param(
+                    8,
+                    512,
+                    512,
+                    512,
+                    torch.float16,
+                    False,
+                    marks=pytest.mark.full,
+                    id="full-fp16-b8-512",
+                ),
+                pytest.param(
+                    8,
+                    512,
+                    512,
+                    512,
+                    torch.bfloat16,
+                    False,
+                    marks=pytest.mark.full,
+                    id="full-bf16-b8-512",
+                ),
+                pytest.param(
+                    16,
+                    256,
+                    256,
+                    256,
+                    torch.float16,
+                    False,
+                    marks=pytest.mark.full,
+                    id="full-fp16-b16-256",
+                ),
+                pytest.param(
+                    1,
+                    1024,
+                    1024,
+                    1024,
+                    torch.float16,
+                    False,
+                    marks=pytest.mark.full,
+                    id="full-fp16-b1-1k",
+                ),
+                pytest.param(
+                    32,
+                    128,
+                    512,
+                    128,
+                    torch.float16,
+                    False,
+                    marks=pytest.mark.full,
+                    id="full-fp16-b32-mha-qk",
+                ),
+                pytest.param(
+                    8,
+                    128,
+                    128,
+                    2048,
+                    torch.float16,
+                    False,
+                    marks=pytest.mark.full,
+                    id="full-fp16-b8-mha-pv",
+                ),
+                pytest.param(
+                    8,
+                    128,
+                    128,
+                    2048,
+                    torch.bfloat16,
+                    False,
+                    marks=pytest.mark.full,
+                    id="full-bf16-b8-mha-pv",
+                ),
+                pytest.param(
+                    32,
+                    256,
+                    256,
+                    1024,
+                    torch.bfloat16,
+                    False,
+                    marks=pytest.mark.full,
+                    id="full-bf16-b32-moe",
+                ),
+                pytest.param(
+                    4,
+                    200,
+                    300,
+                    128,
+                    torch.float16,
+                    False,
+                    marks=pytest.mark.full,
+                    id="full-fp16-b4-mn-nonaligned",
+                ),
+            ],
+        ),
     ]
 
 
@@ -163,26 +209,41 @@ def test_bmm_k_not_multiple_of_16_raises() -> None:
 
 class BmmFp8Fixture(FixtureBase):
     PARAMS = [
-        ("batch, m, n, k, dtype, out_dtype", [
-            pytest.param(
-                4, 128, 128, 128, torch.float8_e4m3fn,
-                torch.bfloat16,
-                marks=pytest.mark.smoke,
-                id="smoke-fp8-b4-per-tensor",
-            ),
-            pytest.param(
-                8, 128, 256, 128, torch.float8_e4m3fn,
-                torch.float16,
-                marks=pytest.mark.full,
-                id="full-fp8-b8-per-tensor",
-            ),
-            pytest.param(
-                16, 128, 128, 2048, torch.float8_e4m3fn,
-                torch.bfloat16,
-                marks=pytest.mark.full,
-                id="full-fp8-b16-mha-pv-per-tensor",
-            ),
-        ]),
+        (
+            "batch, m, n, k, dtype, out_dtype",
+            [
+                pytest.param(
+                    4,
+                    128,
+                    128,
+                    128,
+                    torch.float8_e4m3fn,
+                    torch.bfloat16,
+                    marks=pytest.mark.smoke,
+                    id="smoke-fp8-b4-per-tensor",
+                ),
+                pytest.param(
+                    8,
+                    128,
+                    256,
+                    128,
+                    torch.float8_e4m3fn,
+                    torch.float16,
+                    marks=pytest.mark.full,
+                    id="full-fp8-b8-per-tensor",
+                ),
+                pytest.param(
+                    16,
+                    128,
+                    128,
+                    2048,
+                    torch.float8_e4m3fn,
+                    torch.bfloat16,
+                    marks=pytest.mark.full,
+                    id="full-fp8-b16-mha-pv-per-tensor",
+                ),
+            ],
+        ),
     ]
 
 
@@ -196,7 +257,7 @@ def test_bmm_fp8(
     out_dtype: torch.dtype,
 ) -> None:
     test = BmmFp8Test(batch, m, n, k, dtype, out_dtype=out_dtype)
-    op = BmmFp8Op(out_dtype=out_dtype)
+    op = BmmFp8KNFwdOp(out_dtype=out_dtype)
     inputs = test.gen_inputs()
     atol = 3e-2
     rtol = 3e-2
@@ -211,14 +272,14 @@ def test_bmm_fp8(
 
 @pytest.mark.smoke
 def test_bmm_fp8_rejects_e5m2() -> None:
-    """BmmFp8Op advertises fp8_e4m3fn only; e5m2 inputs must be rejected.
+    """BmmFp8KNFwdOp advertises fp8_e4m3fn only; e5m2 inputs must be rejected.
 
     Kept separate from the main fixture so that ``test_bmm_fp8`` carries a
     single purpose (correctness on supported dtypes) and this test carries
     the other (dtype-guard on unsupported dtypes).
     """
     test = BmmFp8Test(4, 128, 128, 128, torch.float8_e5m2)
-    op = BmmFp8Op(out_dtype=torch.bfloat16)
+    op = BmmFp8KNFwdOp(out_dtype=torch.bfloat16)
     with pytest.raises(ValueError, match="only supports torch.float8_e4m3fn"):
         op(*test.gen_inputs())
 
@@ -229,7 +290,7 @@ def test_bmm_fp8_rejects_unsupported_scale_grids() -> None:
     batch, m, n, k = 2, 128, 256, 256
     test = BmmFp8Test(batch, m, n, k, torch.float8_e4m3fn)
     a, b, _, _ = test.gen_inputs()
-    op = BmmFp8Op()
+    op = BmmFp8KNFwdOp()
 
     scale_k = k // 128
     # Legacy 2-D per-row block128 grid -- rejected now that per_tensor is
@@ -273,7 +334,7 @@ def test_bmm_fp8_revalidates_cached_signature_dtypes() -> None:
         out_dtype=torch.bfloat16,
     )
     a, b, scale_a, scale_b = test.gen_inputs()
-    op = BmmFp8Op(out_dtype=torch.bfloat16)
+    op = BmmFp8KNFwdOp(out_dtype=torch.bfloat16)
     op(a, b, scale_a, scale_b)
 
     with pytest.raises(ValueError, match="expects b dtype"):
@@ -285,7 +346,7 @@ def test_bmm_fp8_revalidates_cached_signature_dtypes() -> None:
 
 @pytest.mark.smoke
 def test_bmm_fp8_batch_mismatch_raises() -> None:
-    op = BmmFp8Op()
+    op = BmmFp8KNFwdOp()
     a = torch.randn(4, 128, 128, device="cuda").to(torch.float8_e4m3fn)
     b = torch.randn(5, 128, 128, device="cuda").to(torch.float8_e4m3fn)
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
@@ -296,7 +357,7 @@ def test_bmm_fp8_batch_mismatch_raises() -> None:
 
 @pytest.mark.smoke
 def test_bmm_fp8_contraction_mismatch_raises() -> None:
-    op = BmmFp8Op()
+    op = BmmFp8KNFwdOp()
     a = torch.randn(4, 128, 128, device="cuda").to(torch.float8_e4m3fn)
     b = torch.randn(4, 64, 96, device="cuda").to(torch.float8_e4m3fn)
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
@@ -307,7 +368,7 @@ def test_bmm_fp8_contraction_mismatch_raises() -> None:
 
 @pytest.mark.smoke
 def test_bmm_fp8_rank_mismatch_raises() -> None:
-    op = BmmFp8Op()
+    op = BmmFp8KNFwdOp()
     a = torch.randn(128, 128, device="cuda").to(torch.float8_e4m3fn)
     b = torch.randn(4, 128, 128, device="cuda").to(torch.float8_e4m3fn)
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
@@ -318,7 +379,7 @@ def test_bmm_fp8_rank_mismatch_raises() -> None:
 
 @pytest.mark.smoke
 def test_bmm_fp8_k_not_multiple_of_32_raises() -> None:
-    op = BmmFp8Op()
+    op = BmmFp8KNFwdOp()
     a = torch.randn(4, 128, 48, device="cuda").to(torch.float8_e4m3fn)
     b = torch.randn(4, 48, 128, device="cuda").to(torch.float8_e4m3fn)
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
@@ -329,7 +390,7 @@ def test_bmm_fp8_k_not_multiple_of_32_raises() -> None:
 
 @pytest.mark.smoke
 def test_bmm_fp8_scale_dtype_change_after_valid_call_raises() -> None:
-    op = BmmFp8Op()
+    op = BmmFp8KNFwdOp()
     a = torch.randn(2, 128, 128, device="cuda").to(torch.float8_e4m3fn)
     b = torch.randn(2, 128, 128, device="cuda").to(torch.float8_e4m3fn)
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
@@ -349,8 +410,8 @@ def test_bmm_fp8_accepts_nk_layout_when_k_ne_n() -> None:
     # unambiguously carries K.
     b_nk = b_kn.transpose(-2, -1).contiguous()
     assert b_nk.shape == (batch, n, k)
-    op_kn = BmmFp8Op(out_dtype=torch.bfloat16)  # default b_layout='kn'
-    op_nk = BmmFp8Op(out_dtype=torch.bfloat16, b_layout="nk")
+    op_kn = BmmFp8KNFwdOp(out_dtype=torch.bfloat16)
+    op_nk = BmmFp8NKFwdOp(out_dtype=torch.bfloat16)
     out_kn = op_kn(a, b_kn, scale_a, scale_b).clone()
     out_nk = op_nk(a, b_nk, scale_a, scale_b)
     # Numerically identical: same kernel, same buffer bits, just no
@@ -366,8 +427,8 @@ def test_bmm_fp8_nk_view_when_k_eq_n() -> None:
     b_nk_view = b_kn.transpose(-2, -1)
     assert b_nk_view.shape == (batch, n, k)
     assert b_nk_view.stride(-2) == 1
-    op_kn = BmmFp8Op(out_dtype=torch.bfloat16)  # default 'kn'
-    op_nk = BmmFp8Op(out_dtype=torch.bfloat16, b_layout="nk")
+    op_kn = BmmFp8KNFwdOp(out_dtype=torch.bfloat16)  # default 'kn'
+    op_nk = BmmFp8NKFwdOp(out_dtype=torch.bfloat16)
     out_kn = op_kn(a, b_kn, scale_a, scale_b).clone()
     out_nk = op_nk(a, b_nk_view, scale_a, scale_b)
     torch.testing.assert_close(out_kn, out_nk, atol=0.0, rtol=0.0)
@@ -385,9 +446,9 @@ def test_bmm_fp8_contiguous_nk_square_when_k_eq_n() -> None:
     assert b_nk.stride(-2) == k
 
     # Same logical B matrix, explicit layouts.  Both must yield the same d.
-    op_nk = BmmFp8Op(out_dtype=torch.bfloat16, b_layout="nk")
+    op_nk = BmmFp8NKFwdOp(out_dtype=torch.bfloat16)
     out_nk = op_nk(a, b_nk, scale_a, scale_b).clone()
-    op_kn = BmmFp8Op(out_dtype=torch.bfloat16)  # default 'kn'
+    op_kn = BmmFp8KNFwdOp(out_dtype=torch.bfloat16)  # default 'kn'
     out_kn = op_kn(a, b_kn, scale_a, scale_b)
     torch.testing.assert_close(out_nk, out_kn, atol=0.0, rtol=0.0)
 
@@ -397,7 +458,7 @@ def test_bmm_fp8_persistent_default_tile_boundary() -> None:
     batch, m, n, k = 8, 64, 64, 32
     test = BmmFp8Test(batch, m, n, k, torch.float8_e4m3fn)
     a, b_kn, scale_a, scale_b = test.gen_inputs()
-    op = BmmFp8Op(out_dtype=torch.bfloat16)
+    op = BmmFp8KNFwdOp(out_dtype=torch.bfloat16)
     out = op(a, b_kn, scale_a, scale_b)
 
     # Reference computed in float32 with the same per-tensor scales.
@@ -405,7 +466,3 @@ def test_bmm_fp8_persistent_default_tile_boundary() -> None:
     b_f = b_kn.float() * scale_b
     ref = torch.bmm(a_f, b_f).to(torch.bfloat16)
     torch.testing.assert_close(out, ref, atol=0.05, rtol=0.05)
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])

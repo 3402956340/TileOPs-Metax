@@ -9,6 +9,7 @@ import tilelang
 import tilelang.language as T
 import torch
 
+from tileops.kernels.grouped_tiling import GroupTiling
 from tileops.kernels.kernel_base import Kernel
 
 __all__ = [
@@ -23,21 +24,15 @@ _DEFAULT_CONFIGS = {
         "block_n": 128,
         "block_k": 32,
         "num_stages": 2,
-        "threads": 128
+        "threads": 128,
     },
-    (True, False): {
-        "block_m": 32,
-        "block_n": 128,
-        "block_k": 128,
-        "num_stages": 2,
-        "threads": 128
-    },
+    (True, False): {"block_m": 32, "block_n": 128, "block_k": 128, "num_stages": 1, "threads": 128},
     (True, True): {"block_m": 64, "block_n": 256, "block_k": 64, "num_stages": 1, "threads": 128},
 }
 
 
 @functools.lru_cache(maxsize=32)
-def _grouped_gemm_kernel(batch_sum, batch_count, N, K, transpose_a, transpose_b, dtype='float16'):
+def _grouped_gemm_kernel(batch_sum, batch_count, N, K, transpose_a, transpose_b, dtype="float16"):
     accum_dtype = "float"
 
     @tilelang.jit(
@@ -45,7 +40,8 @@ def _grouped_gemm_kernel(batch_sum, batch_count, N, K, transpose_a, transpose_b,
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         },
-        compile_flags=["-O3", "-DENABLE_BF16"])
+        compile_flags=["-O3", "-DENABLE_BF16"],
+    )
     def _grouped_gemm_func(block_m, block_n, block_k, num_stages, threads):
         if not transpose_a:
             # NT / NN pattern: iterate over K, batch-offset lookup
@@ -60,18 +56,19 @@ def _grouped_gemm_kernel(batch_sum, batch_count, N, K, transpose_a, transpose_b,
                 B_shape = (batch_count, K, N)
                 B_shared_shape = (block_k, block_n)
 
-            # 1D grid with M-major ordering for A-tile reuse
-            _num_pid_m = math.ceil(batch_sum / block_m)
+            # Tiles enumerated per group; CTAs past the real count exit.
+            _tiling = GroupTiling(batch_count, block_m)
+            _num_pid_m = _tiling.tile_upper_bound(batch_sum)
             _num_pid_n = math.ceil(N / block_n)
 
             @T.prim_func
             def _grouped_gemm_main(
-                    A: T.Tensor(A_shape, dtype),  # type: ignore
-                    B: T.Tensor(B_shape, dtype),  # type: ignore
-                    C: T.Tensor(C_shape, dtype),  # type: ignore
-                    batch_sizes: T.Tensor([batch_count], "int32"),
-                    batch_offsets: T.Tensor([batch_count], "int32"),
-                    batch_padded_offsets: T.Tensor([batch_count], "int32"),
+                A: T.Tensor(A_shape, dtype),  # type: ignore
+                B: T.Tensor(B_shape, dtype),  # type: ignore
+                C: T.Tensor(C_shape, dtype),  # type: ignore
+                batch_sizes: T.Tensor([batch_count], "int32"),
+                batch_offsets: T.Tensor([batch_count], "int32"),
+                batch_padded_offsets: T.Tensor([batch_count], "int32"),
             ):
                 with T.Kernel(_num_pid_m * _num_pid_n, threads=threads) as (pid,):
                     if use_a_local:
@@ -80,33 +77,22 @@ def _grouped_gemm_kernel(batch_sum, batch_count, N, K, transpose_a, transpose_b,
                         A_shared = T.alloc_shared(A_shared_shape, dtype)
                     B_shared = T.alloc_shared(B_shared_shape, dtype)
                     C_local = T.alloc_fragment([block_m, block_n], accum_dtype)
+                    s_cum = T.alloc_shared([batch_count + 1], "int32")
+                    lo = T.alloc_local([1], "int32")
+                    hi = T.alloc_local([1], "int32")
+                    row = T.alloc_local([1], "int32")
                     cur_batch_idx = T.alloc_local([1], "int32")
 
-                    # M-major ordering: each M-tile processes all N-tiles
-                    bx = pid // _num_pid_n
-                    by = pid % _num_pid_n
-                    m_start = bx * block_m
-                    n_start = by * block_n
+                    _tiling.cumsum(batch_sizes, s_cum)
 
-                    # Guard: skip CTAs that fall beyond the actual padded data.
-                    # batch_padded_offsets[E-1] + batch_sizes[E-1] gives the true
-                    # end of the last expert's padded block.  When batch_sum is a
-                    # conservative upper bound (e.g. T*K + E*block_m in MoE), the
-                    # extra CTAs would otherwise execute full K-loops with all-zero
-                    # inputs, wasting SM cycles and B-tensor bandwidth.
-                    total_valid_rows = (batch_padded_offsets[batch_count - 1] +
-                                        batch_sizes[batch_count - 1])
-                    if m_start < total_valid_rows:
-                        cur_batch_idx[0] = 0
-                        for i in range(batch_count):
-                            batch_start = batch_offsets[i]
-                            batch_end = batch_start + batch_sizes[i]
-                            in_batch = (m_start >= batch_start) & (m_start < batch_end)
-                            cur_batch_idx[0] = T.if_then_else(in_batch, i, cur_batch_idx[0])
-                        batch_start = batch_offsets[cur_batch_idx[0]]
-                        batch_size = batch_sizes[cur_batch_idx[0]]
-                        batch_end = batch_start + batch_size
-                        actual_rows = T.min(block_m, batch_end - m_start)
+                    # M-major ordering: each M-tile processes all N-tiles
+                    m_tile = pid // _num_pid_n
+                    n_start = (pid % _num_pid_n) * block_n
+
+                    if m_tile < s_cum[batch_count]:
+                        _tiling.decode(m_tile, s_cum, lo, hi, cur_batch_idx, row)
+                        m_start = batch_offsets[cur_batch_idx[0]] + row[0]
+                        actual_rows = T.min(block_m, batch_sizes[cur_batch_idx[0]] - row[0])
                         actual_cols = T.min(block_n, N - n_start)
                         T.clear(C_local)
 
@@ -126,7 +112,9 @@ def _grouped_gemm_kernel(batch_sum, batch_count, N, K, transpose_a, transpose_b,
                                 for i, j in T.Parallel(block_n, block_k):
                                     B_shared[i, j] = T.if_then_else(
                                         j < K - k * block_k and i < actual_cols,
-                                        B[cur_batch_idx[0], n_start + i, k * block_k + j], 0)
+                                        B[cur_batch_idx[0], n_start + i, k * block_k + j],
+                                        0,
+                                    )
                             else:
                                 for i, j in T.Parallel(block_k, block_n):
                                     B_shared[i, j] = T.if_then_else(
@@ -155,16 +143,16 @@ def _grouped_gemm_kernel(batch_sum, batch_count, N, K, transpose_a, transpose_b,
 
             @T.prim_func
             def _grouped_gemm_main(
-                    A: T.Tensor(A_shape, dtype),  # type: ignore
-                    B: T.Tensor(B_shape, dtype),  # type: ignore
-                    C: T.Tensor(C_shape, dtype),  # type: ignore
-                    batch_sizes: T.Tensor([batch_count], "int32"),
-                    batch_offsets: T.Tensor([batch_count], "int32"),
-                    batch_padded_offsets: T.Tensor([batch_count], "int32"),
+                A: T.Tensor(A_shape, dtype),  # type: ignore
+                B: T.Tensor(B_shape, dtype),  # type: ignore
+                C: T.Tensor(C_shape, dtype),  # type: ignore
+                batch_sizes: T.Tensor([batch_count], "int32"),
+                batch_offsets: T.Tensor([batch_count], "int32"),
+                batch_padded_offsets: T.Tensor([batch_count], "int32"),
             ):
                 with T.Kernel(
-                        batch_count, T.ceildiv(N, block_n) * T.ceildiv(K, block_k),
-                        threads=threads) as (bx, by):
+                    batch_count, T.ceildiv(N, block_n) * T.ceildiv(K, block_k), threads=threads
+                ) as (bx, by):
                     A_shared = T.alloc_shared(A_shared_shape, dtype)
                     B_shared = T.alloc_shared(B_shared_shape, dtype)
                     C_local = T.alloc_fragment([block_n, block_k], accum_dtype)
@@ -185,20 +173,23 @@ def _grouped_gemm_kernel(batch_sum, batch_count, N, K, transpose_a, transpose_b,
                         actual_rows = T.min(block_m, batch_size - m * block_m)
                         # Load A block (same for TN and TT)
                         for i, j in T.Parallel(block_m, block_n):
-                            A_shared[i, j] = T.if_then_else(i < actual_rows and j < actual_N,
-                                                            A[m_start + i, n_start + j], 0)
+                            A_shared[i, j] = T.if_then_else(
+                                i < actual_rows and j < actual_N, A[m_start + i, n_start + j], 0
+                            )
                         # Load B block
                         if transpose_b:
                             for i, j in T.Parallel(block_k, block_m):
                                 B_shared[i, j] = T.if_then_else(
-                                    i < actual_K and j < actual_rows,
-                                    B[k_start + i, m_start + j], 0)
+                                    i < actual_K and j < actual_rows, B[k_start + i, m_start + j], 0
+                                )
                         else:
                             for i, j in T.Parallel(block_m, block_k):
                                 B_shared[i, j] = T.if_then_else(
-                                    i < actual_rows and j < actual_K,
-                                    B[m_start + i, k_start + j], 0)
-                        T.gemm(A_shared, B_shared, C_local, transpose_A=True, transpose_B=transpose_b)
+                                    i < actual_rows and j < actual_K, B[m_start + i, k_start + j], 0
+                                )
+                        T.gemm(
+                            A_shared, B_shared, C_local, transpose_A=True, transpose_B=transpose_b
+                        )
                     # Store result
                     for i, j in T.Parallel(block_n, block_k):
                         if i < actual_N and j < actual_K:
@@ -211,17 +202,20 @@ def _grouped_gemm_kernel(batch_sum, batch_count, N, K, transpose_a, transpose_b,
 
 class GroupedGemmKernel(Kernel):
     supported_archs: list[int] = [80, 86, 89, 90]
+    general: bool = True
 
-    def __init__(self,
-                 batch_sum,
-                 batch_count,
-                 N,
-                 K,
-                 dtype,
-                 transpose_a: bool = False,
-                 transpose_b: bool = True,
-                 config: Optional[dict] = None,
-                 tune=False):
+    def __init__(
+        self,
+        batch_sum,
+        batch_count,
+        N,
+        K,
+        dtype,
+        transpose_a: bool = False,
+        transpose_b: bool = True,
+        config: Optional[dict] = None,
+        tune=False,
+    ):
         super().__init__()
         self.batch_sum = batch_sum
         self.batch_count = batch_count
@@ -231,10 +225,64 @@ class GroupedGemmKernel(Kernel):
         self.transpose_a = transpose_a
         self.transpose_b = transpose_b
 
-        self.kernel = _grouped_gemm_kernel(self.batch_sum, self.batch_count, self.N, self.K,
-                                           self.transpose_a, self.transpose_b, self.dtype_str)
+        self.kernel = _grouped_gemm_kernel(
+            self.batch_sum,
+            self.batch_count,
+            self.N,
+            self.K,
+            self.transpose_a,
+            self.transpose_b,
+            self.dtype_str,
+        )
 
         self.init_config(config, tune)
+
+    @property
+    def autotune_supply_prog(self):
+        """Supply autotuning the batch metadata a real call carries.
+
+        Both templates read a group's row count out of this metadata. Both offset
+        vectors take the tight prefix sum, which puts
+        ``batch_padded_offsets[-1] + batch_sizes[-1]`` at ``batch_sum`` and so
+        keeps every tile in the K-loop.
+        """
+        from tilelang.utils.device import get_current_device
+        from tilelang.utils.tensor import get_tensor_supply
+
+        default_supply = get_tensor_supply(tilelang.TensorSupplyType.Auto)
+        batch_count = self.batch_count
+        base, extra = divmod(self.batch_sum, batch_count)
+
+        def supply_prog(params):
+            device = get_current_device()
+            sizes = torch.full((batch_count,), base, dtype=torch.int32, device=device)
+            sizes[:extra] += 1
+            offsets = torch.zeros(batch_count, dtype=torch.int32, device=device)
+            offsets[1:] = torch.cumsum(sizes[:-1], dim=0)
+
+            # Matched by position among themselves: the prim_func takes
+            # batch_sizes, then batch_offsets, then batch_padded_offsets.
+            is_metadata = [
+                str(p.dtype) == "int32" and list(p.shape) == [batch_count] for p in params
+            ]
+            if sum(is_metadata) != 3:
+                raise RuntimeError(
+                    f"autotuning {type(self).__name__} expects 3 int32 [{batch_count}] "
+                    f"parameters (batch_sizes, batch_offsets, batch_padded_offsets), "
+                    f"got {sum(is_metadata)}"
+                )
+
+            seen = 0
+            inputs = []
+            for param, metadata in zip(params, is_metadata, strict=True):
+                if metadata:
+                    inputs.append(sizes if seen == 0 else offsets)
+                    seen += 1
+                else:
+                    inputs.append(default_supply(param))
+            return inputs
+
+        return supply_prog
 
     @property
     def default_config(self) -> dict:
@@ -249,21 +297,32 @@ class GroupedGemmKernel(Kernel):
         threads = [128, 256]
         _configs = list(itertools.product(block_m, block_n, block_k, num_stages, threads))
 
-        return [{
-            'block_m': c[0],
-            'block_n': c[1],
-            'block_k': c[2],
-            'num_stages': c[3],
-            'threads': c[4]
-        } for c in _configs]
+        return [
+            {"block_m": c[0], "block_n": c[1], "block_k": c[2], "num_stages": c[3], "threads": c[4]}
+            for c in _configs
+        ]
 
-    def forward(self, A: torch.Tensor, B: torch.Tensor, batch_sizes: torch.Tensor,
-                batch_offsets: torch.Tensor, batch_padded_offsets: torch.Tensor) -> torch.Tensor:
-        kernel = _grouped_gemm_kernel(self.batch_sum, self.batch_count, self.N, self.K,
-                                      self.transpose_a, self.transpose_b,
-                                      self.dtype_str)(self.config["block_m"],
-                                                      self.config["block_n"],
-                                                      self.config["block_k"],
-                                                      self.config["num_stages"],
-                                                      self.config["threads"])
+    def forward(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        batch_sizes: torch.Tensor,
+        batch_offsets: torch.Tensor,
+        batch_padded_offsets: torch.Tensor,
+    ) -> torch.Tensor:
+        kernel = _grouped_gemm_kernel(
+            self.batch_sum,
+            self.batch_count,
+            self.N,
+            self.K,
+            self.transpose_a,
+            self.transpose_b,
+            self.dtype_str,
+        )(
+            self.config["block_m"],
+            self.config["block_n"],
+            self.config["block_k"],
+            self.config["num_stages"],
+            self.config["threads"],
+        )
         return kernel(A, B, batch_sizes, batch_offsets, batch_padded_offsets)

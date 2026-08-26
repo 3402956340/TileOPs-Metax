@@ -11,7 +11,8 @@ manifest-derived roofline (`op.eval_roofline()`).
 import pytest
 import torch
 
-from benchmarks.benchmark_base import BenchmarkReport, ManifestBenchmark
+from benchmarks.baselines import TORCH_COMPILE_TAG, compiled_reference
+from benchmarks.benchmark_base import ManifestBenchmark, fields, workload_params
 from tileops.manifest import load_workloads
 from tileops.ops.moe import MoeGroupedGemmNopadFwdOp
 from workloads.moe import MoeGroupedGemmNopadWorkload
@@ -19,33 +20,19 @@ from workloads.moe import MoeGroupedGemmNopadWorkload
 _OP_NAME = "MoeGroupedGemmNopadFwdOp"
 
 
-_DTYPE_MAP = {
-    "bfloat16": torch.bfloat16,
-    "float16": torch.float16,
-}
-
-
-def _manifest_params():
-    """Convert manifest workloads to pytest params (numel, E, N, K, dtype)."""
-    params = []
-    for w in load_workloads(_OP_NAME):
-        label = w.get("label", "unlabeled")
-        for dtype_str in w["dtypes"]:
-            params.append(pytest.param(
-                w["numel"], w["num_experts"], w["n"], w["k"], dtype_str,
-                id=f"{label}-{dtype_str}",
-            ))
-    return params
-
-
 @pytest.mark.parametrize(
-    "numel, num_experts, n, k, dtype_str",
-    _manifest_params(),
+    "numel, num_experts, n, k, dtype",
+    workload_params(
+        load_workloads(_OP_NAME), fields("numel", "num_experts", "n", "k", dtype_last=True)
+    ),
 )
 def test_moe_grouped_gemm_nopad_bench(
-    numel: int, num_experts: int, n: int, k: int, dtype_str: str,
+    numel: int,
+    num_experts: int,
+    n: int,
+    k: int,
+    dtype: torch.dtype,
 ) -> None:
-    dtype = _DTYPE_MAP[dtype_str]
     workload = MoeGroupedGemmNopadWorkload(numel, num_experts, n, k, dtype)
     a, b, true_sizes, true_offsets = workload.gen_inputs()
 
@@ -55,9 +42,6 @@ def test_moe_grouped_gemm_nopad_bench(
     # Warmup: trigger JIT compilation before timed profiling.
     op(a, b, true_sizes, true_offsets)
     torch.cuda.synchronize()
-
-    result = bm.profile(op, a, b, true_sizes, true_offsets)
-    BenchmarkReport.record(op, locals(), result, tag="tileops")
 
     # PyTorch baseline: per-expert NT matmul.
     sizes_l = true_sizes.tolist()
@@ -70,15 +54,22 @@ def test_moe_grouped_gemm_nopad_bench(
             if size_e == 0:
                 continue
             off_e = offsets_l[e]
-            out[off_e:off_e + size_e] = a[off_e:off_e + size_e] @ b[e].T
+            out[off_e : off_e + size_e] = a[off_e : off_e + size_e] @ b[e].T
         return out
 
     _torch_fn(a, b, true_sizes, true_offsets)  # warmup
     torch.cuda.synchronize()
 
-    result_torch = bm.profile(_torch_fn, a, b, true_sizes, true_offsets)
-    BenchmarkReport.record(op, locals(), result_torch, tag="torch-ref")
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])
+    bm.compare(
+        {
+            "tileops": op,
+            "torch-ref": _torch_fn,
+            TORCH_COMPILE_TAG: compiled_reference(_torch_fn),
+        },
+        a,
+        b,
+        true_sizes,
+        true_offsets,
+        record_as=op,
+        params=locals(),
+    )

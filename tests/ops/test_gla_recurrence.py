@@ -1,57 +1,19 @@
-
-
 import pytest
 import torch
 
 from tests.test_base import FixtureBase, TestBase
-from tileops.ops import GLADecodeOp
-from workloads.linear_attention import GLADecodeWorkload
-
-
-def gla_decode_torch(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    gk: torch.Tensor,
-    state: torch.Tensor,
-    scale: float = -1.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Pure-PyTorch reference for single-step GLA recurrence."""
-    DK = q.shape[-1]
-    if scale <= 0:
-        scale = DK ** -0.5
-
-    q, k, v = q.float(), k.float(), v.float()
-    gk = gk.float()
-    state = state.float()
-
-    alpha = torch.exp(gk)
-    new_state = alpha.unsqueeze(-1) * state + k.unsqueeze(-1) * v.unsqueeze(-2)
-    o = scale * torch.einsum("bhk,bhkv->bhv", q, new_state)
-
-    return o, new_state
+from tileops.ops import GLADecodeFwdOp
+from workloads.linear_attention import GLADecodeWorkload, gla_decode_torch
 
 
 class GLADecodeTest(GLADecodeWorkload, TestBase):
-    def ref_program(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        gk: torch.Tensor,
-        state: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        o, new_state = gla_decode_torch(q, k, v, gk, state, self.scale)
-        return o.to(self.dtype), new_state.to(self.dtype)
+    pass
 
 
 try:
     from fla.ops.gla import fused_recurrent_gla
 except ImportError:
     fused_recurrent_gla = None
-
-# Torch reference implementation (test-only)
-
 
 # Correctness tests
 
@@ -67,15 +29,18 @@ def _get_tolerances(dtype: torch.dtype) -> dict:
 
 class GLADecodeFixture(FixtureBase):
     PARAMS = [
-        ("batch, heads, dim_k, dim_v, dtype, tune", [
-            pytest.param(1, 4, 64, 64, torch.float32, False, marks=pytest.mark.smoke),
-            pytest.param(1, 4, 64, 64, torch.float16, False, marks=pytest.mark.smoke),
-            pytest.param(1, 4, 64, 64, torch.bfloat16, False, marks=pytest.mark.smoke),
-            pytest.param(2, 8, 64, 64, torch.float32, False, marks=pytest.mark.full),
-            pytest.param(2, 4, 128, 128, torch.float32, False, marks=pytest.mark.full),
-            pytest.param(2, 8, 64, 64, torch.float16, False, marks=pytest.mark.full),
-            pytest.param(2, 8, 64, 64, torch.bfloat16, False, marks=pytest.mark.full),
-        ]),
+        (
+            "batch, heads, dim_k, dim_v, dtype, tune",
+            [
+                pytest.param(1, 4, 64, 64, torch.float32, False, marks=pytest.mark.smoke),
+                pytest.param(1, 4, 64, 64, torch.float16, False, marks=pytest.mark.smoke),
+                pytest.param(1, 4, 64, 64, torch.bfloat16, False, marks=pytest.mark.smoke),
+                pytest.param(2, 8, 64, 64, torch.float32, False, marks=pytest.mark.full),
+                pytest.param(2, 4, 128, 128, torch.float32, False, marks=pytest.mark.full),
+                pytest.param(2, 8, 64, 64, torch.float16, False, marks=pytest.mark.full),
+                pytest.param(2, 8, 64, 64, torch.bfloat16, False, marks=pytest.mark.full),
+            ],
+        ),
     ]
 
 
@@ -90,7 +55,7 @@ def test_gla_decode(
 ) -> None:
     torch.manual_seed(42)
     test = GLADecodeTest(batch, heads, dim_k, dim_v, dtype)
-    op = GLADecodeOp(tune=tune)
+    op = GLADecodeFwdOp(tune=tune)
     tols = _get_tolerances(dtype)
     test.check(op, *test.gen_inputs(), **tols)
 
@@ -109,7 +74,7 @@ def test_gla_decode_multi_step(
     num_steps = 8
     B, H, DK, DV = batch, heads, dim_k, dim_v
 
-    op = GLADecodeOp(tune=tune)
+    op = GLADecodeFwdOp(tune=tune)
     tols = _get_tolerances(dtype)
 
     state_op = torch.zeros(B, H, DK, DV, device="cuda", dtype=dtype)
@@ -147,7 +112,7 @@ def test_gla_decode_vs_fla(
 
     torch.manual_seed(42)
     B, H, DK, DV = batch, heads, dim_k, dim_v
-    scale = DK ** -0.5
+    scale = DK**-0.5
 
     q = torch.randn(B, H, DK, device="cuda", dtype=dtype) * 0.1
     k = torch.randn(B, H, DK, device="cuda", dtype=dtype) * 0.1
@@ -156,7 +121,7 @@ def test_gla_decode_vs_fla(
     state = torch.randn(B, H, DK, DV, device="cuda", dtype=dtype) * 0.1
 
     # TileOPs
-    op = GLADecodeOp(scale=scale, tune=tune)
+    op = GLADecodeFwdOp(scale=scale, tune=tune)
     with torch.no_grad():
         o_tile, s_tile = op(q, k, v, gk, state)
 
@@ -168,8 +133,12 @@ def test_gla_decode_vs_fla(
     gk_fla = gk.unsqueeze(1)
 
     o_fla, s_fla = fused_recurrent_gla(
-        q_fla, k_fla, v_fla, gk=gk_fla,
-        scale=scale, initial_state=state.contiguous(),
+        q_fla,
+        k_fla,
+        v_fla,
+        gk=gk_fla,
+        scale=scale,
+        initial_state=state.contiguous(),
         output_final_state=True,
     )
     o_fla = o_fla.squeeze(1).to(dtype)
@@ -181,7 +150,7 @@ def test_gla_decode_vs_fla(
 
 @pytest.mark.smoke
 def test_gla_decode_rejects_manifest_shape_mismatch() -> None:
-    op = object.__new__(GLADecodeOp)
+    op = object.__new__(GLADecodeFwdOp)
     op.batch = 2
     op.heads = 3
     op.dim_k = 4
@@ -197,7 +166,3 @@ def test_gla_decode_rejects_manifest_shape_mismatch() -> None:
 
     with pytest.raises(ValueError, match="gk must have shape"):
         op.forward(q, k, v, gk, state)
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])

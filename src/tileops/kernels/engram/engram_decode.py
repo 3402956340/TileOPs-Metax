@@ -46,14 +46,9 @@ import torch
 import torch.nn.functional as F
 
 from tileops.kernels.kernel_base import Kernel
+from tileops.kernels.tiling import ALIGNMENT, align_up
 
 __all__ = ["EngramDecodeKernel"]
-
-ALIGNMENT = 256
-
-
-def _align_up(n: int, alignment: int) -> int:
-    return ((n + alignment - 1) // alignment) * alignment
 
 
 @functools.lru_cache(maxsize=32)
@@ -70,7 +65,7 @@ def _engram_decode_kernel(batch, d_mem, d, max_conv_len, conv_kernel_size, dilat
         dtype: data type string.
     """
     accum_dtype = "float"
-    d_padded = _align_up(d, ALIGNMENT)
+    d_padded = align_up(d, ALIGNMENT)
     w = conv_kernel_size
 
     @tilelang.jit(
@@ -78,7 +73,6 @@ def _engram_decode_kernel(batch, d_mem, d, max_conv_len, conv_kernel_size, dilat
         compile_flags=["-O3", "-DENABLE_BF16"],
     )
     def _func(threads):
-
         @T.macro
         def _decode_fused(
             e_t: T.Tensor((batch, d_mem), dtype),
@@ -182,12 +176,9 @@ def _engram_decode_kernel(batch, d_mem, d, max_conv_len, conv_kernel_size, dilat
                 # History taps (p = 0 to w-2): read from state at dilated positions
                 for p in T.serial(w - 1):
                     for j in T.Parallel(d_padded):
-                        conv_out[j] += (
-                            T.cast(conv_w[p, j], accum_dtype)
-                            * T.cast(
-                                conv_state[bid, max_conv_len - (w - 1 - p) * dilation, j],
-                                accum_dtype,
-                            )
+                        conv_out[j] += T.cast(conv_w[p, j], accum_dtype) * T.cast(
+                            conv_state[bid, max_conv_len - (w - 1 - p) * dilation, j],
+                            accum_dtype,
                         )
                 # Current tap (p = w-1)
                 for j in T.Parallel(d_padded):
@@ -226,9 +217,16 @@ def _engram_decode_kernel(batch, d_mem, d, max_conv_len, conv_kernel_size, dilat
             new_conv_state: T.Tensor((batch, max_conv_len, d_padded), dtype),
         ):
             _decode_fused(
-                e_t, h_t, conv_state,
-                W_K, W_V, rms_w_h, rms_w_v, conv_w,
-                y_t, new_conv_state,
+                e_t,
+                h_t,
+                conv_state,
+                W_K,
+                W_V,
+                rms_w_h,
+                rms_w_v,
+                conv_w,
+                y_t,
+                new_conv_state,
             )
 
         return main
@@ -236,7 +234,7 @@ def _engram_decode_kernel(batch, d_mem, d, max_conv_len, conv_kernel_size, dilat
     return _func
 
 
-@torch.library.custom_op("top::engram_decode", mutates_args=())
+@torch.library.custom_op("tileops::engram_decode", mutates_args=())
 def _engram_decode_wrapped(
     batch: int,
     d_mem: int,
@@ -257,16 +255,39 @@ def _engram_decode_wrapped(
     conv_w: torch.Tensor,
 ) -> list[torch.Tensor]:
     results = _engram_decode_kernel(
-        batch, d_mem, d, max_conv_len, conv_kernel_size, dilation, eps, dtype_str,
+        batch,
+        d_mem,
+        d,
+        max_conv_len,
+        conv_kernel_size,
+        dilation,
+        eps,
+        dtype_str,
     )(threads)(e_t, h_t, conv_state, W_K, W_V, rms_w_h, rms_w_v, conv_w)
     return list(results)
 
 
 @_engram_decode_wrapped.register_fake
-def _(batch, d_mem, d, max_conv_len, conv_kernel_size, dilation,
-      eps, dtype_str, threads,
-      e_t, h_t, conv_state, W_K, W_V, rms_w_h, rms_w_v, conv_w):
-    d_padded = _align_up(d, ALIGNMENT)
+def _(
+    batch,
+    d_mem,
+    d,
+    max_conv_len,
+    conv_kernel_size,
+    dilation,
+    eps,
+    dtype_str,
+    threads,
+    e_t,
+    h_t,
+    conv_state,
+    W_K,
+    W_V,
+    rms_w_h,
+    rms_w_v,
+    conv_w,
+):
+    d_padded = align_up(d, ALIGNMENT)
     device = e_t.device
     dt = e_t.dtype
     return [
@@ -316,7 +337,7 @@ class EngramDecodeKernel(Kernel):
         self.dilation = dilation
         self.eps = eps
         self.dtype = dtype
-        self.d_padded = _align_up(d, ALIGNMENT)
+        self.d_padded = align_up(d, ALIGNMENT)
 
         min_cache = dilation * (conv_kernel_size - 1)
         if max_conv_len < min_cache:
@@ -326,8 +347,14 @@ class EngramDecodeKernel(Kernel):
             )
 
         self.kernel = _engram_decode_kernel(
-            batch, d_mem, d, max_conv_len, conv_kernel_size, dilation,
-            eps, self.dtype_str,
+            batch,
+            d_mem,
+            d,
+            max_conv_len,
+            conv_kernel_size,
+            dilation,
+            eps,
+            self.dtype_str,
         )
         self.init_config(config, tune)
 
@@ -353,19 +380,19 @@ class EngramDecodeKernel(Kernel):
         """Run one fused decode step.
 
         Args:
-            e_t: Gathered N-gram embedding, shape ``(B, d_mem)``.
-            h_t: Hidden state for the current token, shape ``(B, d)``.
-            conv_state: Conv history of shape ``(B, L, d)`` with
+            e_t: Gathered N-gram embedding, shape $[B \\times d\\_mem]$.
+            h_t: Hidden state for the current token, shape $[B \\times d]$.
+            conv_state: Conv history of shape $[B \\times L \\times d]$ with
                 ``L <= max_conv_len``; left-padded to the compiled capacity
                 here.
-            W_K: Key projection weight of shape ``(d_mem, d)``.
-            W_V: Value projection weight of shape ``(d_mem, d)``.
-            rms_w_h: RMSNorm weight of shape ``(d,)`` for ``h`` and ``k``.
-            rms_w_v: RMSNorm weight of shape ``(d,)`` for the gated value.
-            conv_w: Depthwise conv weights of shape ``(w, d)``.
+            W_K: Key projection weight of shape $[d\\_mem \\times d]$.
+            W_V: Value projection weight of shape $[d\\_mem \\times d]$.
+            rms_w_h: RMSNorm weight of shape $[d]$ for ``h`` and ``k``.
+            rms_w_v: RMSNorm weight of shape $[d]$ for the gated value.
+            conv_w: Depthwise conv weights of shape $[w \\times d]$.
 
         Returns:
-            ``[y_t, new_conv_state]`` of shapes ``(B, d)`` and
+            ``[y_t, new_conv_state]`` of shapes $[B \\times d]$ and
             ``(B, max_conv_len, d)``. The alignment padding the prim_func
             requires is applied and trimmed here.
         """
@@ -382,10 +409,23 @@ class EngramDecodeKernel(Kernel):
             rms_w_v = F.pad(rms_w_v, (0, pad))
             conv_w = F.pad(conv_w, (0, pad))
         results = _engram_decode_wrapped(
-            self.batch, self.d_mem, self.d, self.max_conv_len,
-            self.conv_kernel_size, self.dilation, self.eps,
-            self.dtype_str, self.config["threads"],
-            e_t, h_t, conv_state, W_K, W_V, rms_w_h, rms_w_v, conv_w,
+            self.batch,
+            self.d_mem,
+            self.d,
+            self.max_conv_len,
+            self.conv_kernel_size,
+            self.dilation,
+            self.eps,
+            self.dtype_str,
+            self.config["threads"],
+            e_t,
+            h_t,
+            conv_state,
+            W_K,
+            W_V,
+            rms_w_h,
+            rms_w_v,
+            conv_w,
         )
         if pad:
             results[0] = results[0][:, : self.d]

@@ -5,19 +5,24 @@ Compares single-step decode latency across batch sizes, dimensions, and dtypes.
 When FLA is not installed, benchmarks still run using a pure-torch reference
 implementation as baseline, so CI is never blocked by a missing optional dependency.
 """
+
 from typing import Optional
 
-import pytest
 import torch
 
-from benchmarks.benchmark_base import BenchmarkBase, BenchmarkReport, ManifestBenchmark
-from benchmarks.ops.attention.manifest_params import manifest_params
+from benchmarks.baselines import TORCH_COMPILE_TAG, compiled_reference
+from benchmarks.benchmark_base import (
+    BenchmarkBase,
+    ManifestBenchmark,
+    then_dtype,
+    workload_params,
+)
 from tileops.manifest import load_workloads
-from tileops.ops import GLADecodeOp
+from tileops.ops import GLADecodeFwdOp
 from workloads.linear_attention import GLADecodeWorkload
 from workloads.workload_base import FixtureBase
 
-_OP_NAME = "GLADecodeOp"
+_OP_NAME = "GLADecodeFwdOp"
 
 
 def gla_decode_torch(
@@ -31,7 +36,7 @@ def gla_decode_torch(
     """Pure-PyTorch reference for single-step GLA recurrence."""
     DK = q.shape[-1]
     if scale <= 0:
-        scale = DK ** -0.5
+        scale = DK**-0.5
 
     q, k, v = q.float(), k.float(), v.float()
     gk = gk.float()
@@ -44,20 +49,6 @@ def gla_decode_torch(
     return o, new_state
 
 
-class GLADecodeTestBaseline(GLADecodeWorkload):
-    """Adds baseline ref_program for benchmark profiling."""
-
-    def ref_program(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        gk: torch.Tensor,
-        state: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        o, new_state = gla_decode_torch(q, k, v, gk, state, self.scale)
-        return o.to(self.dtype), new_state.to(self.dtype)
-
 try:
     from fla.ops.gla import fused_recurrent_gla
 except ImportError:
@@ -65,7 +56,6 @@ except ImportError:
 
 
 class GLADecodeBenchmark(BenchmarkBase[GLADecodeWorkload]):
-
     def calculate_flops(self) -> Optional[float]:
         t = self.workload
         B, H, DK, DV = t.batch, t.heads, t.dim_k, t.dim_v
@@ -87,16 +77,18 @@ class GLADecodeBenchFixture(FixtureBase):
     PARAMS = [
         (
             "batch, heads, dim_k, dim_v, scale, dtype, tune",
-            manifest_params(
+            workload_params(
                 load_workloads(_OP_NAME),
-                lambda w: (
-                    w["q_shape"][0],
-                    w["q_shape"][1],
-                    w["q_shape"][2],
-                    w["v_shape"][2],
-                    w.get("scale", w["q_shape"][2] ** -0.5),
+                then_dtype(
+                    lambda w: (
+                        w["q_shape"][0],
+                        w["q_shape"][1],
+                        w["q_shape"][2],
+                        w["v_shape"][2],
+                        w.get("scale", w["q_shape"][2] ** -0.5),
+                    ),
+                    tune=False,
                 ),
-                tune=False,
             ),
         ),
     ]
@@ -112,14 +104,13 @@ def test_gla_decode_bench(
     dtype: torch.dtype,
     tune: bool,
 ) -> None:
-    test = GLADecodeTestBaseline(batch, heads, dim_k, dim_v, dtype, scale=scale)
+    test = GLADecodeWorkload(batch, heads, dim_k, dim_v, dtype, scale=scale)
     inputs = test.gen_inputs()
 
     # --- TileOPs ---
-    op = GLADecodeOp(scale=scale, tune=tune)
+    op = GLADecodeFwdOp(scale=scale, tune=tune)
     bm = ManifestBenchmark(_OP_NAME, op, test)
-    result = bm.profile(op, *inputs)
-    BenchmarkReport.record(op, locals(), result, tag="tileops")
+    functors = {"tileops": op}
 
     if fused_recurrent_gla is not None:
         # --- FLA: fused_recurrent_gla with T=1 ---
@@ -131,18 +122,18 @@ def test_gla_decode_bench(
 
         def fla_decode():
             return fused_recurrent_gla(
-                q_fla, k_fla, v_fla, gk=gk_fla,
-                scale=scale, initial_state=state.contiguous(),
+                q_fla,
+                k_fla,
+                v_fla,
+                gk=gk_fla,
+                scale=scale,
+                initial_state=state.contiguous(),
                 output_final_state=True,
             )
 
-        result_fla = bm.profile(fla_decode)
-        BenchmarkReport.record(op, locals(), result_fla, tag="fla")
-    else:
-        # --- Torch reference baseline ---
-        result_bl = bm.profile(test.ref_program, *inputs)
-        BenchmarkReport.record(op, locals(), result_bl, tag="torch")
+        functors["fla"] = (fla_decode, ())
 
+    functors["torch"] = test.ref_program
+    functors[TORCH_COMPILE_TAG] = compiled_reference(test.ref_program)
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])
+    bm.compare(functors, *inputs, record_as=op, params=locals())

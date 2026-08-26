@@ -2,16 +2,23 @@
 
 Provides reusable utility functions, constants, and T.macro factories
 used across all reduction sub-category kernels (sum, max, softmax,
-variance, prefix-scan, etc.).
+variance, prefix-scan, etc.), plus the row layout every one of them wants.
 
-This module must land before any sub-category kernel PR so that shared
-infrastructure is available from the start.
+A reduction kernel reduces the trailing axis of a 2-D ``(M, N)`` buffer, while an op
+declares an arbitrary-rank tensor and the axes to reduce; the permute and flatten between
+the two is a kernel's business, so both sides of the op/backend boundary speak the shapes
+the manifest declares. ``axes`` below is the sorted tuple of non-negative axis indices the
+reduction runs over — which forms an empty ``dim`` takes, and which ranks it may name, are
+the op's contract rather than a kernel's.
 """
 
 import itertools
+from math import prod
 
 import tilelang.language as T
 import torch
+
+from tileops.kernels.tiling import align_up
 
 __all__ = [
     "AUTOTUNE_THREADS",
@@ -21,6 +28,7 @@ __all__ = [
     "SHARED_MEMORY_BUDGET_BYTES",
     "VECTOR_ACCESS_BYTES",
     "BlockConfigPlanner",
+    "RowTiledAutotuneMixin",
     "align_up",
     "compute_tile_n",
     "device_smem_budget",
@@ -29,6 +37,9 @@ __all__ = [
     "make_softmax_epilogue",
     "make_welford_update",
     "reduce_column_alignment",
+    "restore_reduced",
+    "restore_same_shape",
+    "rows_for_axes",
     "tune_by_forward",
 ]
 
@@ -111,9 +122,7 @@ class BlockConfigPlanner:
     @property
     def needs_tiling(self) -> bool:
         """Whether one padded row exceeds the column cap or the smem budget."""
-        return (
-            self.N_padded > MAX_SINGLE_TILE_COLS or self._row_bytes > self.smem_budget
-        )
+        return self.N_padded > MAX_SINGLE_TILE_COLS or self._row_bytes > self.smem_budget
 
     def _column_alignment(self, block_m: int, threads: int) -> int:
         """Column granularity a tile must respect for this pair.
@@ -137,16 +146,19 @@ class BlockConfigPlanner:
         # the row in fragments and allocate no second shared copy.
         if self.N_padded <= MAX_SINGLE_TILE_COLS:
             single = compute_tile_n(
-                block_m, self.elem_bytes, self.N_padded, budget=self.smem_budget,
+                block_m,
+                self.elem_bytes,
+                self.N_padded,
+                budget=self.smem_budget,
             )
             if single == self.N_padded:
                 return 0
 
-        col_budget = (
-            MAX_SINGLE_TILE_COLS * self.num_buffers * block_m * self.elem_bytes
-        )
+        col_budget = MAX_SINGLE_TILE_COLS * self.num_buffers * block_m * self.elem_bytes
         return compute_tile_n(
-            block_m, self.elem_bytes, self.N_padded,
+            block_m,
+            self.elem_bytes,
+            self.N_padded,
             alignment=self._column_alignment(block_m, threads),
             budget=min(self.smem_budget, col_budget),
             num_buffers=self.num_buffers,
@@ -180,16 +192,16 @@ class BlockConfigPlanner:
     def layout_ok(self, block_m: int, cols: int, threads: int) -> bool:
         """Whether a ``(block_m, cols)`` fragment is known to be reducible.
 
-        A conservative envelope, not the exact rule.  It was the exact rule
-        while the kernels wrote these fragments from a two-dimensional
-        ``T.Parallel(block_m, cols)``: TileLang flattens that loop, the thread
-        owning column *j* of row *i* is ``(i * cols + j) / vec % threads``, and
-        the map repeats from row to row only when ``cols`` is a whole number of
-        passes or divides one evenly.  Measured 44 of 44 over fp16/fp32 x
-        {128, 256} threads x cols in [256, 4096].
+        A conservative envelope, not the exact rule.  It is exact for a fragment
+        written from a two-dimensional ``T.Parallel(block_m, cols)``: TileLang
+        flattens that loop, the thread owning column *j* of row *i* is
+        ``(i * cols + j) / vec % threads``, and the map repeats from row to row
+        only when ``cols`` is a whole number of passes or divides one evenly.
+        Measured 44 of 44 over fp16/fp32 x {128, 256} threads x cols in
+        [256, 4096].
 
-        The kernels now serialise the row loop, so the map no longer depends on
-        the row and nearly every width builds.  One narrow residue survives --
+        The kernels serialise the row loop, so the map does not depend on the row
+        and nearly every width builds.  One narrow residue survives --
         softmax, log_softmax and logsumexp fail layout inference at
         ``block_m=4, cols=768`` -- and this envelope still excludes it, so it
         stays as the guard.  Everything it admits builds; some of what it
@@ -239,7 +251,8 @@ class BlockConfigPlanner:
         """
         max_block_m = (budget or self.smem_budget) // self._row_bytes
         return [
-            bm for bm in self._BLOCK_MS
+            bm
+            for bm in self._BLOCK_MS
             if bm <= max_block_m and self.layout_ok(bm, self.N_padded, threads)
         ]
 
@@ -250,7 +263,8 @@ class BlockConfigPlanner:
         """Return the config used when no candidate sweep runs."""
         if not self.needs_tiling:
             block_ms = self._untiled_block_ms(
-                DEFAULT_THREADS, budget=SHARED_MEMORY_BUDGET_BYTES,
+                DEFAULT_THREADS,
+                budget=SHARED_MEMORY_BUDGET_BYTES,
             )
             return {
                 "block_m": block_ms[-1] if block_ms else 1,
@@ -335,24 +349,6 @@ def device_smem_budget(device_index: int | None = None) -> int:
         if explicit:
             raise
         return SHARED_MEMORY_BUDGET_BYTES
-
-
-def align_up(n: int, alignment: int) -> int:
-    """Round *n* up to the nearest multiple of *alignment*.
-
-    Args:
-        n: Value to align.
-        alignment: Alignment boundary (must be positive).
-
-    Returns:
-        Smallest multiple of *alignment* that is >= *n*.
-
-    Raises:
-        ValueError: If *alignment* is not positive.
-    """
-    if alignment <= 0:
-        raise ValueError(f"alignment must be positive, got {alignment}")
-    return ((n + alignment - 1) // alignment) * alignment
 
 
 def compute_tile_n(
@@ -449,34 +445,50 @@ _SOFTMAX_KINDS = {"softmax", "log_softmax"}
 _SCAN_KINDS = {"sum", "prod"}
 
 
-
-def tune_by_forward(kernel, *probe_inputs, warmup: int = 10, rep: int = 10) -> None:
-    """Select the fastest candidate config by timing ``kernel.forward``.
+def tune_by_forward(
+    kernel,
+    *probe_inputs,
+    warmup: int = 10,
+    rep: int = 10,
+    forward=None,
+) -> None:
+    """Select the fastest candidate config by timing one call per candidate.
 
     The tiled reduction paths have no single ``self.kernel`` object for
     TileLang's autotuner to decorate — they dispatch through wrapped helper
-    functions — so each candidate is timed through ``forward`` instead.
+    functions — so each candidate is timed through a call instead.
     Leaves ``kernel.config`` set to the winner, or to ``default_config`` when
     the kernel declares no candidates.
+
+    Args:
+        kernel: The kernel whose ``config`` is being chosen.
+        probe_inputs: What to call with.
+        warmup: Untimed calls per candidate.
+        rep: Timed calls per candidate.
+        forward: What to call. Defaults to ``kernel.forward``. A kernel that reshapes
+            its input inside ``forward`` passes the row-level entry point instead, so the
+            probe is a ``(M, N)`` buffer and the timing excludes a config-independent
+            permute.
     """
+    call = kernel.forward if forward is None else forward
     configs = kernel.autotune_configs
     if not configs:
         kernel.config = kernel.default_config
         return
 
-    print(f'Start autotuning {kernel.__class__.__name__} (tiled path)...')
-    best_config, best_time = configs[0], float('inf')
+    print(f"Start autotuning {kernel.__class__.__name__} (tiled path)...")
+    best_config, best_time = configs[0], float("inf")
     for cfg in configs:
         kernel.config = cfg
         for _ in range(warmup):
-            kernel.forward(*probe_inputs)
+            call(*probe_inputs)
         torch.cuda.synchronize()
 
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         for _ in range(rep):
-            kernel.forward(*probe_inputs)
+            call(*probe_inputs)
         end.record()
         torch.cuda.synchronize()
         elapsed = start.elapsed_time(end) / rep
@@ -485,7 +497,8 @@ def tune_by_forward(kernel, *probe_inputs, warmup: int = 10, rep: int = 10) -> N
             best_time, best_config = elapsed, cfg
 
     kernel.config = best_config
-    print(f'Best config: {kernel.config}')
+    print(f"Best config: {kernel.config}")
+
 
 def make_reduce_epilogue(op_kind: str):
     """Create a post-reduce processing T.macro.
@@ -694,3 +707,174 @@ def make_cumulative_scan(op_kind: str):
                     output_buf[i, j] = output_buf[i, j - 1] * input_buf[i, j]
 
     return scan
+
+
+# The row layout a reduction kernel reduces, and the shape its caller declared.
+
+
+def _kept(ndim: int, axes: "tuple[int, ...]") -> "list[int]":
+    """The axes the reduction leaves, in order."""
+    return [i for i in range(ndim) if i not in axes]
+
+
+def rows_for_axes(x: torch.Tensor, axes: "tuple[int, ...]") -> torch.Tensor:
+    """Move *axes* to the end and flatten to ``(M, N)``.
+
+    Reducing every axis gives ``M == 1``.
+    """
+    kept = _kept(x.ndim, axes)
+    n = prod(x.shape[a] for a in axes)
+    m = prod(x.shape[i] for i in kept)
+    return x.permute(kept + list(axes)).contiguous().reshape(m, n)
+
+
+def restore_reduced(
+    y: torch.Tensor,
+    in_shape: "tuple[int, ...]",
+    axes: "tuple[int, ...]",
+    keepdim: bool,
+) -> torch.Tensor:
+    """Shape an $[M]$ result the way the reduction's caller expects.
+
+    Reducing every axis without *keepdim* gives a 0-D tensor.
+    """
+    if keepdim:
+        return y.reshape([1 if i in axes else d for i, d in enumerate(in_shape)])
+    kept = [in_shape[i] for i in _kept(len(in_shape), axes)]
+    return y.reshape(kept) if kept else y.reshape(())
+
+
+def restore_same_shape(
+    y: torch.Tensor,
+    in_shape: "tuple[int, ...]",
+    axes: "tuple[int, ...]",
+) -> torch.Tensor:
+    """Undo `rows_for_axes` on a result that kept its input's shape.
+
+    For an op that writes one element per input element — softmax, a prefix scan — whose
+    row layout is unwound rather than collapsed.
+    """
+    kept = _kept(len(in_shape), axes)
+    perm = kept + list(axes)
+    y = y.reshape([in_shape[i] for i in perm])
+    inverse = [0] * len(perm)
+    for position, axis in enumerate(perm):
+        inverse[axis] = position
+    # Contiguous, because the op's fake reports contiguous strides and a mismatch there is
+    # a silent wrong answer, not a failure. Free when the reduced axis is already last.
+    return y.permute(inverse).contiguous()
+
+
+class RowTiledAutotuneMixin:
+    """The tile_n search shared by the kernels that bake tile_n in at build time.
+
+    A kernel holding a ``(block_m, N_padded)`` row block picks tile_n before the
+    autotuner runs, because tile_n decides the kernel's shape and so every distinct
+    value costs a recompilation.
+
+    A subclass must set, before autotuning: ``_planner`` (a
+    `BlockConfigPlanner`), ``_smem_budget``, ``N_padded``, ``_elem_bytes``,
+    and ``_MAX_TILE_N_CANDIDATES``.
+    """
+
+    def _tile_n_for_block_m(self, block_m: int) -> int:
+        """Return tile_n for a given block_m (0 means no tiling needed).
+
+        Derived at the granularity the *coarsest* candidate thread count
+        needs: tile_n is baked into the kernel at build time and then reused
+        across every ``threads`` value the autotuner tries, so one tile has to
+        satisfy all of them.
+        """
+        return self._planner.tile_n_for(block_m, max(AUTOTUNE_THREADS))
+
+    def _tile_n_candidates(self) -> list[int]:
+        """Return candidate tile_n values for autotune exploration.
+
+        Includes the heuristic tile_n (from block_m=1) plus alternative
+        tile_n values derived from ``_tile_n_for_block_m(2)`` and
+        ``_tile_n_for_block_m(4)``, with a half-step fallback aligned to
+        ``DEFAULT_ALIGNMENT`` when block_m exploration yields no
+        alternatives.  tile_n=0 means single-tile (no tiling).  All
+        candidates are de-duplicated and sorted descending for
+        deterministic ordering.
+
+        Each distinct tile_n value requires a full kernel recompilation,
+        which is expensive for large-N workloads (compilations can take
+        minutes each).  To keep autotuner wall time practical we cap
+        the total number of tile_n candidates at ``_MAX_TILE_N_CANDIDATES``
+        (currently 3).
+
+        - When the heuristic default tile_n is 0 (single-tile / small N),
+          return ``[0]`` -- the autotuner varies only block_m and threads.
+        - Otherwise collect distinct tile_n values from block_m=1..4 and
+          return up to ``_MAX_TILE_N_CANDIDATES`` candidates (always
+          including the heuristic default).
+        """
+        default_tn = self._tile_n_for_block_m(1)
+        if default_tn == 0:
+            return [0]
+
+        candidates: set[int] = {default_tn}
+        # Explore tile_n values implied by small block_m values.
+        # Higher block_m → smaller tile_n (more N-tiles but better row reuse).
+        for bm in (2, 4):
+            try:
+                tn = self._tile_n_for_block_m(bm)
+            except ValueError:
+                continue
+            if tn > 0 and tn != default_tn:
+                candidates.add(tn)
+
+        # Also try half of the default tile_n (rounded to alignment) as a
+        # search point when block_m exploration didn't yield alternatives.
+        if len(candidates) < 2:
+            half_tn = (default_tn // 2 // DEFAULT_ALIGNMENT) * DEFAULT_ALIGNMENT
+            if half_tn > 0 and half_tn != default_tn:
+                candidates.add(half_tn)
+
+        # Cap to avoid excessive compilation time.
+        sorted_candidates = sorted(candidates, reverse=True)
+        return sorted_candidates[: self._MAX_TILE_N_CANDIDATES]
+
+    @property
+    def autotune_configs(self) -> list[dict]:
+        """Generate autotune configs including tile_n candidates.
+
+        tile_n is baked into the kernel at build time, so the autotuner
+        rebuilds the kernel for each tile_n value.  Configs include
+        ``tile_n`` alongside ``block_m`` and ``threads``.
+        """
+        budget = self._smem_budget
+        smem_per_row = self.N_padded * self._elem_bytes
+        max_block_m_no_tile = budget // smem_per_row if smem_per_row > 0 else 16
+        threads_list = [128, 256]
+
+        configs = []
+        for tile_n in self._tile_n_candidates():
+            if tile_n == 0:
+                # Single-tile regime: explore multiple block_m values.
+                for bm in [1, 2, 4, 8, 16]:
+                    try:
+                        compute_tile_n(bm, self._elem_bytes, self.N_padded, budget=budget)
+                    except ValueError:
+                        continue
+                    bm_tile_n = self._tile_n_for_block_m(bm)
+                    if bm_tile_n != 0:
+                        continue
+                    if bm > max_block_m_no_tile:
+                        continue
+                    for t in threads_list:
+                        if not self._planner.layout_ok(bm, self.N_padded, t):
+                            continue
+                        configs.append({"block_m": bm, "threads": t, "tile_n": 0})
+            else:
+                # Tiled regime: use block_m=1 with each tile_n candidate.
+                # Each distinct tile_n triggers a kernel recompilation, so
+                # we only vary threads within each tile_n regime.
+                for t in threads_list:
+                    configs.append({"block_m": 1, "threads": t, "tile_n": tile_n})
+
+        if not configs:
+            configs = [{"block_m": 1, "threads": 256, "tile_n": self._tile_n}]
+
+        return configs

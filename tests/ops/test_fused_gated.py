@@ -22,18 +22,20 @@ from workloads.elementwise import GatedRandnWorkload
 
 class SiluAndMulFixture(FixtureBase):
     PARAMS = [
-        ("m, n, dtype", [
-            pytest.param(1024, 1024, torch.float16, marks=pytest.mark.smoke),
-            pytest.param(1024, 1024, torch.bfloat16, marks=pytest.mark.smoke),
-            pytest.param(1024, 1024, torch.float32, marks=pytest.mark.smoke),
-            pytest.param(2048, 2048, torch.float16, marks=pytest.mark.full),
-            pytest.param(2048, 2048, torch.bfloat16, marks=pytest.mark.full),
-        ]),
+        (
+            "m, n, dtype",
+            [
+                pytest.param(1024, 1024, torch.float16, marks=pytest.mark.smoke),
+                pytest.param(1024, 1024, torch.bfloat16, marks=pytest.mark.smoke),
+                pytest.param(1024, 1024, torch.float32, marks=pytest.mark.smoke),
+                pytest.param(2048, 2048, torch.float16, marks=pytest.mark.full),
+                pytest.param(2048, 2048, torch.bfloat16, marks=pytest.mark.full),
+            ],
+        ),
     ]
 
 
 class SiluAndMulTest(GatedRandnWorkload, TestBase):
-
     def ref_program(self, x: torch.Tensor) -> torch.Tensor:
         x_f32 = x.float()
         gate = x_f32[:, : self.n]
@@ -53,7 +55,7 @@ def _get_tolerances(dtype: torch.dtype) -> tuple[float, float]:
 @SiluAndMulFixture
 def test_silu_and_mul_op(m: int, n: int, dtype: torch.dtype) -> None:
     test = SiluAndMulTest(m, n, dtype)
-    op = SiluAndMulFwdOp(M=m, N=n)
+    op = SiluAndMulFwdOp()
     atol, rtol = _get_tolerances(dtype)
     test.check(op, *test.gen_inputs(), atol=atol, rtol=rtol)
 
@@ -85,17 +87,19 @@ def test_silu_and_mul_lazy_op_rebinds_shape() -> None:
 
 class GeluAndMulFixture(FixtureBase):
     PARAMS = [
-        ("m, n, dtype", [
-            pytest.param(1024, 1024, torch.float16, marks=pytest.mark.smoke),
-            pytest.param(1024, 1024, torch.bfloat16, marks=pytest.mark.smoke),
-            pytest.param(1024, 1024, torch.float32, marks=pytest.mark.smoke),
-            pytest.param(2048, 2048, torch.float16, marks=pytest.mark.full),
-        ]),
+        (
+            "m, n, dtype",
+            [
+                pytest.param(1024, 1024, torch.float16, marks=pytest.mark.smoke),
+                pytest.param(1024, 1024, torch.bfloat16, marks=pytest.mark.smoke),
+                pytest.param(1024, 1024, torch.float32, marks=pytest.mark.smoke),
+                pytest.param(2048, 2048, torch.float16, marks=pytest.mark.full),
+            ],
+        ),
     ]
 
 
 class GeluAndMulTest(GatedRandnWorkload, TestBase):
-
     def ref_program(self, x: torch.Tensor) -> torch.Tensor:
         x_f32 = x.float()
         gate = x_f32[:, : self.n]
@@ -106,7 +110,7 @@ class GeluAndMulTest(GatedRandnWorkload, TestBase):
 @GeluAndMulFixture
 def test_gelu_and_mul_op(m: int, n: int, dtype: torch.dtype) -> None:
     test = GeluAndMulTest(m, n, dtype)
-    op = GeluAndMulFwdOp(M=m, N=n)
+    op = GeluAndMulFwdOp()
     atol, rtol = _get_tolerances(dtype)
     test.check(op, *test.gen_inputs(), atol=atol, rtol=rtol)
 
@@ -116,17 +120,19 @@ def test_gelu_and_mul_op(m: int, n: int, dtype: torch.dtype) -> None:
 
 class GeluTanhAndMulFixture(FixtureBase):
     PARAMS = [
-        ("m, n, dtype", [
-            pytest.param(1024, 1024, torch.float16, marks=pytest.mark.smoke),
-            pytest.param(1024, 1024, torch.bfloat16, marks=pytest.mark.smoke),
-            pytest.param(1024, 1024, torch.float32, marks=pytest.mark.smoke),
-            pytest.param(2048, 2048, torch.float16, marks=pytest.mark.full),
-        ]),
+        (
+            "m, n, dtype",
+            [
+                pytest.param(1024, 1024, torch.float16, marks=pytest.mark.smoke),
+                pytest.param(1024, 1024, torch.bfloat16, marks=pytest.mark.smoke),
+                pytest.param(1024, 1024, torch.float32, marks=pytest.mark.smoke),
+                pytest.param(2048, 2048, torch.float16, marks=pytest.mark.full),
+            ],
+        ),
     ]
 
 
 class GeluTanhAndMulTest(GatedRandnWorkload, TestBase):
-
     def ref_program(self, x: torch.Tensor) -> torch.Tensor:
         x_f32 = x.float()
         gate = x_f32[:, : self.n]
@@ -137,7 +143,7 @@ class GeluTanhAndMulTest(GatedRandnWorkload, TestBase):
 @GeluTanhAndMulFixture
 def test_gelu_tanh_and_mul_op(m: int, n: int, dtype: torch.dtype) -> None:
     test = GeluTanhAndMulTest(m, n, dtype)
-    op = GeluTanhAndMulFwdOp(M=m, N=n)
+    op = GeluTanhAndMulFwdOp()
     atol, rtol = _get_tolerances(dtype)
     test.check(op, *test.gen_inputs(), atol=atol, rtol=rtol)
 
@@ -145,16 +151,17 @@ def test_gelu_tanh_and_mul_op(m: int, n: int, dtype: torch.dtype) -> None:
 @pytest.mark.smoke
 def test_fused_gated_rejects_integer_dtype() -> None:
     """Fused gated ops are float-only; the rejection follows the tensor."""
-    op = GeluAndMulFwdOp(M=16, N=16)
+    op = GeluAndMulFwdOp()
     x = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
-    with pytest.raises(ValueError, match="does not support dtype"):
+    # The manifest dtype union rejects it before any kernel is asked for.
+    with pytest.raises(ValueError, match="expected 'float16 | bfloat16 | float32'"):
         op(x)
 
 
 @pytest.mark.smoke
 def test_fused_gated_serves_two_dtypes_from_one_instance() -> None:
     """The element type comes from the tensor, so both are valid on one op."""
-    op = SiluAndMulFwdOp(M=16, N=8)
+    op = SiluAndMulFwdOp()
     for dtype in (torch.float16, torch.float32):
         x = torch.randn(16, 16, device="cuda", dtype=dtype)
         assert op(x).dtype == dtype
@@ -179,17 +186,23 @@ def test_fused_gated_kernel_rejects_unknown_strategy() -> None:
     """FusedGatedKernel must reject unknown strategy names."""
     with pytest.raises(ValueError, match="Unknown strategy"):
         SiluAndMulFwdKernel(
-            M=16, N=16, dtype=torch.float16, config={"strategy": "nonexistent"},
+            M=16,
+            N=16,
+            dtype=torch.float16,
+            config={"strategy": "nonexistent"},
         )
 
 
 class FusedGatedDirectStrategyFixture(FixtureBase):
     PARAMS = [
-        ("m, n, dtype", [
-            pytest.param(1024, 1024, torch.float16, marks=pytest.mark.smoke),
-            pytest.param(1024, 1024, torch.bfloat16, marks=pytest.mark.smoke),
-            pytest.param(1024, 1024, torch.float32, marks=pytest.mark.smoke),
-        ]),
+        (
+            "m, n, dtype",
+            [
+                pytest.param(1024, 1024, torch.float16, marks=pytest.mark.smoke),
+                pytest.param(1024, 1024, torch.bfloat16, marks=pytest.mark.smoke),
+                pytest.param(1024, 1024, torch.float32, marks=pytest.mark.smoke),
+            ],
+        ),
     ]
 
 
@@ -216,7 +229,10 @@ def test_gelu_tanh_and_mul_direct_strategy(m: int, n: int, dtype: torch.dtype) -
     """GeluTanhAndMul with config strategy='direct' produces correct results."""
     test = GeluTanhAndMulTest(m, n, dtype)
     kernel = GeluTanhAndMulFwdKernel(
-        M=m, N=n, dtype=dtype, config={"strategy": "direct"},
+        M=m,
+        N=n,
+        dtype=dtype,
+        config={"strategy": "direct"},
     )
     atol, rtol = _get_tolerances(dtype)
     test.check(kernel, *test.gen_inputs(), atol=atol, rtol=rtol)
@@ -237,7 +253,3 @@ def test_fused_gated_kernel_stores_strategy() -> None:
     k2 = SiluAndMulFwdKernel(M=16, N=16, dtype=torch.float16)
     assert k2.strategy == FusedGatedKernel.DEFAULT_STRATEGY
     assert k2.config["strategy"] == FusedGatedKernel.DEFAULT_STRATEGY
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])

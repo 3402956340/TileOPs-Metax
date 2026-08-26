@@ -2,19 +2,30 @@
 
 Profiles TileOPs vs PyTorch baselines for each new op category using
 DNN-realistic 2D shapes (tokens × hidden_dim) with the default op configuration.
+
+Every row adds the same reference through inductor. The three fused gated ops add
+flashinfer's kernel, which takes the concatenated input the reference splits.
 """
 
 from math import prod
-from typing import Callable, Optional
+from typing import Optional
 
 import pytest
 import torch
 import torch.nn.functional as F
 
+from benchmarks.baselines import (
+    FLASHINFER_TAG,
+    TORCH_COMPILE_TAG,
+    assert_matches_reference,
+    compiled_reference,
+    flashinfer_op,
+    reference_tolerance,
+)
 from benchmarks.benchmark_base import (
     BenchmarkBase,
-    BenchmarkReport,
     ManifestBenchmark,
+    workload_params,
 )
 from tileops.kernels.elementwise import (
     GeluAndMulFwdKernel,
@@ -95,40 +106,250 @@ class FusedGatedBenchmark(BenchmarkBase[FusedGatedBenchCase]):
 
 class BinaryArithBenchFixture(FixtureBase):
     PARAMS = [
-        ("op_name, shape, dtype, output_dtype, op_cls, baseline_fn, gen_inputs", [
-            # sub
-            pytest.param("sub", _SHAPES[0], torch.float16, torch.float16, SubFwdOp, torch.sub, "normal", marks=pytest.mark.smoke),
-            pytest.param("sub", _SHAPES[1], torch.float16, torch.float16, SubFwdOp, torch.sub, "normal", marks=pytest.mark.full),
-            pytest.param("sub", _SHAPES[2], torch.float16, torch.float16, SubFwdOp, torch.sub, "normal", marks=pytest.mark.full),
-            # mul
-            pytest.param("mul", _SHAPES[0], torch.float16, torch.float16, MulFwdOp, torch.mul, "normal", marks=pytest.mark.smoke),
-            pytest.param("mul", _SHAPES[1], torch.float16, torch.float16, MulFwdOp, torch.mul, "normal", marks=pytest.mark.full),
-            pytest.param("mul", _SHAPES[2], torch.float16, torch.float16, MulFwdOp, torch.mul, "normal", marks=pytest.mark.full),
-            # div
-            pytest.param("div", _SHAPES[0], torch.float16, torch.float16, DivFwdOp, torch.div, "positive", marks=pytest.mark.smoke),
-            pytest.param("div", _SHAPES[1], torch.float16, torch.float16, DivFwdOp, torch.div, "positive", marks=pytest.mark.full),
-            pytest.param("div", _SHAPES[2], torch.float16, torch.float16, DivFwdOp, torch.div, "positive", marks=pytest.mark.full),
-            # remainder
-            pytest.param("remainder", _SHAPES[0], torch.float16, torch.float16, RemainderFwdOp, torch.remainder, "positive", marks=pytest.mark.smoke),
-            pytest.param("remainder", _SHAPES[1], torch.float16, torch.float16, RemainderFwdOp, torch.remainder, "positive", marks=pytest.mark.full),
-            # pow
-            pytest.param("pow", _SHAPES[0], torch.float16, torch.float16, PowFwdOp, torch.pow, "positive", marks=pytest.mark.smoke),
-            pytest.param("pow", _SHAPES[1], torch.float16, torch.float16, PowFwdOp, torch.pow, "positive", marks=pytest.mark.full),
-            # floor_divide
-            pytest.param("floor_divide", _SHAPES[0], torch.float16, torch.float16, FloorDivideFwdOp, torch.floor_divide, "positive", marks=pytest.mark.smoke),
-            pytest.param("floor_divide", _SHAPES[1], torch.float16, torch.float16, FloorDivideFwdOp, torch.floor_divide, "positive", marks=pytest.mark.full),
-            # lerp (weight=0.5 default)
-            pytest.param("lerp", _SHAPES[0], torch.float16, torch.float16, LerpFwdOp, lambda a, b: torch.lerp(a, b, 0.5), "normal", marks=pytest.mark.smoke),
-            pytest.param("lerp", _SHAPES[1], torch.float16, torch.float16, LerpFwdOp, lambda a, b: torch.lerp(a, b, 0.5), "normal", marks=pytest.mark.full),
-            # maximum
-            pytest.param("maximum", _SHAPES[0], torch.float16, torch.float16, MaximumFwdOp, torch.maximum, "normal", marks=pytest.mark.smoke),
-            pytest.param("maximum", _SHAPES[1], torch.float16, torch.float16, MaximumFwdOp, torch.maximum, "normal", marks=pytest.mark.full),
-            pytest.param("maximum", _SHAPES[2], torch.float16, torch.float16, MaximumFwdOp, torch.maximum, "normal", marks=pytest.mark.full),
-            # minimum
-            pytest.param("minimum", _SHAPES[0], torch.float16, torch.float16, MinimumFwdOp, torch.minimum, "normal", marks=pytest.mark.smoke),
-            pytest.param("minimum", _SHAPES[1], torch.float16, torch.float16, MinimumFwdOp, torch.minimum, "normal", marks=pytest.mark.full),
-            pytest.param("minimum", _SHAPES[2], torch.float16, torch.float16, MinimumFwdOp, torch.minimum, "normal", marks=pytest.mark.full),
-        ]),
+        (
+            "op_name, shape, dtype, output_dtype, op_cls, baseline_fn, gen_inputs",
+            [
+                # sub
+                pytest.param(
+                    "sub",
+                    _SHAPES[0],
+                    torch.float16,
+                    torch.float16,
+                    SubFwdOp,
+                    torch.sub,
+                    "normal",
+                    marks=pytest.mark.smoke,
+                ),
+                pytest.param(
+                    "sub",
+                    _SHAPES[1],
+                    torch.float16,
+                    torch.float16,
+                    SubFwdOp,
+                    torch.sub,
+                    "normal",
+                    marks=pytest.mark.full,
+                ),
+                pytest.param(
+                    "sub",
+                    _SHAPES[2],
+                    torch.float16,
+                    torch.float16,
+                    SubFwdOp,
+                    torch.sub,
+                    "normal",
+                    marks=pytest.mark.full,
+                ),
+                # mul
+                pytest.param(
+                    "mul",
+                    _SHAPES[0],
+                    torch.float16,
+                    torch.float16,
+                    MulFwdOp,
+                    torch.mul,
+                    "normal",
+                    marks=pytest.mark.smoke,
+                ),
+                pytest.param(
+                    "mul",
+                    _SHAPES[1],
+                    torch.float16,
+                    torch.float16,
+                    MulFwdOp,
+                    torch.mul,
+                    "normal",
+                    marks=pytest.mark.full,
+                ),
+                pytest.param(
+                    "mul",
+                    _SHAPES[2],
+                    torch.float16,
+                    torch.float16,
+                    MulFwdOp,
+                    torch.mul,
+                    "normal",
+                    marks=pytest.mark.full,
+                ),
+                # div
+                pytest.param(
+                    "div",
+                    _SHAPES[0],
+                    torch.float16,
+                    torch.float16,
+                    DivFwdOp,
+                    torch.div,
+                    "positive",
+                    marks=pytest.mark.smoke,
+                ),
+                pytest.param(
+                    "div",
+                    _SHAPES[1],
+                    torch.float16,
+                    torch.float16,
+                    DivFwdOp,
+                    torch.div,
+                    "positive",
+                    marks=pytest.mark.full,
+                ),
+                pytest.param(
+                    "div",
+                    _SHAPES[2],
+                    torch.float16,
+                    torch.float16,
+                    DivFwdOp,
+                    torch.div,
+                    "positive",
+                    marks=pytest.mark.full,
+                ),
+                # remainder
+                pytest.param(
+                    "remainder",
+                    _SHAPES[0],
+                    torch.float16,
+                    torch.float16,
+                    RemainderFwdOp,
+                    torch.remainder,
+                    "positive",
+                    marks=pytest.mark.smoke,
+                ),
+                pytest.param(
+                    "remainder",
+                    _SHAPES[1],
+                    torch.float16,
+                    torch.float16,
+                    RemainderFwdOp,
+                    torch.remainder,
+                    "positive",
+                    marks=pytest.mark.full,
+                ),
+                # pow
+                pytest.param(
+                    "pow",
+                    _SHAPES[0],
+                    torch.float16,
+                    torch.float16,
+                    PowFwdOp,
+                    torch.pow,
+                    "positive",
+                    marks=pytest.mark.smoke,
+                ),
+                pytest.param(
+                    "pow",
+                    _SHAPES[1],
+                    torch.float16,
+                    torch.float16,
+                    PowFwdOp,
+                    torch.pow,
+                    "positive",
+                    marks=pytest.mark.full,
+                ),
+                # floor_divide
+                pytest.param(
+                    "floor_divide",
+                    _SHAPES[0],
+                    torch.float16,
+                    torch.float16,
+                    FloorDivideFwdOp,
+                    torch.floor_divide,
+                    "positive",
+                    marks=pytest.mark.smoke,
+                ),
+                pytest.param(
+                    "floor_divide",
+                    _SHAPES[1],
+                    torch.float16,
+                    torch.float16,
+                    FloorDivideFwdOp,
+                    torch.floor_divide,
+                    "positive",
+                    marks=pytest.mark.full,
+                ),
+                # lerp (weight=0.5 default)
+                pytest.param(
+                    "lerp",
+                    _SHAPES[0],
+                    torch.float16,
+                    torch.float16,
+                    LerpFwdOp,
+                    lambda a, b: torch.lerp(a, b, 0.5),
+                    "normal",
+                    marks=pytest.mark.smoke,
+                ),
+                pytest.param(
+                    "lerp",
+                    _SHAPES[1],
+                    torch.float16,
+                    torch.float16,
+                    LerpFwdOp,
+                    lambda a, b: torch.lerp(a, b, 0.5),
+                    "normal",
+                    marks=pytest.mark.full,
+                ),
+                # maximum
+                pytest.param(
+                    "maximum",
+                    _SHAPES[0],
+                    torch.float16,
+                    torch.float16,
+                    MaximumFwdOp,
+                    torch.maximum,
+                    "normal",
+                    marks=pytest.mark.smoke,
+                ),
+                pytest.param(
+                    "maximum",
+                    _SHAPES[1],
+                    torch.float16,
+                    torch.float16,
+                    MaximumFwdOp,
+                    torch.maximum,
+                    "normal",
+                    marks=pytest.mark.full,
+                ),
+                pytest.param(
+                    "maximum",
+                    _SHAPES[2],
+                    torch.float16,
+                    torch.float16,
+                    MaximumFwdOp,
+                    torch.maximum,
+                    "normal",
+                    marks=pytest.mark.full,
+                ),
+                # minimum
+                pytest.param(
+                    "minimum",
+                    _SHAPES[0],
+                    torch.float16,
+                    torch.float16,
+                    MinimumFwdOp,
+                    torch.minimum,
+                    "normal",
+                    marks=pytest.mark.smoke,
+                ),
+                pytest.param(
+                    "minimum",
+                    _SHAPES[1],
+                    torch.float16,
+                    torch.float16,
+                    MinimumFwdOp,
+                    torch.minimum,
+                    "normal",
+                    marks=pytest.mark.full,
+                ),
+                pytest.param(
+                    "minimum",
+                    _SHAPES[2],
+                    torch.float16,
+                    torch.float16,
+                    MinimumFwdOp,
+                    torch.minimum,
+                    "normal",
+                    marks=pytest.mark.full,
+                ),
+            ],
+        ),
     ]
 
 
@@ -146,12 +367,18 @@ def test_binary_arith_bench(
     bm = BinaryBenchmark(test)
     inputs = test.gen_inputs()
 
-    op = op_cls(a_shape=shape, b_shape=shape)
-    result = bm.profile(op, *inputs)
-    BenchmarkReport.record(op, locals(), result, tag="tileops")
+    op = op_cls()
 
-    result_bl = bm.profile(baseline_fn, *inputs)
-    BenchmarkReport.record(op, locals(), result_bl, tag="torch")
+    bm.compare(
+        {
+            "tileops": op,
+            "torch": baseline_fn,
+            TORCH_COMPILE_TAG: compiled_reference(baseline_fn),
+        },
+        *inputs,
+        record_as=op,
+        params=locals(),
+    )
 
 
 # Comparison ops (6)
@@ -159,20 +386,24 @@ def test_binary_arith_bench(
 
 class ComparisonBenchFixture(FixtureBase):
     PARAMS = [
-        ("op_name, shape, dtype, baseline_fn", [
-            pytest.param("eq", _SHAPES[0], torch.float16, torch.eq, marks=pytest.mark.smoke),
-            pytest.param("eq", _SHAPES[1], torch.float16, torch.eq, marks=pytest.mark.full),
-            pytest.param("ne", _SHAPES[0], torch.float16, torch.ne, marks=pytest.mark.full),
-            pytest.param("gt", _SHAPES[0], torch.float16, torch.gt, marks=pytest.mark.full),
-            pytest.param("lt", _SHAPES[0], torch.float16, torch.lt, marks=pytest.mark.full),
-            pytest.param("ge", _SHAPES[0], torch.float16, torch.ge, marks=pytest.mark.full),
-            pytest.param("le", _SHAPES[0], torch.float16, torch.le, marks=pytest.mark.full),
-        ]),
+        (
+            "op_name, shape, dtype, baseline_fn",
+            [
+                pytest.param("eq", _SHAPES[0], torch.float16, torch.eq, marks=pytest.mark.smoke),
+                pytest.param("eq", _SHAPES[1], torch.float16, torch.eq, marks=pytest.mark.full),
+                pytest.param("ne", _SHAPES[0], torch.float16, torch.ne, marks=pytest.mark.full),
+                pytest.param("gt", _SHAPES[0], torch.float16, torch.gt, marks=pytest.mark.full),
+                pytest.param("lt", _SHAPES[0], torch.float16, torch.lt, marks=pytest.mark.full),
+                pytest.param("ge", _SHAPES[0], torch.float16, torch.ge, marks=pytest.mark.full),
+                pytest.param("le", _SHAPES[0], torch.float16, torch.le, marks=pytest.mark.full),
+            ],
+        ),
     ]
 
 
 _CMP_OPS = {
-    "eq": EqFwdOp, "ne": NeFwdOp,
+    "eq": EqFwdOp,
+    "ne": NeFwdOp,
     "gt": GtFwdOp,
     "lt": LtFwdOp,
     "ge": GeFwdOp,
@@ -191,12 +422,18 @@ def test_comparison_bench(
     bm = BinaryBenchmark(test)
     inputs = test.gen_inputs()
 
-    op = _CMP_OPS[op_name](a_shape=shape, b_shape=shape)
-    result = bm.profile(op, *inputs)
-    BenchmarkReport.record(op, locals(), result, tag="tileops")
+    op = _CMP_OPS[op_name]()
 
-    result_bl = bm.profile(baseline_fn, *inputs)
-    BenchmarkReport.record(op, locals(), result_bl, tag="torch")
+    bm.compare(
+        {
+            "tileops": op,
+            "torch": baseline_fn,
+            TORCH_COMPILE_TAG: compiled_reference(baseline_fn),
+        },
+        *inputs,
+        record_as=op,
+        params=locals(),
+    )
 
 
 # Logical ops (2)
@@ -204,12 +441,43 @@ def test_comparison_bench(
 
 class LogicalBenchFixture(FixtureBase):
     PARAMS = [
-        ("op_name, shape, dtype, op_cls, baseline_fn", [
-            pytest.param("logical_and", _SHAPES[0], torch.float16, LogicalAndFwdOp, torch.logical_and, marks=pytest.mark.smoke),
-            pytest.param("logical_and", _SHAPES[1], torch.float16, LogicalAndFwdOp, torch.logical_and, marks=pytest.mark.full),
-            pytest.param("logical_or", _SHAPES[0], torch.float16, LogicalOrFwdOp, torch.logical_or, marks=pytest.mark.smoke),
-            pytest.param("logical_or", _SHAPES[1], torch.float16, LogicalOrFwdOp, torch.logical_or, marks=pytest.mark.full),
-        ]),
+        (
+            "op_name, shape, dtype, op_cls, baseline_fn",
+            [
+                pytest.param(
+                    "logical_and",
+                    _SHAPES[0],
+                    torch.float16,
+                    LogicalAndFwdOp,
+                    torch.logical_and,
+                    marks=pytest.mark.smoke,
+                ),
+                pytest.param(
+                    "logical_and",
+                    _SHAPES[1],
+                    torch.float16,
+                    LogicalAndFwdOp,
+                    torch.logical_and,
+                    marks=pytest.mark.full,
+                ),
+                pytest.param(
+                    "logical_or",
+                    _SHAPES[0],
+                    torch.float16,
+                    LogicalOrFwdOp,
+                    torch.logical_or,
+                    marks=pytest.mark.smoke,
+                ),
+                pytest.param(
+                    "logical_or",
+                    _SHAPES[1],
+                    torch.float16,
+                    LogicalOrFwdOp,
+                    torch.logical_or,
+                    marks=pytest.mark.full,
+                ),
+            ],
+        ),
     ]
 
 
@@ -225,14 +493,14 @@ def test_logical_bench(
     bm = BinaryBenchmark(test)
     inputs = test.gen_inputs()
 
-    op = op_cls(a_shape=shape, b_shape=shape)
-    result = bm.profile(op, *inputs)
-    BenchmarkReport.record(op, locals(), result, tag="tileops")
+    op = op_cls()
+    functors = {"tileops": op}
 
     # Baseline uses bool tensors
     a_bool, b_bool = inputs[0].bool(), inputs[1].bool()
-    result_bl = bm.profile(baseline_fn, a_bool, b_bool)
-    BenchmarkReport.record(op, locals(), result_bl, tag="torch")
+    functors["torch"] = (baseline_fn, (a_bool, b_bool))
+    functors[TORCH_COMPILE_TAG] = (compiled_reference(baseline_fn), (a_bool, b_bool))
+    bm.compare(functors, *inputs, record_as=op, params=locals())
 
 
 # Bitwise ops (3)
@@ -240,12 +508,39 @@ def test_logical_bench(
 
 class BitwiseBenchFixture(FixtureBase):
     PARAMS = [
-        ("op_name, shape, op_cls, baseline_fn", [
-            pytest.param("bitwise_and", _SHAPES[0], BitwiseAndFwdOp, torch.bitwise_and, marks=pytest.mark.smoke),
-            pytest.param("bitwise_and", _SHAPES[1], BitwiseAndFwdOp, torch.bitwise_and, marks=pytest.mark.full),
-            pytest.param("bitwise_or", _SHAPES[0], BitwiseOrFwdOp, torch.bitwise_or, marks=pytest.mark.full),
-            pytest.param("bitwise_xor", _SHAPES[0], BitwiseXorFwdOp, torch.bitwise_xor, marks=pytest.mark.full),
-        ]),
+        (
+            "op_name, shape, op_cls, baseline_fn",
+            [
+                pytest.param(
+                    "bitwise_and",
+                    _SHAPES[0],
+                    BitwiseAndFwdOp,
+                    torch.bitwise_and,
+                    marks=pytest.mark.smoke,
+                ),
+                pytest.param(
+                    "bitwise_and",
+                    _SHAPES[1],
+                    BitwiseAndFwdOp,
+                    torch.bitwise_and,
+                    marks=pytest.mark.full,
+                ),
+                pytest.param(
+                    "bitwise_or",
+                    _SHAPES[0],
+                    BitwiseOrFwdOp,
+                    torch.bitwise_or,
+                    marks=pytest.mark.full,
+                ),
+                pytest.param(
+                    "bitwise_xor",
+                    _SHAPES[0],
+                    BitwiseXorFwdOp,
+                    torch.bitwise_xor,
+                    marks=pytest.mark.full,
+                ),
+            ],
+        ),
     ]
 
 
@@ -261,12 +556,18 @@ def test_bitwise_bench(
     bm = BinaryBenchmark(test)
     inputs = test.gen_inputs()
 
-    op = op_cls(a_shape=shape, b_shape=shape)
-    result = bm.profile(op, *inputs)
-    BenchmarkReport.record(op, locals(), result, tag="tileops")
+    op = op_cls()
 
-    result_bl = bm.profile(baseline_fn, *inputs)
-    BenchmarkReport.record(op, locals(), result_bl, tag="torch")
+    bm.compare(
+        {
+            "tileops": op,
+            "torch": baseline_fn,
+            TORCH_COMPILE_TAG: compiled_reference(baseline_fn),
+        },
+        *inputs,
+        record_as=op,
+        params=locals(),
+    )
 
 
 # Fused gated ops (2)
@@ -277,30 +578,41 @@ _GELU_AND_MUL_OP = "GeluAndMulFwdOp"
 _GELU_TANH_AND_MUL_OP = "GeluTanhAndMulFwdOp"
 
 
-def _fused_gated_params(workloads: list) -> list:
-    """Manifest workloads -> (M, N, dtype) params; x_shape trailing axis is 2*N."""
-    params = []
-    for i, w in enumerate(workloads):
-        m, two_n = w["x_shape"]
-        for dtype_name in w["dtypes"]:
-            mark = pytest.mark.smoke if i == 0 else pytest.mark.full
-            params.append(pytest.param(
-                m, two_n // 2, getattr(torch, dtype_name), marks=mark,
-                id=f"{w.get('label', f'w{i}')}-{dtype_name}"))
-    return params
+def _fused_gated_args(w: dict, dtype: torch.dtype) -> tuple:
+    """``(M, N, dtype)``; the x_shape trailing axis is 2*N."""
+    m, two_n = w["x_shape"]
+    return (m, two_n // 2, dtype)
 
 
 class SiluAndMulBenchFixture(FixtureBase):
-    PARAMS = [("M, N, dtype", _fused_gated_params(load_workloads(_SILU_AND_MUL_OP)))]
+    PARAMS = [
+        (
+            "M, N, dtype",
+            workload_params(load_workloads(_SILU_AND_MUL_OP), _fused_gated_args, smoke_first=True),
+        )
+    ]
 
 
 class GeluAndMulBenchFixture(FixtureBase):
-    PARAMS = [("M, N, dtype", _fused_gated_params(load_workloads(_GELU_AND_MUL_OP)))]
+    PARAMS = [
+        (
+            "M, N, dtype",
+            workload_params(load_workloads(_GELU_AND_MUL_OP), _fused_gated_args, smoke_first=True),
+        )
+    ]
 
 
 class GeluTanhAndMulBenchFixture(FixtureBase):
-    PARAMS = [("M, N, dtype",
-               _fused_gated_params(load_workloads(_GELU_TANH_AND_MUL_OP)))]
+    PARAMS = [
+        (
+            "M, N, dtype",
+            workload_params(
+                load_workloads(_GELU_TANH_AND_MUL_OP),
+                _fused_gated_args,
+                smoke_first=True,
+            ),
+        )
+    ]
 
 
 def _silu_and_mul_baseline(x: torch.Tensor) -> torch.Tensor:
@@ -318,6 +630,8 @@ def _gelu_tanh_and_mul_baseline(x: torch.Tensor) -> torch.Tensor:
     return F.gelu(x[..., :half], approximate="tanh") * x[..., half:]
 
 
+# flashinfer names its fused gated kernels after the same three activations and
+# takes the same concatenated input, so a key here doubles as its entry-point name.
 _FUSED_BASELINES = {
     "silu_and_mul": _silu_and_mul_baseline,
     "gelu_and_mul": _gelu_and_mul_baseline,
@@ -325,40 +639,48 @@ _FUSED_BASELINES = {
 }
 
 
-def _profile_fused_gated(bm: ManifestBenchmark, op, test, baseline_key: str,
-                         params: dict) -> None:
+def _profile_fused_gated(bm: ManifestBenchmark, op, test, baseline_key: str, params: dict) -> None:
     inputs = test.gen_inputs()
-    result = bm.profile(op, *inputs)
-    BenchmarkReport.record(op, params, result, tag="tileops")
-    result_bl = bm.profile(_FUSED_BASELINES[baseline_key], *inputs)
-    BenchmarkReport.record(op, params, result_bl, tag="torch-ref")
+    baseline_fn = _FUSED_BASELINES[baseline_key]
+    flashinfer_fn = flashinfer_op(baseline_key)
+    assert_matches_reference(
+        flashinfer_fn, baseline_fn, *inputs, **reference_tolerance(params["dtype"])
+    )
+    bm.compare(
+        {
+            "tileops": op,
+            FLASHINFER_TAG: flashinfer_fn,
+            "torch-ref": baseline_fn,
+            TORCH_COMPILE_TAG: compiled_reference(baseline_fn),
+        },
+        *inputs,
+        record_as=op,
+        params=params,
+    )
 
 
 @SiluAndMulBenchFixture
 def test_silu_and_mul_bench(M: int, N: int, dtype: torch.dtype) -> None:
     test = FusedGatedBenchCase(M, N, dtype)
-    op = SiluAndMulFwdOp(M=M, N=N)
+    op = SiluAndMulFwdOp()
     bm = ManifestBenchmark(_SILU_AND_MUL_OP, op, test)
-    _profile_fused_gated(bm, op, test, "silu_and_mul",
-                         {"M": M, "N": N, "dtype": dtype})
+    _profile_fused_gated(bm, op, test, "silu_and_mul", {"M": M, "N": N, "dtype": dtype})
 
 
 @GeluAndMulBenchFixture
 def test_gelu_and_mul_bench(M: int, N: int, dtype: torch.dtype) -> None:
     test = FusedGatedBenchCase(M, N, dtype)
-    op = GeluAndMulFwdOp(M=M, N=N)
+    op = GeluAndMulFwdOp()
     bm = ManifestBenchmark(_GELU_AND_MUL_OP, op, test)
-    _profile_fused_gated(bm, op, test, "gelu_and_mul",
-                         {"M": M, "N": N, "dtype": dtype})
+    _profile_fused_gated(bm, op, test, "gelu_and_mul", {"M": M, "N": N, "dtype": dtype})
 
 
 @GeluTanhAndMulBenchFixture
 def test_gelu_tanh_and_mul_bench(M: int, N: int, dtype: torch.dtype) -> None:
     test = FusedGatedBenchCase(M, N, dtype)
-    op = GeluTanhAndMulFwdOp(M=M, N=N)
+    op = GeluTanhAndMulFwdOp()
     bm = ManifestBenchmark(_GELU_TANH_AND_MUL_OP, op, test)
-    _profile_fused_gated(bm, op, test, "gelu_tanh_and_mul",
-                         {"M": M, "N": N, "dtype": dtype})
+    _profile_fused_gated(bm, op, test, "gelu_tanh_and_mul", {"M": M, "N": N, "dtype": dtype})
 
 
 # Fused gated strategy benchmark (direct vs explicit_parallel)
@@ -386,18 +708,20 @@ def _strategy_params():
     params = []
     for strategy in ("direct", "explicit_parallel"):
         for M, N in _STRATEGY_SHAPES:
-            mark = (pytest.mark.smoke if ref_shape == (M, N)
-                    else pytest.mark.full)
-            params.append(pytest.param(
-                sweep_op, M, N, ref_dtype, sweep_cls, strategy, marks=mark))
+            mark = pytest.mark.smoke if ref_shape == (M, N) else pytest.mark.full
+            params.append(pytest.param(sweep_op, M, N, ref_dtype, sweep_cls, strategy, marks=mark))
         for dtype in _STRATEGY_DTYPES[1:]:
-            params.append(pytest.param(
-                sweep_op, *ref_shape, dtype, sweep_cls, strategy,
-                marks=pytest.mark.full))
+            params.append(
+                pytest.param(
+                    sweep_op, *ref_shape, dtype, sweep_cls, strategy, marks=pytest.mark.full
+                )
+            )
         for op_name, kernel_cls in sentinels:
-            params.append(pytest.param(
-                op_name, *ref_shape, ref_dtype, kernel_cls, strategy,
-                marks=pytest.mark.full))
+            params.append(
+                pytest.param(
+                    op_name, *ref_shape, ref_dtype, kernel_cls, strategy, marks=pytest.mark.full
+                )
+            )
     return params
 
 
@@ -421,12 +745,17 @@ def test_fused_gated_strategy_bench(
 
     shape = (M, N)
     kernel = kernel_cls(M=M, N=N, dtype=dtype, config={"strategy": strategy})
-    result = bm.profile(kernel, *inputs)
-    BenchmarkReport.record(f"{op_name}_strategy", locals(), result, tag=f"tileops-{strategy}")
-
     baseline_fn = _FUSED_BASELINES[op_name]
-    result_bl = bm.profile(baseline_fn, *inputs)
-    BenchmarkReport.record(f"{op_name}_strategy", locals(), result_bl, tag="torch")
+    bm.compare(
+        {
+            f"tileops-{strategy}": kernel,
+            "torch": baseline_fn,
+            TORCH_COMPILE_TAG: compiled_reference(baseline_fn),
+        },
+        *inputs,
+        record_as=f"{op_name}_strategy",
+        params=locals(),
+    )
 
 
 # Broadcast benchmark (bias-add pattern)
@@ -452,22 +781,99 @@ class BroadcastBenchmark(BenchmarkBase[BroadcastBenchCase]):
         out_elem = t.output_dtype.itemsize
         # Read a + read b (smaller, broadcast) + write output
         return (prod(t.a_shape) + prod(t.b_shape)) * elem + t.n_total * out_elem
+
+
 class BroadcastBenchFixture(FixtureBase):
     PARAMS = [
-        ("op_name, a_shape, b_shape, dtype, op_cls, baseline_fn, gen_inputs", [
-            # sub — bias-add pattern
-            pytest.param("sub", *_BROADCAST_SHAPES[0], torch.float16, SubFwdOp, torch.sub, "normal", marks=pytest.mark.smoke),
-            pytest.param("sub", *_BROADCAST_SHAPES[1], torch.float16, SubFwdOp, torch.sub, "normal", marks=pytest.mark.full),
-            pytest.param("sub", *_BROADCAST_SHAPES[2], torch.float16, SubFwdOp, torch.sub, "normal", marks=pytest.mark.full),
-            # mul — bias-add pattern
-            pytest.param("mul", *_BROADCAST_SHAPES[0], torch.float16, MulFwdOp, torch.mul, "normal", marks=pytest.mark.full),
-            pytest.param("mul", *_BROADCAST_SHAPES[1], torch.float16, MulFwdOp, torch.mul, "normal", marks=pytest.mark.full),
-            pytest.param("mul", *_BROADCAST_SHAPES[2], torch.float16, MulFwdOp, torch.mul, "normal", marks=pytest.mark.full),
-            # div — bias-add pattern
-            pytest.param("div", *_BROADCAST_SHAPES[0], torch.float16, DivFwdOp, torch.div, "positive", marks=pytest.mark.full),
-            pytest.param("div", *_BROADCAST_SHAPES[1], torch.float16, DivFwdOp, torch.div, "positive", marks=pytest.mark.full),
-            pytest.param("div", *_BROADCAST_SHAPES[2], torch.float16, DivFwdOp, torch.div, "positive", marks=pytest.mark.full),
-        ]),
+        (
+            "op_name, a_shape, b_shape, dtype, op_cls, baseline_fn, gen_inputs",
+            [
+                # sub — bias-add pattern
+                pytest.param(
+                    "sub",
+                    *_BROADCAST_SHAPES[0],
+                    torch.float16,
+                    SubFwdOp,
+                    torch.sub,
+                    "normal",
+                    marks=pytest.mark.smoke,
+                ),
+                pytest.param(
+                    "sub",
+                    *_BROADCAST_SHAPES[1],
+                    torch.float16,
+                    SubFwdOp,
+                    torch.sub,
+                    "normal",
+                    marks=pytest.mark.full,
+                ),
+                pytest.param(
+                    "sub",
+                    *_BROADCAST_SHAPES[2],
+                    torch.float16,
+                    SubFwdOp,
+                    torch.sub,
+                    "normal",
+                    marks=pytest.mark.full,
+                ),
+                # mul — bias-add pattern
+                pytest.param(
+                    "mul",
+                    *_BROADCAST_SHAPES[0],
+                    torch.float16,
+                    MulFwdOp,
+                    torch.mul,
+                    "normal",
+                    marks=pytest.mark.full,
+                ),
+                pytest.param(
+                    "mul",
+                    *_BROADCAST_SHAPES[1],
+                    torch.float16,
+                    MulFwdOp,
+                    torch.mul,
+                    "normal",
+                    marks=pytest.mark.full,
+                ),
+                pytest.param(
+                    "mul",
+                    *_BROADCAST_SHAPES[2],
+                    torch.float16,
+                    MulFwdOp,
+                    torch.mul,
+                    "normal",
+                    marks=pytest.mark.full,
+                ),
+                # div — bias-add pattern
+                pytest.param(
+                    "div",
+                    *_BROADCAST_SHAPES[0],
+                    torch.float16,
+                    DivFwdOp,
+                    torch.div,
+                    "positive",
+                    marks=pytest.mark.full,
+                ),
+                pytest.param(
+                    "div",
+                    *_BROADCAST_SHAPES[1],
+                    torch.float16,
+                    DivFwdOp,
+                    torch.div,
+                    "positive",
+                    marks=pytest.mark.full,
+                ),
+                pytest.param(
+                    "div",
+                    *_BROADCAST_SHAPES[2],
+                    torch.float16,
+                    DivFwdOp,
+                    torch.div,
+                    "positive",
+                    marks=pytest.mark.full,
+                ),
+            ],
+        ),
     ]
 
 
@@ -485,13 +891,15 @@ def test_broadcast_bench(
     bm = BroadcastBenchmark(test)
     inputs = test.gen_inputs()
 
-    op = op_cls(a_shape=a_shape, b_shape=b_shape)
-    result = bm.profile(op, *inputs)
-    BenchmarkReport.record(f"{op_name}_bcast", locals(), result, tag="tileops")
+    op = op_cls()
 
-    result_bl = bm.profile(baseline_fn, *inputs)
-    BenchmarkReport.record(f"{op_name}_bcast", locals(), result_bl, tag="torch")
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])
+    bm.compare(
+        {
+            "tileops": op,
+            "torch": baseline_fn,
+            TORCH_COMPILE_TAG: compiled_reference(baseline_fn),
+        },
+        *inputs,
+        record_as=f"{op_name}_bcast",
+        params=locals(),
+    )

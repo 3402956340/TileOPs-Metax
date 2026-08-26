@@ -1,4 +1,5 @@
 """Unit tests for trace payload support."""
+
 import pytest
 import tilelang
 import tilelang.language as T
@@ -36,6 +37,7 @@ def test_payload_api_signature(preserve_trace_state):
         def kernel(out: T.Tensor((16,), "float32")):
             with T.Kernel(1, threads=16), trace.range("test", payload=0):
                 pass
+
         return trace.finalize(kernel)
 
     # Should compile without error
@@ -202,7 +204,3 @@ def test_dynamic_payload_runtime_expr(preserve_trace_state, tmp_path):
 
     payloads = sorted([s.payload for s in loop_slices[:4]])
     assert payloads == [0, 1, 2, 3], f"Expected payloads [0, 1, 2, 3], got {payloads}"
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

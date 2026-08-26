@@ -68,8 +68,7 @@ def _adaptive_avg_pool2d_kernel(
     return _adaptive_avg_pool2d_func
 
 
-@torch.library.custom_op("top::adaptive_avg_pool2d_wrapped_kernel", mutates_args=())
-def _adaptive_avg_pool2d_wrapped_kernel(
+def _launch_adaptive_avg_pool2d(
     n: int,
     c_in: int,
     h_in: int,
@@ -81,30 +80,13 @@ def _adaptive_avg_pool2d_wrapped_kernel(
     threads: int,
     x: torch.Tensor,
 ) -> torch.Tensor:
-    return _adaptive_avg_pool2d_kernel(
-        n, c_in, h_in, w_in, out_h, out_w, dtype
-    )(block_m, threads)(x)
-
-
-@_adaptive_avg_pool2d_wrapped_kernel.register_fake
-def _(
-    n: int,
-    c_in: int,
-    h_in: int,
-    w_in: int,
-    out_h: int,
-    out_w: int,
-    dtype: str,
-    block_m: int,
-    threads: int,
-    x: torch.Tensor,
-) -> torch.Tensor:
-    _ = (dtype, block_m, threads)
-    return torch.empty((n, c_in, out_h, out_w), dtype=x.dtype, device=x.device)
+    return _adaptive_avg_pool2d_kernel(n, c_in, h_in, w_in, out_h, out_w, dtype)(block_m, threads)(
+        x
+    )
 
 
 class AdaptiveAvgPool2dKernel(AdaptivePool2dKernelBase):
     """Adaptive average pooling forward kernel for NCHW inputs."""
 
     _build = staticmethod(_adaptive_avg_pool2d_kernel)
-    _dispatch = staticmethod(_adaptive_avg_pool2d_wrapped_kernel)
+    _dispatch = staticmethod(_launch_adaptive_avg_pool2d)

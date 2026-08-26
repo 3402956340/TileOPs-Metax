@@ -60,9 +60,7 @@ def _avg_pool2d_kernel(
                                 ih = oh * stride_h + kh - pad_h
                                 iw = ow * stride_w + kw - pad_w
                                 if ih >= 0 and ih < h_in and iw >= 0 and iw < w_in:
-                                    sum_val += T.cast(
-                                        x[batch, c_idx, ih, iw], accum_dtype
-                                    )
+                                    sum_val += T.cast(x[batch, c_idx, ih, iw], accum_dtype)
 
                         start_h = oh * stride_h - pad_h
                         start_w = ow * stride_w - pad_w
@@ -71,17 +69,11 @@ def _avg_pool2d_kernel(
                         valid_h = T.max(T.min(end_h, h_in) - T.max(start_h, 0), 0)
                         valid_w = T.max(T.min(end_w, w_in) - T.max(start_w, 0), 0)
                         valid_count = valid_h * valid_w
-                        padded_h = T.max(
-                            T.min(end_h, h_in + pad_h) - T.max(start_h, -pad_h), 0
-                        )
-                        padded_w = T.max(
-                            T.min(end_w, w_in + pad_w) - T.max(start_w, -pad_w), 0
-                        )
+                        padded_h = T.max(T.min(end_h, h_in + pad_h) - T.max(start_h, -pad_h), 0)
+                        padded_w = T.max(T.min(end_w, w_in + pad_w) - T.max(start_w, -pad_w), 0)
                         padded_count = padded_h * padded_w
                         auto_divisor = T.max(
-                            T.if_then_else(
-                                count_include_pad, padded_count, valid_count
-                            ),
+                            T.if_then_else(count_include_pad, padded_count, valid_count),
                             1,
                         )
                         divisor = T.if_then_else(
@@ -143,9 +135,7 @@ def _avg_pool2d_spatial_kernel(
                                 ih = oh * stride_h + kh - pad_h
                                 iw = ow * stride_w + kw - pad_w
                                 if ih >= 0 and ih < h_in and iw >= 0 and iw < w_in:
-                                    sum_val += T.cast(
-                                        x[batch, c_idx, ih, iw], accum_dtype
-                                    )
+                                    sum_val += T.cast(x[batch, c_idx, ih, iw], accum_dtype)
 
                         out[batch, c_idx, oh, ow] = T.cast(
                             sum_val / T.cast(kernel_h * kernel_w, accum_dtype),
@@ -157,8 +147,7 @@ def _avg_pool2d_spatial_kernel(
     return _avg_pool2d_spatial_func
 
 
-@torch.library.custom_op("top::avg_pool2d_spatial_wrapped_kernel", mutates_args=())
-def _avg_pool2d_spatial_wrapped_kernel(
+def _launch_avg_pool2d_spatial(
     n: int,
     c_in: int,
     h_in: int,
@@ -189,35 +178,7 @@ def _avg_pool2d_spatial_wrapped_kernel(
     )(block_m, threads)(x)
 
 
-@_avg_pool2d_spatial_wrapped_kernel.register_fake
-def _(
-    n: int,
-    c_in: int,
-    h_in: int,
-    w_in: int,
-    kernel_h: int,
-    kernel_w: int,
-    stride_h: int,
-    stride_w: int,
-    pad_h: int,
-    pad_w: int,
-    dtype: str,
-    block_m: int,
-    threads: int,
-    x: torch.Tensor,
-) -> torch.Tensor:
-    _ = (
-        dtype,
-        block_m,
-        threads,
-    )
-    out_h = pool_output_dim(h_in, kernel_h, stride_h, pad_h, False)
-    out_w = pool_output_dim(w_in, kernel_w, stride_w, pad_w, False)
-    return torch.empty((n, c_in, out_h, out_w), dtype=x.dtype, device=x.device)
-
-
-@torch.library.custom_op("top::avg_pool2d_wrapped_kernel", mutates_args=())
-def _avg_pool2d_wrapped_kernel(
+def _launch_avg_pool2d(
     n: int,
     c_in: int,
     h_in: int,
@@ -254,40 +215,6 @@ def _avg_pool2d_wrapped_kernel(
         divisor_override,
         dtype,
     )(block_m, threads)(x)
-
-
-@_avg_pool2d_wrapped_kernel.register_fake
-def _(
-    n: int,
-    c_in: int,
-    h_in: int,
-    w_in: int,
-    kernel_h: int,
-    kernel_w: int,
-    stride_h: int,
-    stride_w: int,
-    pad_h: int,
-    pad_w: int,
-    ceil_mode: bool,
-    count_include_pad: bool,
-    use_divisor_override: bool,
-    divisor_override: int,
-    dtype: str,
-    block_m: int,
-    threads: int,
-    x: torch.Tensor,
-) -> torch.Tensor:
-    _ = (
-        count_include_pad,
-        use_divisor_override,
-        divisor_override,
-        dtype,
-        block_m,
-        threads,
-    )
-    out_h = pool_output_dim(h_in, kernel_h, stride_h, pad_h, ceil_mode)
-    out_w = pool_output_dim(w_in, kernel_w, stride_w, pad_w, ceil_mode)
-    return torch.empty((n, c_in, out_h, out_w), dtype=x.dtype, device=x.device)
 
 
 class AvgPool2dSpatialKernel(Kernel):
@@ -355,7 +282,8 @@ class AvgPool2dSpatialKernel(Kernel):
         ]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return _avg_pool2d_spatial_wrapped_kernel(
+        self._require_cuda(x=x)
+        return _launch_avg_pool2d_spatial(
             self.n,
             self.c_in,
             self.h_in,
@@ -448,7 +376,8 @@ class AvgPool2dKernel(Kernel):
         ]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return _avg_pool2d_wrapped_kernel(
+        self._require_cuda(x=x)
+        return _launch_avg_pool2d(
             self.n,
             self.c_in,
             self.h_in,

@@ -7,16 +7,25 @@ from tileops.kernels.kernel_base import Kernel
 
 from .op_base import Op
 
-__all__ = ["FP8LightningIndexerOp"]
+__all__ = ["FP8LightningIndexerFwdOp"]
 
 
-class FP8LightningIndexerOp(Op):
+class FP8LightningIndexerFwdOp(Op):
+    def __init__(
+        self,
+        clean_logits=True,
+        config: Optional[dict] = None,
+        kernel_map: Optional[Dict[str, Kernel]] = None,
+        tune=False,
+    ) -> None:
+        """Build the op. Shapes and dtype are taken from the first call.
 
-    def __init__(self,
-                 clean_logits=True,
-                 config: Optional[dict] = None,
-                 kernel_map: Optional[Dict[str, Kernel]] = None,
-                 tune=False) -> None:
+        Args:
+            clean_logits: Manifest ``params.clean_logits``, ``bool``, default ``True``.
+            config: Manifest ``params.config``, ``dict | None``, default ``None``.
+            kernel_map: Optional kernel override dict.
+            tune: Whether to autotune, applied when a kernel is first built.
+        """
         self.batch = None
         self.seq_len = None
         self.heads = None
@@ -42,6 +51,7 @@ class FP8LightningIndexerOp(Op):
 
     def _get_kernel(
         self,
+        inputs: "tuple[torch.Tensor | None, ...]",
         batch: int,
         seq_len: int,
         heads: int,
@@ -64,8 +74,9 @@ class FP8LightningIndexerOp(Op):
         )
         return self.get_or_build_kernel(
             "fp8_lightning_indexer_kernel",
-            key,
-            lambda: self.kernel_map["fp8_lightning_indexer_kernel"](
+            inputs,
+            key=key,
+            build=lambda: self.kernel_map["fp8_lightning_indexer_kernel"](
                 batch,
                 seq_len,
                 heads,
@@ -74,7 +85,8 @@ class FP8LightningIndexerOp(Op):
                 kv_group,
                 self.clean_logits,
                 config=self.config,
-                tune=self.tune),
+                tune=self.tune,
+            ),
         )
 
     def _resolve_and_bind(
@@ -87,9 +99,9 @@ class FP8LightningIndexerOp(Op):
         index_k_scale: Optional[torch.Tensor],
     ) -> None:
         if not index_q.is_cuda or not index_k.is_cuda:
-            raise ValueError("FP8LightningIndexerOp expects CUDA inputs")
+            raise ValueError("FP8LightningIndexerFwdOp expects CUDA inputs")
         if index_q.ndim != 4 or index_k.ndim != 4:
-            raise ValueError("FP8LightningIndexerOp expects index_q/index_k to be 4D tensors")
+            raise ValueError("FP8LightningIndexerFwdOp expects index_q/index_k to be 4D tensors")
         batch, seq_len, heads, index_dim = index_q.shape
         k_batch, seq_len_kv, kv_group, k_dim = index_k.shape
         if k_batch != batch or k_dim != index_dim:
@@ -121,37 +133,85 @@ class FP8LightningIndexerOp(Op):
         self.seq_len_kv = seq_len_kv
         self.kv_group = kv_group
         self.kernel = self._get_kernel(
-            batch, seq_len, heads, index_dim, seq_len_kv, kv_group, index_q.device.index)
+            (index_q, index_k, weights, cu_seqlen_ks, cu_seqlen_ke, index_k_scale),
+            batch,
+            seq_len,
+            heads,
+            index_dim,
+            seq_len_kv,
+            kv_group,
+            index_q.device.index,
+        )
 
-    def torch_quant_forward(self, index_q: torch.Tensor, index_k: torch.Tensor,
-                            weights: torch.Tensor, cu_seqlen_ks: torch.Tensor,
-                            cu_seqlen_ke: torch.Tensor) -> torch.Tensor:
+    def torch_quant_forward(
+        self,
+        index_q: torch.Tensor,
+        index_k: torch.Tensor,
+        weights: torch.Tensor,
+        cu_seqlen_ks: torch.Tensor,
+        cu_seqlen_ke: torch.Tensor,
+    ) -> torch.Tensor:
         index_q = index_q.to(torch.float8_e4m3fn)
         index_k, index_k_scale = self.per_custom_dims_cast_to_fp8(index_k, (0,), False)
 
         return self.kernel(index_q, index_k, index_k_scale, weights, cu_seqlen_ks, cu_seqlen_ke)
 
-    def tl_quant_forward(self, index_q: torch.Tensor, index_k: torch.Tensor,
-                         index_k_scale: torch.Tensor, weights: torch.Tensor,
-                         cu_seqlen_ks: torch.Tensor, cu_seqlen_ke: torch.Tensor) -> torch.Tensor:
+    def tl_quant_forward(
+        self,
+        index_q: torch.Tensor,
+        index_k: torch.Tensor,
+        index_k_scale: torch.Tensor,
+        weights: torch.Tensor,
+        cu_seqlen_ks: torch.Tensor,
+        cu_seqlen_ke: torch.Tensor,
+    ) -> torch.Tensor:
         return self.kernel(index_q, index_k, index_k_scale, weights, cu_seqlen_ks, cu_seqlen_ke)
 
-    def forward(self,
-                index_q: torch.Tensor,
-                index_k: torch.Tensor,
-                weights: torch.Tensor,
-                cu_seqlen_ks: torch.Tensor,
-                cu_seqlen_ke: torch.Tensor,
-                index_k_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
-        self._resolve_and_bind(
-            index_q, index_k, weights, cu_seqlen_ks, cu_seqlen_ke, index_k_scale)
+    def _infer_output_shapes(
+        self,
+        index_q_shape: tuple[int, ...],
+        index_k_shape: tuple[int, ...],
+        weights_shape: tuple[int, ...],
+        cu_seqlen_ks_shape: tuple[int, ...],
+        cu_seqlen_ke_shape: tuple[int, ...],
+        index_k_scale_shape: tuple[int, ...],
+    ) -> dict[str, tuple[int, ...]]:
+        """Manifest ``outputs``: $[batch \\times seq\\_len \\times seq\\_len\\_kv \\times kv\\_group]$."""
+        batch, seq_len = index_q_shape[0], index_q_shape[1]
+        return {"logits": (batch, seq_len, index_k_shape[1], index_k_shape[2])}
+
+    def forward(
+        self,
+        index_q: torch.Tensor,
+        index_k: torch.Tensor,
+        weights: torch.Tensor,
+        cu_seqlen_ks: torch.Tensor,
+        cu_seqlen_ke: torch.Tensor,
+        index_k_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Run the op on the inputs the manifest declares.
+
+        Args:
+            index_q: Input tensor, dtype ``bfloat16 | float8_e4m3fn``.
+            index_k: Input tensor, dtype ``bfloat16 | float8_e4m3fn``.
+            weights: Input tensor, dtype ``float32``.
+            cu_seqlen_ks: Input tensor, dtype ``int32``.
+            cu_seqlen_ke: Input tensor, dtype ``int32``.
+            index_k_scale: Input tensor, dtype ``float32``. Optional.
+
+        Returns:
+            ``logits``, as the manifest declares.
+        """
+        self._resolve_and_bind(index_q, index_k, weights, cu_seqlen_ks, cu_seqlen_ke, index_k_scale)
         if index_k_scale is None:
             return self.torch_quant_forward(index_q, index_k, weights, cu_seqlen_ks, cu_seqlen_ke)
-        return self.tl_quant_forward(index_q, index_k, index_k_scale, weights, cu_seqlen_ks,
-                                     cu_seqlen_ke)
+        return self.tl_quant_forward(
+            index_q, index_k, index_k_scale, weights, cu_seqlen_ks, cu_seqlen_ke
+        )
 
-    def per_custom_dims_cast_to_fp8(self, x: torch.Tensor, dims: Tuple[int],
-                                    use_ue8m0: bool) -> Tuple[torch.Tensor, torch.Tensor]:
+    def per_custom_dims_cast_to_fp8(
+        self, x: torch.Tensor, dims: Tuple[int], use_ue8m0: bool
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         x_absmax = x.to(torch.float32).abs().amax(dim=-1, keepdim=True).clamp(1e-4)
         sf = x_absmax / 448.0
         if use_ue8m0:

@@ -2,8 +2,10 @@ import pytest
 import torch
 
 from tests.test_base import FixtureBase
-from tileops.kernels.gated_deltanet.gated_deltanet_bwd import GatedDeltaNetBwdKernel
-from tileops.kernels.gated_deltanet.gated_deltanet_bwd_maca import GatedDeltaNetBwdMACAKernel
+from tileops.kernels.linear_attention.gated_deltanet.gated_deltanet_bwd import (
+    GatedDeltaNetBwdKernel,
+)
+from tileops.kernels.linear_attention.gated_deltanet.gated_deltanet_bwd_maca import GatedDeltaNetBwdMACAKernel
 from tileops.ops import GatedDeltaNetBwdOp
 from tileops.utils import is_maca
 
@@ -111,9 +113,9 @@ def test_gated_deltanet_bwd(
     beta = torch.rand(B, H, S, device="cuda", dtype=dtype) * 0.5
 
     # Forward to get S for backward kernel
-    from tileops.ops import GatedDeltaNetFwdOp
+    from tileops.ops import GatedDeltaNetBHTDFwdOp
 
-    fwd_op = GatedDeltaNetFwdOp(chunk_size=BC)
+    fwd_op = GatedDeltaNetBHTDFwdOp(chunk_size=BC)
     _o, S_fwd, _Aw, _Au = fwd_op.forward(q, k, v, g, beta)
     do = torch.randn(B, H, S, DV, device="cuda", dtype=dtype) * 0.1
 
@@ -168,9 +170,9 @@ def test_gated_deltanet_bwd_segmented_carry_matches_sequential_d128(
     beta = torch.rand(B, H, S, device="cuda", dtype=dtype) * 0.5
     do = torch.randn(B, H, S, DV, device="cuda", dtype=dtype) * 0.1
 
-    from tileops.ops import GatedDeltaNetFwdOp
+    from tileops.ops import GatedDeltaNetBHTDFwdOp
 
-    fwd_op = GatedDeltaNetFwdOp(chunk_size=BC)
+    fwd_op = GatedDeltaNetBHTDFwdOp(chunk_size=BC)
     _o, S_fwd, _Aw, _Au = fwd_op.forward(q, k, v, g, beta)
 
     if is_maca():
@@ -299,7 +301,3 @@ def test_gated_deltanet_bwd_default_carry_dispatch(
     )
     assert kernel.default_config["recurrence_segmented_carry"] == expected_mode
     assert kernel.default_config["recurrence_block_v"] == expected_block_v
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])

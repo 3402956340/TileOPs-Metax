@@ -1,251 +1,137 @@
-"""FusedMoEExperts implementation: nopad + 3WG persistent variant."""
+"""FusedMoEExperts implementation: nopad + 3WG persistent variant.
+
+Registers no operator of its own: a composite is not the unit of replacement,
+so its graph is its leaves' operators.
+"""
 
 from __future__ import annotations
 
-import logging
 from typing import Dict, Optional
 
+import torch
 from torch import Tensor
 
-from tileops.kernels.grouped_gemm import (
-    GroupedGemmPersistent3WGKernel,
-    GroupedGemmPersistentMACAKernel,
-)
-from tileops.kernels.grouped_gemm.grouped_gemm_persistent_3wg import (
-    _DEFAULT_CONFIG as _3WG_DEFAULT_CONFIG,
-)
 from tileops.kernels.kernel_base import Kernel
-from tileops.kernels.moe.moe_grouped_gemm_nopad import MoeGroupedGemmNopadKernel
 
-# Imported unconditionally: the eligibility check reads its block_n even when
-# use_fused_activation ends up False. The wrapper class itself is deferred to
-# the fused branch (imported lazily in __init__).
-from tileops.kernels.moe.moe_grouped_gemm_persistent_3wg_fused_act import (
-    _DEFAULT_CONFIG as _FUSED_ACT_DEFAULT_CONFIG,
-)
-from tileops.ops.moe._activation import build_activation_op
-from tileops.utils import is_maca
-
-from .abc import (
+from ...op_base import Op
+from ..abc import (
     FusedMoEExpertsModular,
     WeightedReduce,
     WeightedReduceNoOp,
     _validate_fused_moe_experts_dtypes,
 )
+from .gate_up import MoeGateUpFwdOp
 from .moe_grouped_gemm_nopad import MoeGroupedGemmNopadFwdOp
 from .permute_nopad import MoePermuteNopadFwdOp
 from .unpermute import MoeUnpermuteFwdOp
 
-__all__ = [
-    "FusedMoEExpertsNopadPersistent3WGFwdOp",
-]
-
-_logger = logging.getLogger(__name__)
+__all__ = ["FusedMoEExpertsNopadPersistent3WGFwdOp"]
 
 
 class FusedMoEExpertsNopadPersistent3WGFwdOp(FusedMoEExpertsModular):
     """Expert GEMM using tight (T*K rows, no-pad) layout with 3WG persistent kernel.
 
-    Internal pipeline: MoePermuteNopadFwdOp → gate_up GEMM (3WG; activation
-    fused into the epilogue when use_fused_activation=True, else a separate
-    silu_and_mul/gelu_and_mul step) → down GEMM (3WG) → MoeUnpermuteFwdOp
-    (weighted reduction included).
+    Internal pipeline: MoePermuteNopadFwdOp -> MoeGateUpFwdOp -> down GEMM ->
+    MoeUnpermuteFwdOp (weighted reduction included). Every stage is built at
+    construction, so ``forward`` resolves nothing and stays traceable.
 
     forward() output shape is (T, H): reduction is done internally by
     MoeUnpermuteFwdOp, so make_weighted_reduce() returns WeightedReduceNoOp.
 
-    Performance note: the 3WG persistent kernel is throughput-tuned for
-    prefill-scale workloads; small-batch decode (num_tokens ≲ 512) may run
-    a few percent behind tile-scheduler kernels. Decode-heavy deployments
-    can pass ``gemm_kernel=MoeGroupedGemmNopadKernel`` to bypass 3WG and
-    use the lighter tile-scheduler path explicitly.
-
-    Args:
-        num_tokens: Number of input tokens T (rows of hidden_states).
-        num_experts: Total number of experts E in the routing table.
-        top_k: Number of experts each token is routed to (K).
-        hidden_size: Model hidden dimension H (GEMM contraction dim for
-            gate_up, output dim for down).
-        ffn_size: Per-expert FFN intermediate dimension F.
-        routed_scaling_factor: Scalar applied to the final reduced output.
-            Defaults to 1.0 (no scaling).
-        expert_map: Optional global→local expert id map for expert parallelism
-            (EP). Entries < 0 mark experts not owned by this rank.
-        gemm_kernel: Optional override for the grouped-GEMM kernel class.
-            Defaults to GroupedGemmPersistent3WGKernel; pass
-            MoeGroupedGemmNopadKernel to force the tile-scheduler path.
-        kernel_map: Optional kernel overrides forwarded to the inner Ops.
-        activation: Gated activation applied to gate_up: 'silu_and_mul' or
-            'gelu_and_mul'.
-        use_fused_activation: If True, fuse the activation into the gate_up
-            GEMM epilogue via MoeGroupedGemmPersistent3WGFusedActKernel (avoids
-            materializing the [numel, 2*ffn] gate_up in global memory). Raises
-            when this op cannot honour it: the 3WG kernel must be the gate_up
-            GEMM with no conflicting moe_grouped_gemm_kernel override,
-            activation must be silu_and_mul or gelu_and_mul, and ffn_size must
-            be a multiple of the fused kernel's block_n (128). Whether the
-            device can run the fused kernel is answered when that kernel is
-            built, not here. Default False
-            reproduces the unfused pipeline exactly. Performance: at production
-            FFN sizes (H200, bf16) this is a small win in both regimes —
-            roughly 1.02-1.05x for compute-bound prefill and ~1.05x for
-            memory-bound decode — from eliminating the gate_up global
-            round-trip; benefits grow as the token count shrinks.
-
-    Example (decode-optimized opt-out):
-        from tileops.kernels.moe.moe_grouped_gemm_nopad import (
-            MoeGroupedGemmNopadKernel,
-        )
+    Example:
+        ```python linenums="1"
         experts = FusedMoEExpertsNopadPersistent3WGFwdOp(
-            num_tokens=T, num_experts=E, top_k=K,
-            hidden_size=H, ffn_size=F,
-            gemm_kernel=MoeGroupedGemmNopadKernel,
+            num_tokens=512, num_experts=128, num_experts_local=128, top_k=8,
+            hidden_size=7168, ffn_size=2048,
         )
+        ```
     """
 
     def __init__(
         self,
         num_tokens: int,
         num_experts: int,
+        num_experts_local: int,
         top_k: int,
         hidden_size: int,
         ffn_size: int,
         routed_scaling_factor: float = 1.0,
-        expert_map: Optional[Tensor] = None,
-        gemm_kernel: Optional[type] = None,
         kernel_map: Optional[Dict[str, Kernel]] = None,
         *,
         activation: str = "silu_and_mul",
-        use_fused_activation: bool = False,
     ):
+        """Build the op. Shapes and dtype are taken from the first call.
+
+        Args:
+            num_tokens: Number of input tokens T (rows of hidden_states).
+            num_experts: Total number of experts E in the routing table.
+            num_experts_local: Number of those experts this rank owns; the weights
+                and both grouped GEMMs are sized by it. Equal to ``num_experts``
+                outside expert parallelism.
+            top_k: Number of experts each token is routed to (K).
+            hidden_size: Model hidden dimension H (GEMM contraction dim for
+                gate_up, output dim for down).
+            ffn_size: Per-expert FFN intermediate dimension F.
+            routed_scaling_factor: Scalar applied to the final reduced output.
+                Defaults to 1.0 (no scaling).
+            kernel_map: Optional kernel overrides forwarded to the inner Ops.
+            activation: Gated activation applied to gate_up: 'silu_and_mul' or
+                'gelu_and_mul'.
+        """
         self.dispatch_kernel(kernel_map)
         self.num_tokens = num_tokens
         self.num_experts = num_experts
+        self.num_experts_local = num_experts_local
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.ffn_size = ffn_size
+        self.activation = activation
+        self._routed_scaling_factor = routed_scaling_factor
         numel = num_tokens * top_k
-        num_experts_local = (
-            int((expert_map >= 0).sum().item()) if expert_map is not None else num_experts
-        )
-
-        if is_maca():
-            kernel_cls = gemm_kernel or GroupedGemmPersistentMACAKernel
-        else:
-            kernel_cls = gemm_kernel or GroupedGemmPersistent3WGKernel
-
-        # 3WG requires N and K aligned to its default block dimensions.
-        # Fall back to tile scheduler kernel for small/unaligned dimensions.
-        _3wg_block_n = _3WG_DEFAULT_CONFIG["block_n"]
-        _3wg_block_k = _3WG_DEFAULT_CONFIG["block_k"]
-        gate_up_n = ffn_size * 2
-        if kernel_cls is GroupedGemmPersistent3WGKernel:
-            gate_up_ok = (gate_up_n % _3wg_block_n == 0) and (hidden_size % _3wg_block_k == 0)
-            down_ok = (hidden_size % _3wg_block_n == 0) and (ffn_size % _3wg_block_k == 0)
-            if not (gate_up_ok and down_ok):
-                _logger.warning(
-                    "FusedMoEExpertsNopadPersistent3WGFwdOp: dims not aligned "
-                    "to 3WG block (gate_up_n=%d, hidden_size=%d, ffn_size=%d; "
-                    "block_n=%d, block_k=%d) — falling back to "
-                    "MoeGroupedGemmNopadKernel.",
-                    gate_up_n, hidden_size, ffn_size, _3wg_block_n, _3wg_block_k,
-                )
-                kernel_cls = MoeGroupedGemmNopadKernel
-
-        # A caller can steer the gate_up GEMM either via gemm_kernel (already
-        # folded into kernel_cls) or via kernel_map["moe_grouped_gemm_kernel"]
-        # (merged into the unfused gate_up / down ops below). The fused gate_up
-        # wrapper keys off "moe_grouped_gemm_fused_act_kernel" and cannot honor a
-        # "moe_grouped_gemm_kernel" override, so enabling fusion alongside a
-        # non-3WG override would produce a fused 3WG gate_up next to an
-        # overridden down GEMM. That combination is refused below.
-        gemm_override = (kernel_map or {}).get("moe_grouped_gemm_kernel")
-        self.use_fused_activation = use_fused_activation
-        if use_fused_activation and is_maca():
-            # Conflicting override must be refused (same contract as CUDA), not
-            # quietly downgraded. Only kernel-type ineligibility falls back.
-            if (gemm_override is not None
-                    and gemm_override is not GroupedGemmPersistentMACAKernel):
-                raise ValueError(
-                    "use_fused_activation=True cannot honour a moe_grouped_gemm_kernel "
-                    f"override ({gemm_override.__name__}): the fused gate_up wrapper keys off "
-                    "moe_grouped_gemm_fused_act_kernel, so the override would reach the down "
-                    "GEMM alone and leave the pipeline inconsistent")
-            if kernel_cls is not GroupedGemmPersistentMACAKernel:
-                _logger.warning(
-                    "use_fused_activation=True not eligible on MACA (requires "
-                    "GroupedGemmPersistentMACAKernel); falling back to unfused "
-                    "activation.",
-                )
-                self.use_fused_activation = False
-        elif use_fused_activation:
-            # Fusion is what the caller asked for, so a request this op cannot
-            # honour is refused rather than quietly downgraded: a caller who
-            # wanted the fused epilogue and silently got the separate one reads
-            # the unfused result as the fused one. Each condition is reported on
-            # its own, because "not eligible" over six conjuncts says nothing
-            # about which one to fix.
-            #
-            # Whether the device can run the fused kernel is not asked here.
-            # MoeGroupedGemmPersistent3WGFusedActKernel states the architectures
-            # it is built for, and refuses when it is built — construction reads
-            # no device property.
-            fused_block_n = _FUSED_ACT_DEFAULT_CONFIG["block_n"]
-            if kernel_cls is not GroupedGemmPersistent3WGKernel:
-                raise ValueError(
-                    "use_fused_activation=True requires the 3WG persistent gate_up GEMM, "
-                    f"got {kernel_cls.__name__}")
-            if gemm_override is not None and gemm_override is not GroupedGemmPersistent3WGKernel:
-                raise ValueError(
-                    "use_fused_activation=True cannot honour a moe_grouped_gemm_kernel "
-                    f"override ({gemm_override.__name__}): the fused gate_up wrapper keys off "
-                    "moe_grouped_gemm_fused_act_kernel, so the override would reach the down "
-                    "GEMM alone and leave the pipeline inconsistent")
-            if activation not in ("silu_and_mul", "gelu_and_mul"):
-                raise ValueError(
-                    "use_fused_activation=True supports activation in "
-                    f"{{silu_and_mul, gelu_and_mul}}, got {activation!r}")
-            if ffn_size % fused_block_n != 0:
-                raise ValueError(
-                    f"use_fused_activation=True requires ffn_size % {fused_block_n} == 0, "
-                    f"got ffn_size={ffn_size}")
-
-        self._permute = MoePermuteNopadFwdOp(
-            num_experts=num_experts, expert_map=expert_map,
+        self._gate_up = MoeGateUpFwdOp(
+            numel=numel,
+            num_experts=num_experts_local,
+            ffn=ffn_size,
+            k=hidden_size,
+            activation=activation,
             kernel_map=kernel_map,
         )
-        self.activation = activation
-        if self.use_fused_activation:
-            from .moe_grouped_gemm_nopad_fused_act import (
-                MoeGroupedGemmNopad3WGFusedActFwdOp,
-            )
-            self._gemm_gate_up = MoeGroupedGemmNopad3WGFusedActFwdOp(
-                numel=numel, num_experts=num_experts_local,
-                ffn=ffn_size, k=hidden_size, activation=activation,
-                kernel_map=kernel_map,
-            )
-            self._activation_op = None
-        else:
-            self._gemm_gate_up = MoeGroupedGemmNopadFwdOp(
-                numel=numel, num_experts=num_experts_local,
-                n=ffn_size * 2, k=hidden_size,
-                kernel_map={"moe_grouped_gemm_kernel": kernel_cls, **(kernel_map or {})},
-            )
-            self._activation_op = build_activation_op(
-                activation, M=numel, N=ffn_size, kernel_map=kernel_map,
-            )
         self._gemm_down = MoeGroupedGemmNopadFwdOp(
-            numel=numel, num_experts=num_experts_local,
-            n=hidden_size, k=ffn_size,
-            kernel_map={"moe_grouped_gemm_kernel": kernel_cls, **(kernel_map or {})},
+            numel=numel,
+            num_experts=num_experts_local,
+            n=hidden_size,
+            k=ffn_size,
+            kernel_map=kernel_map,
         )
         self._unpermute = MoeUnpermuteFwdOp(
-            total_tokens=num_tokens, top_k=top_k,
-            hidden_size=hidden_size, padded_batch_sum=numel,
+            total_tokens=num_tokens,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            padded_batch_sum=numel,
             kernel_map=kernel_map,
             routed_scaling_factor=routed_scaling_factor,
         )
-        self._routed_scaling_factor = routed_scaling_factor
+        self._permute = MoePermuteNopadFwdOp(
+            num_experts=num_experts,
+            num_experts_local=num_experts_local,
+            kernel_map=kernel_map,
+        )
+
+    def kernel_delegates(self) -> tuple[Op, ...]:
+        return (self._permute, self._gate_up, self._gemm_down, self._unpermute)
+
+    def eval_roofline(self) -> tuple[int, int]:
+        """Manifest ``roofline``: three F x H weight planes per local expert."""
+        if self.dtype is None:
+            raise ValueError(
+                f"{type(self).__name__}.eval_roofline() requires a prior forward() to bind dtype"
+            )
+        flops = self.num_tokens * self.top_k * 6 * self.ffn_size * self.hidden_size
+        nbytes = (
+            self.num_experts_local * 3 * self.ffn_size * self.hidden_size
+            + 2 * self.num_tokens * self.hidden_size
+        ) * self.dtype.itemsize
+        return int(flops), int(nbytes)
 
     def _validate_dtypes(
         self,
@@ -255,30 +141,50 @@ class FusedMoEExpertsNopadPersistent3WGFwdOp(FusedMoEExpertsModular):
         w_down: Tensor,
         topk_weights: Tensor,
         topk_ids: Tensor,
-        expert_map: Tensor | None,
         workspace1: Tensor,
         workspace2: Tensor,
+        *,
+        expert_map: Optional[Tensor] = None,
     ) -> None:
         # hidden_states is the dtype anchor: the helper requires output,
         # w_gate_up and w_down to agree with it.
         self.dtype = hidden_states.dtype
         _validate_fused_moe_experts_dtypes(
             hidden_states.dtype,
-            output, hidden_states, w_gate_up, w_down,
-            topk_weights, topk_ids, expert_map, workspace1, workspace2,
+            output,
+            hidden_states,
+            w_gate_up,
+            w_down,
+            topk_weights,
+            topk_ids,
+            workspace1,
+            workspace2,
         )
-        # workspace_shapes() returns ((0,), (0,)) for this implementation; flag
-        # callers that pass non-empty workspaces (likely a pipeline mismatch).
+        if expert_map is not None and expert_map.dtype != torch.int32:
+            raise ValueError(f"Expected expert_map.dtype == int32, got {expert_map.dtype}")
+        self._reject_non_empty_workspaces(workspace1, workspace2)
+
+    def _reject_non_empty_workspaces(
+        self,
+        workspace1: Tensor,
+        workspace2: Tensor,
+    ) -> None:
+        """workspace_shapes() returns ((0,), (0,)); anything else is a mismatch."""
         if workspace1.numel() != 0 or workspace2.numel() != 0:
             raise ValueError(
                 "workspace1 and workspace2 must be empty (numel == 0) for "
-                "FusedMoEExpertsNopadPersistent3WGFwdOp; got "
+                f"{type(self).__name__}; got "
                 f"workspace1.numel()={workspace1.numel()}, "
                 f"workspace2.numel()={workspace2.numel()}."
             )
 
     def workspace_shapes(
-        self, M: int, N: int, K: int, topk: int, num_experts: int,
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        num_experts: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...]]:
         return ((0,), (0,))
 
@@ -293,6 +199,21 @@ class FusedMoEExpertsNopadPersistent3WGFwdOp(FusedMoEExpertsModular):
         # All sub-kernels are owned by the inner Ops (permute / GEMM / activation / unpermute).
         return {}
 
+    def _infer_output_shapes(
+        self,
+        output_shape: tuple[int, ...],
+        hidden_states_shape: tuple[int, ...],
+        w_gate_up_shape: tuple[int, ...],
+        w_down_shape: tuple[int, ...],
+        topk_weights_shape: tuple[int, ...],
+        topk_ids_shape: tuple[int, ...],
+        workspace1_shape: tuple[int, ...],
+        workspace2_shape: tuple[int, ...],
+        expert_map_shape: tuple[int, ...],
+    ) -> dict[str, tuple[int, ...]]:
+        """Manifest ``shape_rules``: the caller's buffer holds one row per token."""
+        return {"output": tuple(hidden_states_shape)}
+
     def forward(
         self,
         output: Tensor,
@@ -301,18 +222,35 @@ class FusedMoEExpertsNopadPersistent3WGFwdOp(FusedMoEExpertsModular):
         w_down: Tensor,
         topk_weights: Tensor,
         topk_ids: Tensor,
-        expert_map: Tensor | None,
         workspace1: Tensor,
         workspace2: Tensor,
+        expert_map: Optional[Tensor] = None,
+        *,
         num_experts: int,
     ) -> None:
+        """Run the expert pipeline, writing the reduced result into ``output``.
+
+        Args:
+            expert_map: [E] int32 global-to-local expert ids under expert
+                parallelism; ``None`` when this rank owns every expert. The
+                permute stage rejects a map that does not cover exactly the
+                local ids.
+        """
         self._validate_dtypes(
-            output, hidden_states, w_gate_up, w_down,
-            topk_weights, topk_ids, expert_map, workspace1, workspace2,
+            output,
+            hidden_states,
+            w_gate_up,
+            w_down,
+            topk_weights,
+            topk_ids,
+            workspace1,
+            workspace2,
+            expert_map=expert_map,
         )
-        perm_h, true_offsets, true_sizes, _, fwd_idx = self._permute(hidden_states, topk_ids)
-        gate_up = self._gemm_gate_up(perm_h, w_gate_up, true_sizes, true_offsets)
-        act = gate_up if self.use_fused_activation else self._activation_op(gate_up)
+        perm_h, true_offsets, true_sizes, _, fwd_idx = self._permute(
+            hidden_states, topk_ids, expert_map
+        )
+        act = self._gate_up(perm_h, w_gate_up, true_sizes, true_offsets)
         mm2 = self._gemm_down(act, w_down, true_sizes, true_offsets)
         # Unpermute reduces into ``output`` directly and folds
         # ``routed_scaling_factor`` into its prim_func — no separate copy/scale.

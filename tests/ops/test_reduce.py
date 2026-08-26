@@ -22,7 +22,9 @@ class ReduceBasicFixture(FixtureBase):
         (
             "m, n, dtype",
             [
-                pytest.param(128, 512, torch.float16, marks=[pytest.mark.smoke, pytest.mark.packaging]),
+                pytest.param(
+                    128, 512, torch.float16, marks=[pytest.mark.smoke, pytest.mark.packaging]
+                ),
                 pytest.param(128, 512, torch.float32, marks=pytest.mark.smoke),
                 pytest.param(128, 512, torch.bfloat16, marks=pytest.mark.smoke),
                 pytest.param(256, 4096, torch.float16, marks=pytest.mark.full),
@@ -124,7 +126,11 @@ class ReduceTest(SumWorkload, TestBase):
     """Parameterized test helper for simple reduce ops (sum/mean/amax/amin)."""
 
     def __init__(
-        self, m: int, n: int, dtype: torch.dtype, op_kind: str,
+        self,
+        m: int,
+        n: int,
+        dtype: torch.dtype,
+        op_kind: str,
     ):
         super().__init__((m, n), dtype)
         self.op_kind = op_kind
@@ -147,9 +153,6 @@ class ProdTest(ProdWorkload, TestBase):
 
     def __init__(self, m: int, n: int, dtype: torch.dtype):
         super().__init__((m, n), dtype)
-
-    def ref_program(self, x: torch.Tensor) -> torch.Tensor:
-        return x.float().prod(dim=-1).to(x.dtype)
 
 
 class WelfordTest(StdWorkload, TestBase):
@@ -238,7 +241,12 @@ def test_reduce_caller_tile_n_validated() -> None:
 
     def run(tile_n: int, block_m: int = 2) -> None:
         kernel = ReduceKernel(
-            M=m, N=n, op_kind="sum", dtype=dtype, tune=False,
+            M=m,
+            N=n,
+            op_kind="sum",
+            dtype=dtype,
+            reduce_axes=(1,),
+            tune=False,
             config={"block_m": block_m, "threads": 128, "tile_n": tile_n},
         )
         kernel.forward(x)  # construction defers the build; forward triggers it
@@ -275,7 +283,7 @@ def test_reduce_untiled_autotune_unaligned_n() -> None:
     op = SumFwdOp(dim=-1, tune=True)
     test.check(op, *test.gen_inputs(), **_tol(dtype))
 
-    kernel = op.built_kernels(op._kernel_key)[(m, n, dtype)]
+    (kernel,) = op.built_kernels(op._kernel_key).values()
     assert not kernel._needs_tiling
     assert {c["block_m"] for c in kernel.autotune_configs} == {1}
 
@@ -305,7 +313,7 @@ def test_reduce_tiled_autotune(op_kind: str) -> None:
         op = VarFwdOp(dim=-1, tune=True)
     test.check(op, *test.gen_inputs(), **_tol(dtype))
 
-    kernel = op.built_kernels(op._kernel_key)[(m, n, dtype)]
+    (kernel,) = op.built_kernels(op._kernel_key).values()
     assert kernel._needs_tiling
     assert kernel.config in kernel.autotune_configs
 
@@ -719,9 +727,9 @@ def test_var_mean_spec_dim(shape: tuple, dim: int, keepdim: bool, dtype: torch.d
     tol = _tol(dtype)
     assert var_out.shape == ref_var.shape, f"var shape mismatch: {var_out.shape} vs {ref_var.shape}"
     assert mean_out.shape == ref_mean.shape, "mean shape mismatch"
-    assert torch.allclose(var_out, ref_var, **tol), f"var_mean spec var err: {(var_out - ref_var).abs().max()}"
-    assert torch.allclose(mean_out, ref_mean, **tol), f"var_mean spec mean err: {(mean_out - ref_mean).abs().max()}"
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])
+    assert torch.allclose(var_out, ref_var, **tol), (
+        f"var_mean spec var err: {(var_out - ref_var).abs().max()}"
+    )
+    assert torch.allclose(mean_out, ref_mean, **tol), (
+        f"var_mean spec mean err: {(mean_out - ref_mean).abs().max()}"
+    )

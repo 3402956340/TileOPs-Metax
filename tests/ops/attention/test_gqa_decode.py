@@ -1,4 +1,3 @@
-
 import pytest
 import torch
 
@@ -12,43 +11,42 @@ from workloads.attention.gqa import (
 
 
 class GroupedQueryAttentionDecodeTest(GroupedQueryAttentionDecodeWorkload, TestBase):
-    def ref_program(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        q_bhsd = q.unsqueeze(1).transpose(1, 2)  # [B, H, 1, D]
-        groups = self.heads // self.heads_kv
-        k_bhsd = k.repeat_interleave(groups, dim=2).transpose(1, 2).float()
-        v_bhsd = v.repeat_interleave(groups, dim=2).transpose(1, 2).float()
-        scores = torch.matmul(q_bhsd.float(), k_bhsd.transpose(-2, -1)) * self.sm_scale
-        if self.softcap > 0:
-            scores = self.softcap * torch.tanh(scores / self.softcap)
-        probs = torch.softmax(scores, dim=-1)
-        output_bhsd = torch.matmul(probs, v_bhsd)
-        return output_bhsd.transpose(1, 2).squeeze(1).to(q.dtype).contiguous()
+    pass
 
 
 class GroupedQueryAttentionDecodeFixture(FixtureBase):
     PARAMS = [
-        ("batch, heads, heads_kv, seq_len_kv, dim, dtype, tune", [
-            pytest.param(1, 32, 8, 8192, 128, torch.float16, False, marks=pytest.mark.smoke),
-            pytest.param(1, 32, 8, 8192, 128, torch.bfloat16, False, marks=pytest.mark.smoke),
-            pytest.param(1, 16, 2, 8192, 128, torch.float16, False, marks=pytest.mark.smoke),
-            pytest.param(8, 64, 16, 8192, 128, torch.float16, False, marks=pytest.mark.full),
-        ]),
+        (
+            "batch, heads, heads_kv, seq_len_kv, dim, dtype, tune",
+            [
+                pytest.param(1, 32, 8, 8192, 128, torch.float16, False, marks=pytest.mark.smoke),
+                pytest.param(1, 32, 8, 8192, 128, torch.bfloat16, False, marks=pytest.mark.smoke),
+                pytest.param(1, 16, 2, 8192, 128, torch.float16, False, marks=pytest.mark.smoke),
+                pytest.param(8, 64, 16, 8192, 128, torch.float16, False, marks=pytest.mark.full),
+            ],
+        ),
     ]
 
 
 @GroupedQueryAttentionDecodeFixture
-def test_gqa_decode(batch: int, heads: int, heads_kv: int, seq_len_kv: int, dim: int,
-                    dtype: torch.dtype, tune: bool) -> None:
+def test_gqa_decode(
+    batch: int, heads: int, heads_kv: int, seq_len_kv: int, dim: int, dtype: torch.dtype, tune: bool
+) -> None:
     test = GroupedQueryAttentionDecodeTest(batch, heads, heads_kv, seq_len_kv, dim, dtype)
-    op = GroupedQueryAttentionDecodeWithKVCacheFwdOp(batch, heads, heads_kv, seq_len_kv, dim, tune=tune)
+    op = GroupedQueryAttentionDecodeWithKVCacheFwdOp(
+        batch, heads, heads_kv, seq_len_kv, dim, tune=tune
+    )
     test.check(op, *test.gen_inputs(), atol=1e-2, rtol=1e-2)
 
 
 @pytest.mark.smoke
-@pytest.mark.parametrize("sm_scale, softcap", [
-    pytest.param(0.25, None, id="custom-sm-scale"),
-    pytest.param(None, 2.0, id="softcap"),
-])
+@pytest.mark.parametrize(
+    "sm_scale, softcap",
+    [
+        pytest.param(0.25, None, id="custom-sm-scale"),
+        pytest.param(None, 2.0, id="softcap"),
+    ],
+)
 def test_gqa_decode_softmax_controls(sm_scale: float | None, softcap: float | None) -> None:
     batch, heads, heads_kv, seq_len_kv, dim = 1, 16, 4, 1024, 64
     dtype = torch.float16
@@ -135,10 +133,10 @@ def test_gqa_decode_bs1_dispatch() -> None:
 
     # The same instance falls back for bfloat16 — the element type is an input
     # to the choice, so one op serves both paths.
-    assert op._get_kernel(torch.bfloat16).__class__.__name__ == "GQADecodeKernel"
+    assert op._get_kernel((), torch.bfloat16).__class__.__name__ == "GQADecodeKernel"
 
     op_batched = GroupedQueryAttentionDecodeWithKVCacheFwdOp(4, 32, 4, 4096, 128)
-    assert op_batched._get_kernel(torch.float16).__class__.__name__ == "GQADecodeKernel"
+    assert op_batched._get_kernel((), torch.float16).__class__.__name__ == "GQADecodeKernel"
 
 
 @pytest.mark.smoke
@@ -149,13 +147,17 @@ def test_gqa_decode_bs1_runtime_context_switch() -> None:
     per slice, an unaligned length, and the sub-1024 non-split fallback.
     """
     op = GroupedQueryAttentionDecodeWithKVCacheFwdOp(1, 32, 4, 8192, 128)
-    kernel = op._get_kernel(torch.float16)
+    kernel = op._get_kernel((), torch.float16)
     expected_kernel = "GQADecodeBs1Kernel" if is_hopper() else "GQADecodeKernel"
     assert kernel.__class__.__name__ == expected_kernel
-    for real, tier in ((6000, "ctx"), (3072, "ctx"), (2048, "ctx"), (1024, "ctx"),
-                       (512, "no_split")):
-        if is_hopper():
-            assert kernel._select_tier(real) == tier
+    for real, tier in (
+        (6000, "ctx"),
+        (3072, "ctx"),
+        (2048, "ctx"),
+        (1024, "ctx"),
+        (512, "no_split"),
+    ):
+        assert kernel._select_tier(real) == tier
         test = GroupedQueryAttentionDecodeTest(1, 32, 4, real, 128, torch.float16)
         test.check(op, *test.gen_inputs(), atol=1e-2, rtol=1e-2)
 
@@ -165,10 +167,6 @@ def test_gqa_decode_bs1_group4() -> None:
     """The WS kernel generalizes to a query-per-KV-head group other than 8 (here 4)."""
     op = GroupedQueryAttentionDecodeWithKVCacheFwdOp(1, 32, 8, 4096, 128)
     expected_kernel = "GQADecodeBs1Kernel" if is_hopper() else "GQADecodeKernel"
-    assert op._get_kernel(torch.float16).__class__.__name__ == expected_kernel
+    assert op._get_kernel((), torch.float16).__class__.__name__ == expected_kernel
     test = GroupedQueryAttentionDecodeTest(1, 32, 8, 4096, 128, torch.float16)
     test.check(op, *test.gen_inputs(), atol=1e-2, rtol=1e-2)
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])

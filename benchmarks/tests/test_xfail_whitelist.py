@@ -4,7 +4,7 @@ from unittest.mock import Mock
 import pytest
 
 import benchmarks.conftest as benchmark_config
-from benchmarks.xfail_whitelist import MACA_XFAILS
+from benchmarks.xfail_whitelist import MACA_XFAILS, MACA_XFAIL_PREFIXES
 
 pytestmark = pytest.mark.smoke
 
@@ -24,7 +24,7 @@ def test_maca_benchmark_xfail_allowlist_matches_normalized_nodeids(monkeypatch) 
     known.add_marker.assert_called_once()
     marker = known.add_marker.call_args.args[0].mark
     assert marker.name == "xfail"
-    assert marker.kwargs["strict"] is True
+    assert marker.kwargs["strict"] is False
     assert marker.kwargs["reason"].startswith("MACA: ")
     unknown.add_marker.assert_not_called()
 
@@ -36,3 +36,18 @@ def test_maca_benchmark_xfail_allowlist_is_inactive_off_maca(monkeypatch) -> Non
     benchmark_config._apply_maca_xfails([item])
 
     item.add_marker.assert_not_called()
+
+
+def test_maca_benchmark_xfail_prefix_matches_parameterized_cases(monkeypatch) -> None:
+    monkeypatch.setattr(benchmark_config, "is_maca", lambda: True)
+    prefix = next(iter(MACA_XFAIL_PREFIXES), "benchmarks/ops/bench_example.py::test_case")
+    if not MACA_XFAIL_PREFIXES:
+        monkeypatch.setitem(benchmark_config.MACA_XFAIL_PREFIXES, prefix, "test reason")
+    known = _make_item(f"{prefix}[case-1]")
+
+    benchmark_config._apply_maca_xfails([known])
+
+    known.add_marker.assert_called_once()
+    marker = known.add_marker.call_args.args[0].mark
+    assert marker.name == "xfail"
+    assert marker.kwargs["strict"] is False

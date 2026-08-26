@@ -14,10 +14,13 @@ register_compile_contract(MultiHeadAttentionFwdOp)
 
 class MhaCompileFixture(FixtureBase):
     PARAMS = [
-        ("B, S, H, D, causal, dtype", [
-            (8, 1024, 32, 128, False, torch.float16),
-            (4, 512, 16, 64, True, torch.bfloat16),
-        ]),
+        (
+            "B, S, H, D, causal, dtype",
+            [
+                (8, 1024, 32, 128, False, torch.float16),
+                (4, 512, 16, 64, True, torch.bfloat16),
+            ],
+        ),
     ]
 
 
@@ -45,7 +48,3 @@ def test_mha_cold_fullgraph_trace_matches_eager():
 
     assert output.shape == q.shape
     torch.testing.assert_close(output, op(q, k, v))
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])

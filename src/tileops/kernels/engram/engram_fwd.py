@@ -27,28 +27,23 @@ import torch
 import torch.nn.functional as F
 
 from tileops.kernels.kernel_base import Kernel
+from tileops.kernels.tiling import ALIGNMENT, align_up
 
 __all__ = ["EngramGateConvFwdKernel"]
 
-ALIGNMENT = 256
 CONV_KERNEL_SIZE = 4
-
-
-def _align_up(n: int, alignment: int) -> int:
-    return ((n + alignment - 1) // alignment) * alignment
 
 
 @functools.lru_cache(maxsize=32)
 def _engram_gate_conv_fwd_kernel(M, seq_len, d, eps, dtype):
     accum_dtype = "float"
-    d_padded = _align_up(d, ALIGNMENT)
+    d_padded = align_up(d, ALIGNMENT)
 
     @tilelang.jit(
         out_idx=[6, 7, 8, 9, 10, 11],
         compile_flags=["-O3", "-DENABLE_BF16"],
     )
     def _func(threads):
-
         @T.macro
         def _gate_fwd(
             H: T.Tensor((M, seq_len, d_padded), dtype),
@@ -179,8 +174,18 @@ def _engram_gate_conv_fwd_kernel(M, seq_len, d, eps, dtype):
             rrms_v_buf: T.Tensor((M, seq_len), accum_dtype),
         ):
             _gate_fwd(
-                H, k, v, rms_w_h, rms_w_v, conv_w,
-                Y, vhat_buf, alpha_buf, rrms_h_buf, rrms_k_buf, rrms_v_buf,
+                H,
+                k,
+                v,
+                rms_w_h,
+                rms_w_v,
+                conv_w,
+                Y,
+                vhat_buf,
+                alpha_buf,
+                rrms_h_buf,
+                rrms_k_buf,
+                rrms_v_buf,
             )
 
         return main
@@ -188,7 +193,7 @@ def _engram_gate_conv_fwd_kernel(M, seq_len, d, eps, dtype):
     return _func
 
 
-@torch.library.custom_op("top::engram_gate_conv_fwd", mutates_args=())
+@torch.library.custom_op("tileops::engram_gate_conv_fwd", mutates_args=())
 def _engram_gate_conv_fwd_wrapped(
     M: int,
     seq_len: int,
@@ -211,16 +216,16 @@ def _engram_gate_conv_fwd_wrapped(
 
 @_engram_gate_conv_fwd_wrapped.register_fake
 def _(M, seq_len, d, eps, dtype_str, threads, H, k, v, rms_w_h, rms_w_v, conv_w):
-    d_padded = _align_up(d, ALIGNMENT)
+    d_padded = align_up(d, ALIGNMENT)
     device = H.device
     dt = H.dtype
     return [
-        torch.empty((M, seq_len, d_padded), dtype=dt, device=device),     # Y
-        torch.empty((M, seq_len, d_padded), dtype=dt, device=device),     # vhat_buf
-        torch.empty((M, seq_len), dtype=torch.float32, device=device),    # alpha
-        torch.empty((M, seq_len), dtype=torch.float32, device=device),    # rrms_h
-        torch.empty((M, seq_len), dtype=torch.float32, device=device),    # rrms_k
-        torch.empty((M, seq_len), dtype=torch.float32, device=device),    # rrms_v
+        torch.empty((M, seq_len, d_padded), dtype=dt, device=device),  # Y
+        torch.empty((M, seq_len, d_padded), dtype=dt, device=device),  # vhat_buf
+        torch.empty((M, seq_len), dtype=torch.float32, device=device),  # alpha
+        torch.empty((M, seq_len), dtype=torch.float32, device=device),  # rrms_h
+        torch.empty((M, seq_len), dtype=torch.float32, device=device),  # rrms_k
+        torch.empty((M, seq_len), dtype=torch.float32, device=device),  # rrms_v
     ]
 
 
@@ -252,9 +257,13 @@ class EngramGateConvFwdKernel(Kernel):
         self.d = d
         self.eps = eps
         self.dtype = dtype
-        self.d_padded = _align_up(d, ALIGNMENT)
+        self.d_padded = align_up(d, ALIGNMENT)
         self.kernel = _engram_gate_conv_fwd_kernel(
-            M, seq_len, d, eps, self.dtype_str,
+            M,
+            seq_len,
+            d,
+            eps,
+            self.dtype_str,
         )
         self.init_config(config, tune)
 
@@ -278,15 +287,15 @@ class EngramGateConvFwdKernel(Kernel):
         """Run the fused gate + conv forward pass.
 
         Args:
-            H: Hidden states of shape ``(M, seq_len, d)``.
-            k: Key projection of shape ``(M, seq_len, d)``.
-            v: Value projection of shape ``(M, seq_len, d)``.
-            rms_w_h: RMSNorm weight of shape ``(d,)`` for ``H`` and ``k``.
-            rms_w_v: RMSNorm weight of shape ``(d,)`` for the gated value.
-            conv_w: Depthwise conv weights of shape ``(4, d)``.
+            H: Hidden states of shape $[M \\times seq\\_len \\times d]$.
+            k: Key projection of shape $[M \\times seq\\_len \\times d]$.
+            v: Value projection of shape $[M \\times seq\\_len \\times d]$.
+            rms_w_h: RMSNorm weight of shape $[d]$ for ``H`` and ``k``.
+            rms_w_v: RMSNorm weight of shape $[d]$ for the gated value.
+            conv_w: Depthwise conv weights of shape $[4 \\times d]$.
 
         Returns:
-            ``[Y, vhat, alpha, rrms_h, rrms_k, rrms_v]``. ``Y`` and ``vhat``
+            $[Y \\times vhat \\times alpha \\times rrms\\_h \\times rrms\\_k \\times rrms\\_v]$. ``Y`` and ``vhat``
             are ``(M, seq_len, d)``; the alignment padding the prim_func
             requires is applied and trimmed here.
         """
@@ -299,9 +308,18 @@ class EngramGateConvFwdKernel(Kernel):
             rms_w_v = F.pad(rms_w_v, (0, pad))
             conv_w = F.pad(conv_w, (0, pad))
         results = _engram_gate_conv_fwd_wrapped(
-            self.M, self.seq_len, self.d, self.eps,
-            self.dtype_str, self.config["threads"],
-            H, k, v, rms_w_h, rms_w_v, conv_w,
+            self.M,
+            self.seq_len,
+            self.d,
+            self.eps,
+            self.dtype_str,
+            self.config["threads"],
+            H,
+            k,
+            v,
+            rms_w_h,
+            rms_w_v,
+            conv_w,
         )
         if pad:
             results[0] = results[0][:, :, : self.d]

@@ -43,12 +43,19 @@ import tilelang
 import tilelang.language as T
 import torch
 
+from tileops.kernels.grouped_tiling import GroupTiling
 from tileops.kernels.kernel_base import Kernel
 
 __all__ = ["MoeGroupedGemmNopadKernel"]
 
-_DEFAULT_CONFIG = {"block_m": 64, "block_n": 256, "block_k": 64, "num_stages": 1, "threads": 128,
-                   "group_size_m": 1}
+_DEFAULT_CONFIG = {
+    "block_m": 64,
+    "block_n": 256,
+    "block_k": 64,
+    "num_stages": 1,
+    "threads": 128,
+    "group_size_m": 1,
+}
 _SCHED_THREADS = 256  # threads per block in the tile scheduler kernel
 
 
@@ -68,8 +75,7 @@ def _tile_scheduler_kernel(num_experts: int, max_tiles: int, block_m: int):
         max_tiles:   Conservative tile upper bound (numel // block_m + E).
         block_m:     Tile height in M dimension (compile-time constant).
     """
-    # Static binary search depth: ceil(log2(E+1)) iterations suffice for E experts.
-    log2_up = max(1, math.ceil(math.log2(num_experts + 1)))
+    _tiling = GroupTiling(num_experts, block_m)
 
     @tilelang.jit(out_idx=[1, 2, 3])
     def _func(threads: int):
@@ -84,15 +90,15 @@ def _tile_scheduler_kernel(num_experts: int, max_tiles: int, block_m: int):
                 s_cum = T.alloc_shared([num_experts + 1], "int32")
                 lo = T.alloc_local([1], "int32")
                 hi = T.alloc_local([1], "int32")
+                _ex = T.alloc_local([1], "int32")
+                _row = T.alloc_local([1], "int32")
 
                 tx = T.get_thread_binding()
 
                 # Sub-phase (a): thread 0 computes exclusive prefix sum of
                 # ceildiv(true_sizes[e], block_m) into SMEM.
                 if tx == 0:
-                    s_cum[0] = T.int32(0)
-                    for e in T.serial(num_experts):
-                        s_cum[e + 1] = s_cum[e] + (true_sizes[e] + (block_m - 1)) // block_m
+                    _tiling.cumsum(true_sizes, s_cum)
                     if bx == 0:
                         total_tiles[0] = s_cum[num_experts]
                 T.sync_threads()
@@ -101,16 +107,9 @@ def _tile_scheduler_kernel(num_experts: int, max_tiles: int, block_m: int):
                 tile_id = bx * threads + tx
                 if tile_id < max_tiles:
                     if tile_id < s_cum[num_experts]:
-                        lo[0] = T.int32(0)
-                        hi[0] = T.int32(num_experts - 1)
-                        for _bs in T.serial(log2_up):
-                            mid = (lo[0] + hi[0]) >> T.int32(1)
-                            if s_cum[mid + 1] <= tile_id:
-                                lo[0] = mid + T.int32(1)
-                            else:
-                                hi[0] = mid
-                        tile_expert_ids[tile_id] = lo[0]
-                        tile_row_offsets[tile_id] = (tile_id - s_cum[lo[0]]) * T.int32(block_m)
+                        _tiling.decode(tile_id, s_cum, lo, hi, _ex, _row)
+                        tile_expert_ids[tile_id] = _ex[0]
+                        tile_row_offsets[tile_id] = _row[0]
                     else:
                         tile_expert_ids[tile_id] = T.int32(-1)
                         tile_row_offsets[tile_id] = T.int32(0)
@@ -121,8 +120,9 @@ def _tile_scheduler_kernel(num_experts: int, max_tiles: int, block_m: int):
 
 
 @functools.lru_cache(maxsize=64)
-def _moe_grouped_gemm_kernel(numel: int, max_tiles: int, num_experts: int,
-                              N: int, K: int, dtype: str = "float16"):
+def _moe_grouped_gemm_kernel(
+    numel: int, max_tiles: int, num_experts: int, N: int, K: int, dtype: str = "float16"
+):
     """NT grouped GEMM with GPU-side total_tiles early-exit guard (zero CPU sync).
 
     Grid = max_tiles * ceildiv(N, block_n) (1-D with GROUP_SIZE_M reordering).
@@ -160,7 +160,7 @@ def _moe_grouped_gemm_kernel(numel: int, max_tiles: int, num_experts: int,
         B_shared_shape = (block_n, block_k)
 
         # Compile-time constants (all Python ints, baked in at JIT time).
-        _k_aligned = (K % block_k == 0)
+        _k_aligned = K % block_k == 0
         # _b_copy_ok: use T.copy (TMA-eligible) for both A and B inside T.Pipelined.
         # Requires K alignment so there are no partial K-tiles to predicate.
         # N boundary is handled by TMA zero-fill OOB; epilogue guards the C store.
@@ -169,16 +169,17 @@ def _moe_grouped_gemm_kernel(numel: int, max_tiles: int, num_experts: int,
         # A_shape includes block_m padding rows (used only in _b_copy_ok path so that
         # T.copy on the last M-tile does not read past the end of the tensor).
         A_shape = (numel + block_m, K) if _b_copy_ok else (numel, K)
-        _num_pid_n = math.ceil(N / block_n)           # N-tile count
-        _total_ctas = max_tiles * _num_pid_n          # 1-D grid size
+        _num_pid_n = math.ceil(N / block_n)  # N-tile count
+        _total_ctas = max_tiles * _num_pid_n  # 1-D grid size
         _num_pid_in_group = group_size_m * _num_pid_n  # CTAs per GROUP_SIZE_M group
 
         if _b_copy_ok:
+
             @T.prim_func
             def _gemm_main(
-                A: T.Tensor(A_shape, dtype),                           # type: ignore
-                B: T.Tensor(B_shape, dtype),                           # type: ignore
-                C: T.Tensor(C_shape, dtype),                           # type: ignore
+                A: T.Tensor(A_shape, dtype),  # type: ignore
+                B: T.Tensor(B_shape, dtype),  # type: ignore
+                C: T.Tensor(C_shape, dtype),  # type: ignore
                 tile_expert_ids: T.Tensor([max_tiles], "int32"),
                 tile_row_offsets: T.Tensor([max_tiles], "int32"),
                 true_offsets: T.Tensor([num_experts], "int32"),
@@ -189,10 +190,12 @@ def _moe_grouped_gemm_kernel(numel: int, max_tiles: int, num_experts: int,
                     A_shared = T.alloc_shared(A_shared_shape, dtype)
                     B_shared = T.alloc_shared(B_shared_shape, dtype)
                     C_local = T.alloc_fragment([block_m, block_n], accum_dtype)
-                    T.annotate_layout({
-                        A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                        B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                    })
+                    T.annotate_layout(
+                        {
+                            A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+                            B_shared: tilelang.layout.make_swizzled_layout(B_shared),
+                        }
+                    )
 
                     # M-major tile ordering: each M-tile processes all N-tiles
                     # before moving to the next M-tile, maximising A-tile reuse.
@@ -203,42 +206,49 @@ def _moe_grouped_gemm_kernel(numel: int, max_tiles: int, num_experts: int,
                         by = pid % T.int32(_num_pid_n)
                     else:
                         pid_in_group = pid % T.int32(_num_pid_in_group)
-                        group_id    = pid // T.int32(_num_pid_in_group)
+                        group_id = pid // T.int32(_num_pid_in_group)
                         first_pid_m = group_id * T.int32(group_size_m)
-                        actual_gsm  = T.min(T.int32(max_tiles) - first_pid_m,
-                                            T.int32(group_size_m))
+                        actual_gsm = T.min(T.int32(max_tiles) - first_pid_m, T.int32(group_size_m))
                         bx = first_pid_m + pid_in_group % actual_gsm
                         by = pid_in_group // actual_gsm
 
                     if bx < total_tiles[0]:
-                        expert_id    = tile_expert_ids[bx]
+                        expert_id = tile_expert_ids[bx]
                         row_in_expert = tile_row_offsets[bx]
-                        m_start      = true_offsets[expert_id] + row_in_expert
-                        n_start      = by * T.int32(block_n)
-                        actual_rows  = T.min(T.int32(block_m),
-                                             true_sizes[expert_id] - row_in_expert)
-                        actual_cols  = T.min(T.int32(block_n), T.int32(N) - n_start)
+                        m_start = true_offsets[expert_id] + row_in_expert
+                        n_start = by * T.int32(block_n)
+                        actual_rows = T.min(T.int32(block_m), true_sizes[expert_id] - row_in_expert)
+                        actual_cols = T.min(T.int32(block_n), T.int32(N) - n_start)
                         T.clear(C_local)
 
                         # T.copy lets TileLang's WarpSpecialized pass split threads into
                         # producer (TMA-eligible) and consumer (WGMMA) warpgroups when
                         # threads=256 on SM90.  No predicates here; epilogue guards writes.
                         for k in T.Pipelined(T.ceildiv(K, block_k), num_stages=num_stages):
-                            T.copy(A[m_start:m_start + block_m,
-                                     k * block_k:(k + 1) * block_k], A_shared)
-                            T.copy(B[expert_id, n_start:n_start + block_n,
-                                     k * block_k:(k + 1) * block_k], B_shared)
+                            T.copy(
+                                A[m_start : m_start + block_m, k * block_k : (k + 1) * block_k],
+                                A_shared,
+                            )
+                            T.copy(
+                                B[
+                                    expert_id,
+                                    n_start : n_start + block_n,
+                                    k * block_k : (k + 1) * block_k,
+                                ],
+                                B_shared,
+                            )
                             T.gemm(A_shared, B_shared, C_local, transpose_B=True)
 
                         for i, j in T.Parallel(block_m, block_n):
                             if i < actual_rows and j < actual_cols:
                                 C[m_start + i, n_start + j] = C_local[i, j]
         else:
+
             @T.prim_func
             def _gemm_main(
-                A: T.Tensor(A_shape, dtype),                           # type: ignore
-                B: T.Tensor(B_shape, dtype),                           # type: ignore
-                C: T.Tensor(C_shape, dtype),                           # type: ignore
+                A: T.Tensor(A_shape, dtype),  # type: ignore
+                B: T.Tensor(B_shape, dtype),  # type: ignore
+                C: T.Tensor(C_shape, dtype),  # type: ignore
                 tile_expert_ids: T.Tensor([max_tiles], "int32"),
                 tile_row_offsets: T.Tensor([max_tiles], "int32"),
                 true_offsets: T.Tensor([num_experts], "int32"),
@@ -249,42 +259,46 @@ def _moe_grouped_gemm_kernel(numel: int, max_tiles: int, num_experts: int,
                     A_shared = T.alloc_shared(A_shared_shape, dtype)
                     B_shared = T.alloc_shared(B_shared_shape, dtype)
                     C_local = T.alloc_fragment([block_m, block_n], accum_dtype)
-                    T.annotate_layout({
-                        A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                        B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                    })
+                    T.annotate_layout(
+                        {
+                            A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+                            B_shared: tilelang.layout.make_swizzled_layout(B_shared),
+                        }
+                    )
 
                     if group_size_m == 1:
                         bx = pid // T.int32(_num_pid_n)
                         by = pid % T.int32(_num_pid_n)
                     else:
                         pid_in_group = pid % T.int32(_num_pid_in_group)
-                        group_id    = pid // T.int32(_num_pid_in_group)
+                        group_id = pid // T.int32(_num_pid_in_group)
                         first_pid_m = group_id * T.int32(group_size_m)
-                        actual_gsm  = T.min(T.int32(max_tiles) - first_pid_m,
-                                            T.int32(group_size_m))
+                        actual_gsm = T.min(T.int32(max_tiles) - first_pid_m, T.int32(group_size_m))
                         bx = first_pid_m + pid_in_group % actual_gsm
                         by = pid_in_group // actual_gsm
 
                     if bx < total_tiles[0]:
-                        expert_id    = tile_expert_ids[bx]
+                        expert_id = tile_expert_ids[bx]
                         row_in_expert = tile_row_offsets[bx]
-                        m_start      = true_offsets[expert_id] + row_in_expert
-                        n_start      = by * T.int32(block_n)
-                        actual_rows  = T.min(T.int32(block_m),
-                                             true_sizes[expert_id] - row_in_expert)
-                        actual_cols  = T.min(T.int32(block_n), T.int32(N) - n_start)
+                        m_start = true_offsets[expert_id] + row_in_expert
+                        n_start = by * T.int32(block_n)
+                        actual_rows = T.min(T.int32(block_m), true_sizes[expert_id] - row_in_expert)
+                        actual_cols = T.min(T.int32(block_n), T.int32(N) - n_start)
                         T.clear(C_local)
 
                         for k in T.Pipelined(T.ceildiv(K, block_k), num_stages=num_stages):
                             for i, j in T.Parallel(block_m, block_k):
                                 A_shared[i, j] = T.if_then_else(
                                     i < actual_rows and j < K - k * block_k,
-                                    A[m_start + i, k * block_k + j], 0)
+                                    A[m_start + i, k * block_k + j],
+                                    0,
+                                )
                             for i, j in T.Parallel(block_n, block_k):
                                 B_shared[i, j] = T.if_then_else(
                                     j < K - k * block_k and i < actual_cols,
-                                    B[expert_id, n_start + i, k * block_k + j], 0)
+                                    B[expert_id, n_start + i, k * block_k + j],
+                                    0,
+                                )
                             T.gemm(A_shared, B_shared, C_local, transpose_B=True)
 
                         for i, j in T.Parallel(block_m, block_n):
@@ -314,12 +328,16 @@ class MoeGroupedGemmNopadKernel(Kernel):
         tune: Whether to autotune.
 
     Example:
-        >>> kernel = MoeGroupedGemmNopadKernel(numel=16384, num_experts=256, N=4096, K=2048,
-        ...                               dtype=torch.bfloat16)
-        >>> C = kernel(A, B, true_sizes, true_offsets)  # [numel, N]
+        ```python linenums="1"
+        kernel = MoeGroupedGemmNopadKernel(numel=16384, num_experts=256, N=4096, K=2048,
+                                      dtype=torch.bfloat16)
+        C = kernel(A, B, true_sizes, true_offsets)  # [numel, N]
+        ```
     """
 
     supported_archs: list[int] = [80, 86, 89, 90]
+
+    general = True
 
     def __init__(
         self,
@@ -357,16 +375,22 @@ class MoeGroupedGemmNopadKernel(Kernel):
         num_stages = [1, 2, 3, 4, 5]
         threads = [128, 256]
         return [
-            {"block_m": c[0], "block_n": c[1], "block_k": c[2],
-             "num_stages": c[3], "threads": c[4], "group_size_m": 1}
+            {
+                "block_m": c[0],
+                "block_n": c[1],
+                "block_k": c[2],
+                "num_stages": c[3],
+                "threads": c[4],
+                "group_size_m": 1,
+            }
             for c in itertools.product(block_m, block_n, block_k, num_stages, threads)
         ]
 
     def forward(
         self,
-        A: torch.Tensor,             # [numel, K]
-        B: torch.Tensor,             # [num_experts, N, K]
-        true_sizes: torch.Tensor,    # [E] int32
+        A: torch.Tensor,  # [numel, K]
+        B: torch.Tensor,  # [num_experts, N, K]
+        true_sizes: torch.Tensor,  # [E] int32
         true_offsets: torch.Tensor,  # [E] int32
     ) -> torch.Tensor:
         """Run tile scheduler + GEMM with GPU-side dead-CTA early-exit.
@@ -411,9 +435,13 @@ class MoeGroupedGemmNopadKernel(Kernel):
         gemm_fn = _moe_grouped_gemm_kernel(
             self.numel, max_tiles, self.num_experts, self.N, self.K, self.dtype_str
         )(
-            block_m, self.config["block_n"], block_k,
-            self.config["num_stages"], self.config["threads"],
+            block_m,
+            self.config["block_n"],
+            block_k,
+            self.config["num_stages"],
+            self.config["threads"],
             self.config.get("group_size_m", 1),
         )
-        return gemm_fn(A, B, tile_expert_ids, tile_row_offsets, true_offsets, true_sizes,
-                       total_tiles_t)
+        return gemm_fn(
+            A, B, tile_expert_ids, tile_row_offsets, true_offsets, true_sizes, total_tiles_t
+        )

@@ -8,10 +8,10 @@ from tileops.kernels.kernel_base import Kernel
 
 from .op_base import Op
 
-__all__ = ['FFTC2COp']
+__all__ = ["FFTC2CFwdOp"]
 
 
-class FFTC2COp(Op):
+class FFTC2CFwdOp(Op):
     """
     1D Complex-to-Complex Fast Fourier Transform operation.
 
@@ -24,24 +24,28 @@ class FFTC2COp(Op):
     Uses pre-computed twiddle factor LUT and shared-memory butterfly fusion
     for optimal GPU performance.
 
-    Args:
-        tune: Whether to enable autotuning (default: False)
-        kernel_map: Optional custom kernel mapping for testing
     """
 
-    def __init__(self,
-                 tune: bool = False,
-                 kernel_map: Optional[Dict[str, Kernel]] = None) -> None:
+    def __init__(self, tune: bool = False, kernel_map: Optional[Dict[str, Kernel]] = None) -> None:
+        """Build the op. Shapes and dtype are taken from the first call.
+
+        Args:
+            tune: Whether to enable autotuning (default: False)
+            kernel_map: Optional custom kernel mapping for testing
+        """
         self.n = None
         self.dtype = None
         self.tune = tune
 
         self.dispatch_kernel(kernel_map)
-        self._twiddle_cache: Dict[tuple[int, torch.dtype, int | None], tuple[torch.Tensor, torch.Tensor]] = {}
+        self._twiddle_cache: Dict[
+            tuple[int, torch.dtype, int | None], tuple[torch.Tensor, torch.Tensor]
+        ] = {}
         self.kernel = None
 
     def _get_kernel(
         self,
+        inputs: "tuple[torch.Tensor | None, ...]",
         n: int,
         batch_size: int,
         dtype: torch.dtype,
@@ -50,9 +54,13 @@ class FFTC2COp(Op):
         key = (n, batch_size, dtype, device_index)
         return self.get_or_build_kernel(
             "fft_c2c_kernel",
-            key,
-            lambda: self.kernel_map["fft_c2c_kernel"](
-                n, batch_size, dtype, tune=self.tune,
+            inputs,
+            key=key,
+            build=lambda: self.kernel_map["fft_c2c_kernel"](
+                n,
+                batch_size,
+                dtype,
+                tune=self.tune,
             ),
         )
 
@@ -80,13 +88,15 @@ class FFTC2COp(Op):
             half_m = 1 << s
             m = half_m * 2
             k_vals = torch.arange(half_m, dtype=torch.float64)
-            angles[half_m - 1:2 * half_m - 1] = -2.0 * math.pi * k_vals / m
+            angles[half_m - 1 : 2 * half_m - 1] = -2.0 * math.pi * k_vals / m
 
         lut_real = torch.cos(angles).to(real_dtype).to(device)
         lut_imag = torch.sin(angles).to(real_dtype).to(device)
         return lut_real, lut_imag
 
-    def _get_lut(self, n: int, dtype: torch.dtype, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    def _get_lut(
+        self, n: int, dtype: torch.dtype, device: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         key = (n, dtype, device.index)
         if key not in self._twiddle_cache:
             self._twiddle_cache[key] = self._build_lut(n, dtype, device)
@@ -95,6 +105,13 @@ class FFTC2COp(Op):
     @property
     def default_kernel_map(self) -> Dict[str, Kernel]:
         return {"fft_c2c_kernel": FFTC2CKernel}
+
+    def _infer_output_shapes(
+        self,
+        input_shape: tuple[int, ...],
+    ) -> dict[str, tuple[int, ...]]:
+        """Manifest ``outputs``: ``same_as(input)`` — a transform moves no axis."""
+        return {"output": tuple(input_shape)}
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Compute 1D FFT of complex input.
@@ -129,13 +146,10 @@ class FFTC2COp(Op):
         self.n = n
         self.dtype = x.dtype
         self.twiddle_real, self.twiddle_imag = self._get_lut(n, x.dtype, x.device)
-        kernel = self._get_kernel(n, batch_size, x.dtype, x.device.index)
+        kernel = self._get_kernel((input,), n, batch_size, x.dtype, x.device.index)
         self.kernel = kernel
-        y_real, y_imag = kernel(x_real, x_imag,
-                                self.twiddle_real, self.twiddle_imag)
+        y_pair = kernel(x_real, x_imag, self.twiddle_real, self.twiddle_imag)
 
-        # Reshape back to original shape
-        y_real = y_real.reshape(original_shape)
-        y_imag = y_imag.reshape(original_shape)
-
-        return torch.complex(y_real, y_imag)
+        # The kernel writes the final butterfly directly in interleaved layout;
+        # view_as_complex is metadata-only and launches no packing kernel.
+        return torch.view_as_complex(y_pair.reshape(*original_shape, 2))

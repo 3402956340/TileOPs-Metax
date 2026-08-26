@@ -20,7 +20,6 @@ from tileops.kernels.attention.gqa_decode_paged import (
     gqa_decode_paged_block_n,
 )
 from tileops.kernels.kernel_base import Kernel
-from tileops.kernels.online_softmax import LOG2E
 
 from .call_spec import decode_bs1_region
 from .gqa_decode_bs1_common import (
@@ -30,6 +29,7 @@ from .gqa_decode_bs1_common import (
     make_gqa_decode_bs1_combine,
     make_gqa_decode_bs1_split,
 )
+from .online_softmax import LOG2E
 
 __all__ = ["GQADecodePagedBs1Kernel"]
 
@@ -118,7 +118,7 @@ def _gqa_decode_paged_bs1_ctx_kernel(
     return _func
 
 
-@torch.library.custom_op("top::gqa_decode_paged_bs1_ctx_op", mutates_args=())
+@torch.library.custom_op("tileops::gqa_decode_paged_bs1_ctx_op", mutates_args=())
 def _gqa_decode_paged_bs1_ctx_op(
     batch: int,
     heads: int,
@@ -187,10 +187,7 @@ class GQADecodePagedBs1Kernel(GQADecodeBs1KernelMixin, Kernel):
     def applies(cls, call) -> bool:
         # The page-tile question is asked of this class, so a kernel_map
         # override answers for its own tiling rather than for the shipped one.
-        return (
-            decode_bs1_region(call)
-            and cls.block_n_for_page_size(call.page_size) is not None
-        )
+        return decode_bs1_region(call) and cls.block_n_for_page_size(call.page_size) is not None
 
     @staticmethod
     def block_n_for_page_size(page_size: int) -> Optional[int]:
@@ -241,9 +238,7 @@ class GQADecodePagedBs1Kernel(GQADecodeBs1KernelMixin, Kernel):
     def default_config(self) -> dict:
         block_n = self.block_n_for_page_size(self.page_size)
         if block_n is None:
-            raise ValueError(
-                "batch=1 paged decode requires page_size=64 or a multiple of 128"
-            )
+            raise ValueError("batch=1 paged decode requires page_size=64 or a multiple of 128")
         return {"block_M": 64, "block_N": block_n, "threads": 160}
 
     def forward(

@@ -12,16 +12,16 @@ Real model configurations:
 
 from typing import Optional
 
-import pytest
 import torch
 
 try:
     from vllm.model_executor.layers.fused_moe import fused_topk as _vllm_fused_topk
+
     _VLLM_AVAILABLE = True
 except ImportError:
     _VLLM_AVAILABLE = False
 
-from benchmarks.benchmark_base import BenchmarkBase, BenchmarkReport
+from benchmarks.benchmark_base import BenchmarkBase
 from tileops.ops.moe import FusedTopKOp
 from workloads.moe import FusedTopKWorkload
 from workloads.workload_base import FixtureBase
@@ -46,11 +46,11 @@ def fused_topk_torch(
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     return topk_weights, topk_ids.int()
 
+
 # Benchmark class
 
 
 class FusedTopKBenchmark(BenchmarkBase[FusedTopKWorkload]):
-
     def calculate_flops(self) -> Optional[float]:
         t = self.workload
         return t.num_tokens * t.num_experts * 2 * (1 + t.top_k)
@@ -66,16 +66,19 @@ class FusedTopKBenchmark(BenchmarkBase[FusedTopKWorkload]):
 
 class FusedTopKBenchFixture(FixtureBase):
     PARAMS = [
-        ("num_tokens, num_experts, top_k, scoring_func, renormalize", [
-            (1,    384, 8, "sigmoid", True),
-            (32,   384, 8, "sigmoid", True),
-            (512,  384, 8, "sigmoid", True),
-            (4096, 384, 8, "sigmoid", True),
-            (1,    128, 8, "softmax", False),
-            (32,   128, 8, "softmax", False),
-            (512,  128, 8, "softmax", False),
-            (4096, 128, 8, "softmax", False),
-        ]),
+        (
+            "num_tokens, num_experts, top_k, scoring_func, renormalize",
+            [
+                (1, 384, 8, "sigmoid", True),
+                (32, 384, 8, "sigmoid", True),
+                (512, 384, 8, "sigmoid", True),
+                (4096, 384, 8, "sigmoid", True),
+                (1, 128, 8, "softmax", False),
+                (32, 128, 8, "softmax", False),
+                (512, 128, 8, "softmax", False),
+                (4096, 128, 8, "softmax", False),
+            ],
+        ),
     ]
 
 
@@ -100,14 +103,14 @@ def test_fused_topk_bench(
     op(gating_output)  # warmup / JIT compile
     torch.cuda.synchronize()
 
-    result = bm.profile(op, gating_output)
-    BenchmarkReport.record(op, locals(), result, tag="tileops")
+    functors = {"tileops": op}
 
     # vLLM baseline (optional)
     has_external = False
     if _VLLM_AVAILABLE and scoring_func in ("softmax", "sigmoid"):
         has_external = True
         hidden_dummy = torch.empty(num_tokens, 1, device=gating_output.device)
+
         # Cast bf16->f32 inside the timed call to match TileOPs' input conditions.
         def _vllm_fn(gating_output):
             return _vllm_fused_topk(
@@ -121,16 +124,17 @@ def test_fused_topk_bench(
         _vllm_fn(gating_output)  # warmup
         torch.cuda.synchronize()
 
-        result_vllm = bm.profile(_vllm_fn, gating_output)
-        BenchmarkReport.record(op, locals(), result_vllm, tag="vllm")
+        functors["vllm"] = _vllm_fn
 
     # Fallback: torch reference baseline (only when no external baselines)
     if not has_external:
+
         def _ref_fn(gating_output):
             return fused_topk_torch(gating_output, top_k, scoring_func, renormalize)
 
         _ref_fn(gating_output)  # warmup
         torch.cuda.synchronize()
 
-        result_ref = bm.profile(_ref_fn, gating_output)
-        BenchmarkReport.record(op, locals(), result_ref, tag="torch-ref")
+        functors["torch-ref"] = _ref_fn
+
+    bm.compare(functors, gating_output, record_as=op, params=locals())

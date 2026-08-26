@@ -21,6 +21,7 @@ __all__ = [
     "decode_bs1_region",
     "dense_prefill_region",
     "fp8_dtype",
+    "paged_decode_ws_region",
     "square_ws_prefill_region",
     "uses_sliding_window",
 ]
@@ -137,6 +138,41 @@ def causal_ws_prefill_region(call: AttentionCall) -> bool:
     )
 
 
+#: Tile heights the warp-specialized paged decode kernel can pick from. A tile
+#: divides the page size, so one tile never straddles two pages, and it splits
+#: evenly across the four consumer warps.
+_WS_DECODE_TILES = (16, 32, 64, 128)
+#: Head dims that map onto one warp: the score reduction is a shuffle chain over
+#: 32 lanes, so a lane owns ``dim / 32`` elements of the head vector.
+_WS_DECODE_LANES = 32
+
+
+def paged_decode_ws_region(call: AttentionCall) -> bool:
+    """The paged-decode region the warp-specialized MHA kernel serves.
+
+    Stated positively, and only in terms the call already carries. What is left
+    to the general kernel: a query longer than one token (this kernel's whole
+    reason for skipping the tensor cores is that ``seqlen_q`` is 1), a head dim
+    that does not divide across a warp, a page size no tile height divides, a
+    softcap, and a causal request -- which for a one-token query against a
+    finished cache is not the same computation.
+    """
+    if call.max_seqlen_q != 1 or call.is_causal or call.softcap != 0.0:
+        return False
+    if call.dtype not in ATTENTION_DTYPES or call.is_fp8:
+        return False
+    if uses_sliding_window(call):
+        return False
+    if call.dim % _WS_DECODE_LANES != 0 or not 0 < call.dim <= 256:
+        return False
+    if call.page_size <= 0 or call.seqlen_kv <= 0:
+        return False
+    return any(
+        tile <= call.page_size and call.page_size % tile == 0 and tile <= call.seqlen_kv
+        for tile in _WS_DECODE_TILES
+    )
+
+
 def decode_bs1_region(call: AttentionCall) -> bool:
     """The Hopper batch-1 decode region, shared by contiguous and paged decode.
 
@@ -145,10 +181,7 @@ def decode_bs1_region(call: AttentionCall) -> bool:
     page-tile condition only it can answer.
     """
     if not (
-        call.batch == 1
-        and call.dtype == torch.float16
-        and call.dim == 128
-        and call.softcap == 0.0
+        call.batch == 1 and call.dtype == torch.float16 and call.dim == 128 and call.softcap == 0.0
     ):
         return False
     if call.heads_kv <= 0 or call.heads % call.heads_kv != 0:
