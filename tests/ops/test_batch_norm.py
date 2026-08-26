@@ -7,7 +7,6 @@ Run:
     conda run -n tileops python -m pytest tests/ops/test_batch_norm.py -vvs
 """
 
-
 import pytest
 import torch
 
@@ -16,82 +15,69 @@ from tileops.ops.norm.batch_norm import BatchNormBwdOp, BatchNormFwdOp
 from workloads.normalization import (
     BatchNormBwdWorkload,
     BatchNormFwdWorkload,
+    batch_norm_fwd_ref,
 )
 
 
-def _ref_fwd(x, weight, bias, running_mean, running_var, training, momentum=0.1, eps=1e-5):
-    """Reference: torch.nn.functional.batch_norm (float32 upcast)."""
-    x32 = x.float()
-    rm = running_mean.clone()
-    rv = running_var.clone()
-    y32 = torch.nn.functional.batch_norm(
-        x32, rm, rv, weight.float(), bias.float(),
-        training=training, momentum=momentum, eps=eps)
-    return y32.to(x.dtype), rm, rv
-
-
 class BatchNormBwdTest(BatchNormBwdWorkload, TestBase):
-    def ref_program(self, grad_out, x, weight, mean, rstd):
-        """Reference via torch.autograd on a float32 graph."""
-        x32 = x.float().requires_grad_(True)
-        w32 = weight.float().requires_grad_(True)
-        b32 = torch.zeros(self.C, device=x.device, dtype=torch.float32, requires_grad=True)
-        rm = torch.zeros(self.C, device=x.device, dtype=torch.float32)
-        rv = torch.ones(self.C, device=x.device, dtype=torch.float32)
-        y32 = torch.nn.functional.batch_norm(
-            x32, rm, rv, w32, b32, training=True, momentum=0.1, eps=1e-5)
-        y32.backward(grad_out.float())
-        return x32.grad.to(x.dtype), w32.grad, b32.grad
+    pass
+
 
 class BatchNormFwdTest(BatchNormFwdWorkload, TestBase):
-    def ref_program(self, x, weight, bias, running_mean, running_var):
-        y, rm, rv = _ref_fwd(x, weight, bias, running_mean, running_var,
-                             training=self.training)
-        return (y,)
+    pass
 
 
 # Fixtures
 
+
 class BatchNormFwdFixture(FixtureBase):
     """(N, C, *spatial, dtype, training)"""
+
     PARAMS = [
-        ("N, C, spatial, dtype, training", [
-            # BatchNorm1d – (N, C)
-            pytest.param(32, 64, (), torch.float16, True, marks=pytest.mark.smoke),
-            pytest.param(32, 64, (), torch.bfloat16, True, marks=pytest.mark.smoke),
-            pytest.param(32, 64, (), torch.float16, False, marks=pytest.mark.full),
-            pytest.param(32, 256, (), torch.bfloat16, True, marks=pytest.mark.full),
-            # BatchNorm1d – (N, C, L)
-            pytest.param(16, 64, (512,), torch.float16, True, marks=pytest.mark.full),
-            # Non-persistent path (L > 8192): smallest representative case L=16384.
-            pytest.param(4, 64, (64, 64), torch.float16, True, marks=pytest.mark.full),
-            # BatchNorm2d – (N, C, H, W)
-            pytest.param(8, 64, (1024, 1024), torch.float16, True, marks=pytest.mark.full),
-            pytest.param(8, 64, (2048, 2048), torch.float16, False, marks=pytest.mark.full),
-            pytest.param(4, 128, (32, 32), torch.bfloat16, True, marks=pytest.mark.full),
-            # Non-aligned spatial: H*W=900, exercises partial-tile path
-            pytest.param(8, 64, (30, 30), torch.float16, True, marks=pytest.mark.full),
-            pytest.param(8, 64, (30, 30), torch.bfloat16, True, marks=pytest.mark.full),
-            # High channel count oversubscribes the SMs, exposing the running-stat update race.
-            pytest.param(16, 1024, (512,), torch.float16, True, marks=pytest.mark.full),
-        ]),
+        (
+            "N, C, spatial, dtype, training",
+            [
+                # BatchNorm1d – (N, C)
+                pytest.param(32, 64, (), torch.float16, True, marks=pytest.mark.smoke),
+                pytest.param(32, 64, (), torch.bfloat16, True, marks=pytest.mark.smoke),
+                pytest.param(32, 64, (), torch.float16, False, marks=pytest.mark.full),
+                pytest.param(32, 256, (), torch.bfloat16, True, marks=pytest.mark.full),
+                # BatchNorm1d – (N, C, L)
+                pytest.param(16, 64, (512,), torch.float16, True, marks=pytest.mark.full),
+                # Non-persistent path (L > 8192): smallest representative case L=16384.
+                pytest.param(4, 64, (64, 64), torch.float16, True, marks=pytest.mark.full),
+                # BatchNorm2d – (N, C, H, W)
+                pytest.param(8, 64, (1024, 1024), torch.float16, True, marks=pytest.mark.full),
+                pytest.param(8, 64, (2048, 2048), torch.float16, False, marks=pytest.mark.full),
+                pytest.param(4, 128, (32, 32), torch.bfloat16, True, marks=pytest.mark.full),
+                # Non-aligned spatial: H*W=900, exercises partial-tile path
+                pytest.param(8, 64, (30, 30), torch.float16, True, marks=pytest.mark.full),
+                pytest.param(8, 64, (30, 30), torch.bfloat16, True, marks=pytest.mark.full),
+                # High channel count oversubscribes the SMs, exposing the running-stat update race.
+                pytest.param(16, 1024, (512,), torch.float16, True, marks=pytest.mark.full),
+            ],
+        ),
     ]
 
 
 class BatchNormBwdFixture(FixtureBase):
     """(N, C, *spatial, dtype)"""
+
     PARAMS = [
-        ("N, C, spatial, dtype", [
-            pytest.param(32, 64, (), torch.float16, marks=pytest.mark.smoke),
-            pytest.param(32, 64, (), torch.bfloat16, marks=pytest.mark.smoke),
-            pytest.param(8, 64, (32, 32), torch.float16, marks=pytest.mark.full),
-            pytest.param(4, 128, (32, 32), torch.bfloat16, marks=pytest.mark.full),
-            # Non-persistent backward path (L=16384 > 8192).
-            pytest.param(4, 64, (64, 64), torch.float16, marks=pytest.mark.full),
-            # Non-aligned spatial: H*W=900, exercises partial-tile path
-            pytest.param(8, 64, (30, 30), torch.float16, marks=pytest.mark.full),
-            pytest.param(8, 64, (30, 30), torch.bfloat16, marks=pytest.mark.full),
-        ]),
+        (
+            "N, C, spatial, dtype",
+            [
+                pytest.param(32, 64, (), torch.float16, marks=pytest.mark.smoke),
+                pytest.param(32, 64, (), torch.bfloat16, marks=pytest.mark.smoke),
+                pytest.param(8, 64, (32, 32), torch.float16, marks=pytest.mark.full),
+                pytest.param(4, 128, (32, 32), torch.bfloat16, marks=pytest.mark.full),
+                # Non-persistent backward path (L=16384 > 8192).
+                pytest.param(4, 64, (64, 64), torch.float16, marks=pytest.mark.full),
+                # Non-aligned spatial: H*W=900, exercises partial-tile path
+                pytest.param(8, 64, (30, 30), torch.float16, marks=pytest.mark.full),
+                pytest.param(8, 64, (30, 30), torch.bfloat16, marks=pytest.mark.full),
+            ],
+        ),
     ]
 
 
@@ -99,6 +85,7 @@ class BatchNormBwdFixture(FixtureBase):
 
 
 # Test functions
+
 
 @BatchNormFwdFixture
 def test_batch_norm_fwd(N, C, spatial, dtype, training):
@@ -113,30 +100,34 @@ def test_batch_norm_fwd(N, C, spatial, dtype, training):
     # Manifest input order: (x, running_mean, running_var, weight, bias).
     y = op(x, running_mean, running_var, weight, bias)
 
-    ref_y, ref_rm, ref_rv = _ref_fwd(x, weight, bias, running_mean_ref, running_var_ref,
-                                      training=training)
+    ref_y, ref_rm, ref_rv = batch_norm_fwd_ref(
+        x, weight, bias, running_mean_ref, running_var_ref, training=training
+    )
 
     # float16 accumulates more error; use loose tolerances.
     atol, rtol = (1e-2, 1e-2) if dtype == torch.float16 else (2e-2, 2e-2)
     max_err = (y.float() - ref_y.float()).abs().max()
-    assert torch.allclose(y.float(), ref_y.float(), atol=atol, rtol=rtol), \
+    assert torch.allclose(y.float(), ref_y.float(), atol=atol, rtol=rtol), (
         f"fwd mismatch (training={training}): max_err={max_err:.4e}"
+    )
 
     if training:
         # allclose is masked when running_mean starts near the batch mean; check determinism.
         rm2, rv2 = running_mean_ref.clone(), running_var_ref.clone()
         op(x, rm2, rv2, weight, bias)
         det_err = (running_mean.float() - rm2.float()).abs().max()
-        assert torch.equal(running_mean, rm2) and torch.equal(running_var, rv2), \
+        assert torch.equal(running_mean, rm2) and torch.equal(running_var, rv2), (
             f"running stats non-deterministic across runs: max_err={det_err:.4e}"
+        )
 
         rm_err = (running_mean.float() - ref_rm.float()).abs().max()
-        assert torch.allclose(running_mean.float(), ref_rm.float(), atol=atol, rtol=rtol), \
+        assert torch.allclose(running_mean.float(), ref_rm.float(), atol=atol, rtol=rtol), (
             f"running_mean mismatch: max_err={rm_err:.4e}"
+        )
         rv_err = (running_var.float() - ref_rv.float()).abs().max()
-        assert torch.allclose(running_var.float(), ref_rv.float(), atol=atol, rtol=rtol), \
+        assert torch.allclose(running_var.float(), ref_rv.float(), atol=atol, rtol=rtol), (
             f"running_var mismatch: max_err={rv_err:.4e}"
-
+        )
 
 
 @BatchNormBwdFixture
@@ -152,13 +143,14 @@ def test_batch_norm_bwd(N, C, spatial, dtype):
     atol, rtol = (1e-2, 1e-2) if dtype == torch.float16 else (2e-2, 2e-2)
 
     for name, got, ref in [
-        ("grad_x",      grad_x.float(),    ref_gx.float()),
+        ("grad_x", grad_x.float(), ref_gx.float()),
         ("grad_weight", grad_weight.float(), ref_gw.float()),
-        ("grad_bias",   grad_bias.float(),   ref_gb.float()),
+        ("grad_bias", grad_bias.float(), ref_gb.float()),
     ]:
         max_err = (got - ref).abs().max()
-        assert torch.allclose(got, ref, atol=atol, rtol=rtol), \
+        assert torch.allclose(got, ref, atol=atol, rtol=rtol), (
             f"bwd {name} mismatch: max_err={max_err:.4e}"
+        )
 
 
 @pytest.mark.smoke
@@ -182,5 +174,24 @@ def test_batch_norm_fwd_returns_single_tensor() -> None:
     assert y.shape == x.shape
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])
+@pytest.mark.smoke
+def test_training_updates_a_non_contiguous_running_stat() -> None:
+    """Contiguity normalization must not swallow the write a mutated input promises."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required for forward call")
+
+    N, C, H, W = 4, 8, 4, 4
+    op = BatchNormFwdOp(training=True)
+    x = torch.randn(N, C, H, W, device="cuda", dtype=torch.float16)
+    weight = torch.ones(C, device="cuda", dtype=torch.float32)
+    bias = torch.zeros(C, device="cuda", dtype=torch.float32)
+    # Every other element of a wider buffer: a view the kernel cannot be handed as is.
+    rm = torch.zeros(2 * C, device="cuda", dtype=torch.float32)[::2]
+    rv = torch.ones(2 * C, device="cuda", dtype=torch.float32)[::2]
+    assert not rm.is_contiguous()
+
+    op(x, rm, rv, weight, bias)
+
+    expected_mean = op.momentum * x.float().transpose(0, 1).reshape(C, -1).mean(dim=1)
+    torch.testing.assert_close(rm, expected_mean, atol=1e-3, rtol=1e-3)
+    assert not torch.equal(rv, torch.ones_like(rv)), "running_var was not written either"

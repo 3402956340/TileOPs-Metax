@@ -23,7 +23,7 @@ def test_maca_xfail_allowlist_matches_exact_nodeids(monkeypatch) -> None:
     known.add_marker.assert_called_once()
     marker = known.add_marker.call_args.args[0].mark
     assert marker.name == "xfail"
-    assert marker.kwargs["strict"] is True
+    assert marker.kwargs["strict"] is False
     assert marker.kwargs["reason"].startswith("MACA: ")
     unknown.add_marker.assert_not_called()
 

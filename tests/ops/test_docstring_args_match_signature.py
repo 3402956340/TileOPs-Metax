@@ -13,7 +13,9 @@ import pytest
 
 import tileops.ops.elementwise as ew
 
-_SECTION = re.compile(r"^\s*(Args|Returns|Raises|Example|Examples|Attributes|Note|Notes|Yields):\s*$")
+_SECTION = re.compile(
+    r"^\s*(Args|Returns|Raises|Example|Examples|Attributes|Note|Notes|Yields):\s*$"
+)
 _ARG_KEY = re.compile(r"^(\s*)(\*{0,2}\w+)\s*(?:\([^)]*\))?:\s")
 
 
@@ -72,4 +74,6 @@ def test_inherited_ctor_args_exist(name):
 @pytest.mark.smoke
 def test_sweep_still_sees_inheriting_classes():
     assert len(_CASES) >= 20, f"only {len(_CASES)} found; the filter broke"
-    assert "RoundFwdOp" in _CASES
+    # A canary that inherits its constructor and documents it: the shape this sweep
+    # exists for. ``RoundFwdOp`` was it until ``decimals`` gave it one of its own.
+    assert "AddFwdOp" in _CASES

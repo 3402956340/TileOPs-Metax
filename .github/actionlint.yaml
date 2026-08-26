@@ -4,3 +4,5 @@ self-hosted-runner:
     - venv
     - tileops-metax-runner
     - nightly
+    - shared
+    - bench

@@ -14,8 +14,6 @@ import torch.nn.functional as F
 
 from tests.test_base import FixtureBase
 from tileops.ops.moe import (
-    FusedMoe,
-    FusedMoeFwdCbFwdOp,
     FusedMoeFwdOp,
     FusedTopKOp,
 )
@@ -26,6 +24,7 @@ try:
     from vllm.model_executor.layers.fused_moe.fused_moe import (
         fused_experts as _vllm_fused_experts,
     )
+
     _VLLM_AVAILABLE = True
 except ImportError:
     _VLLM_AVAILABLE = False
@@ -35,11 +34,11 @@ except ImportError:
 
 
 def _ref_moe_ffn(
-    hidden_states: torch.Tensor,   # [T, H]
-    w_gate_up: torch.Tensor,       # [E, 2*F, H]
-    w_down: torch.Tensor,          # [E, H, F]
-    topk_weights: torch.Tensor,    # [T, K] float32
-    topk_ids: torch.Tensor,        # [T, K] int64
+    hidden_states: torch.Tensor,  # [T, H]
+    w_gate_up: torch.Tensor,  # [E, 2*F, H]
+    w_down: torch.Tensor,  # [E, H, F]
+    topk_weights: torch.Tensor,  # [T, K] float32
+    topk_ids: torch.Tensor,  # [T, K] int64
 ) -> torch.Tensor:
     """PyTorch reference: per-expert GEMM (memory-efficient, no O(T*K*2F*H) alloc)."""
     T, H = hidden_states.shape
@@ -48,7 +47,7 @@ def _ref_moe_ffn(
 
     output = torch.zeros(T, H, dtype=torch.float32, device=hidden_states.device)
     for e in range(E):
-        mask = (topk_ids == e)
+        mask = topk_ids == e
         if not mask.any():
             continue
         t_idx, k_idx = mask.nonzero(as_tuple=True)
@@ -85,32 +84,88 @@ class Qwen3Fixture(FixtureBase):
             " scoring_func, renormalize, dtype",
             [
                 pytest.param(
-                    32, 8, 2, 64, 32, "softmax", False, torch.bfloat16,
-                    marks=pytest.mark.smoke, id="smoke-softmax-bf16",
+                    32,
+                    8,
+                    2,
+                    64,
+                    32,
+                    "softmax",
+                    False,
+                    torch.bfloat16,
+                    marks=pytest.mark.smoke,
+                    id="smoke-softmax-bf16",
                 ),
                 pytest.param(
-                    32, 8, 2, 64, 32, "softmax", True, torch.float16,
-                    marks=pytest.mark.smoke, id="smoke-softmax-renorm-fp16",
+                    32,
+                    8,
+                    2,
+                    64,
+                    32,
+                    "softmax",
+                    True,
+                    torch.float16,
+                    marks=pytest.mark.smoke,
+                    id="smoke-softmax-renorm-fp16",
                 ),
                 pytest.param(
-                    32, 8, 2, 64, 32, "sigmoid", True, torch.bfloat16,
-                    marks=pytest.mark.smoke, id="smoke-sigmoid-renorm-bf16",
+                    32,
+                    8,
+                    2,
+                    64,
+                    32,
+                    "sigmoid",
+                    True,
+                    torch.bfloat16,
+                    marks=pytest.mark.smoke,
+                    id="smoke-sigmoid-renorm-bf16",
                 ),
                 pytest.param(
-                    512, 128, 8, 2048, 1024, "softmax", False, torch.bfloat16,
-                    marks=pytest.mark.full, id="qwen3-small",
+                    512,
+                    128,
+                    8,
+                    2048,
+                    1024,
+                    "softmax",
+                    False,
+                    torch.bfloat16,
+                    marks=pytest.mark.full,
+                    id="qwen3-small",
                 ),
                 pytest.param(
-                    2048, 128, 8, 2048, 1024, "softmax", False, torch.bfloat16,
-                    marks=pytest.mark.full, id="qwen3-medium",
+                    2048,
+                    128,
+                    8,
+                    2048,
+                    1024,
+                    "softmax",
+                    False,
+                    torch.bfloat16,
+                    marks=pytest.mark.full,
+                    id="qwen3-medium",
                 ),
                 pytest.param(
-                    512, 256, 8, 2048, 1024, "softmax", True, torch.bfloat16,
-                    marks=pytest.mark.full, id="qwen35-small",
+                    512,
+                    256,
+                    8,
+                    2048,
+                    1024,
+                    "softmax",
+                    True,
+                    torch.bfloat16,
+                    marks=pytest.mark.full,
+                    id="qwen35-small",
                 ),
                 pytest.param(
-                    512, 256, 8, 2048, 1024, "sigmoid", True, torch.bfloat16,
-                    marks=pytest.mark.full, id="deepseek-small",
+                    512,
+                    256,
+                    8,
+                    2048,
+                    1024,
+                    "sigmoid",
+                    True,
+                    torch.bfloat16,
+                    marks=pytest.mark.full,
+                    id="deepseek-small",
                 ),
             ],
         )
@@ -119,24 +174,30 @@ class Qwen3Fixture(FixtureBase):
 
 @Qwen3Fixture
 def test_fused_moe_qwen3(
-    num_tokens, num_experts, top_k, hidden_size, ffn_size,
-    scoring_func, renormalize, dtype,
+    num_tokens,
+    num_experts,
+    top_k,
+    hidden_size,
+    ffn_size,
+    scoring_func,
+    renormalize,
+    dtype,
 ) -> None:
     torch.manual_seed(42)
     dev = "cuda"
     hidden = torch.randn(num_tokens, hidden_size, dtype=dtype, device=dev)
     gating = torch.randn(num_tokens, num_experts, dtype=dtype, device=dev)
-    w_gate_up = torch.randn(
-        num_experts, ffn_size * 2, hidden_size, dtype=dtype, device=dev
-    ) * 0.02
-    w_down = torch.randn(
-        num_experts, hidden_size, ffn_size, dtype=dtype, device=dev
-    ) * 0.02
+    w_gate_up = torch.randn(num_experts, ffn_size * 2, hidden_size, dtype=dtype, device=dev) * 0.02
+    w_down = torch.randn(num_experts, hidden_size, ffn_size, dtype=dtype, device=dev) * 0.02
 
-    op_nopad = FusedMoe(
-        num_tokens=num_tokens, num_experts=num_experts, top_k=top_k,
-        hidden_size=hidden_size, ffn_size=ffn_size,
-        scoring_func=scoring_func, renormalize=renormalize,
+    op_nopad = FusedMoeFwdOp(
+        num_tokens=num_tokens,
+        num_experts=num_experts,
+        top_k=top_k,
+        hidden_size=hidden_size,
+        ffn_size=ffn_size,
+        scoring_func=scoring_func,
+        renormalize=renormalize,
     )
 
     out_nopad = op_nopad(hidden, gating, w_gate_up, w_down)
@@ -153,11 +214,13 @@ def test_fused_moe_qwen3(
 
     if _VLLM_AVAILABLE and scoring_func == "softmax":
         out_vllm = _vllm_fused_experts(
-            hidden.float(), w_gate_up.float(), w_down.float(),
-            topk_weights, topk_ids,
+            hidden.float(),
+            w_gate_up.float(),
+            w_down.float(),
+            topk_weights,
+            topk_ids,
         ).to(dtype)
         torch.testing.assert_close(out_nopad.float(), out_vllm.float(), rtol=1e-2, atol=1e-2)
-
 
 
 # Cases for the FusedMoe non-determinism regression. The cooperative 3WG
@@ -169,14 +232,14 @@ def test_fused_moe_qwen3(
 # detection. The smoke case is a fast path-coverage check.
 _DET_CASES = [
     pytest.param(
-        dict(num_tokens=32, num_experts=8, top_k=2, hidden_size=64,
-             ffn_size=32, reps=3),
-        marks=pytest.mark.smoke, id="smoke",
+        dict(num_tokens=32, num_experts=8, top_k=2, hidden_size=64, ffn_size=32, reps=3),
+        marks=pytest.mark.smoke,
+        id="smoke",
     ),
     pytest.param(
-        dict(num_tokens=2048, num_experts=128, top_k=8, hidden_size=2048,
-             ffn_size=1024, reps=200),
-        marks=pytest.mark.nightly, id="qwen3-medium",
+        dict(num_tokens=2048, num_experts=128, top_k=8, hidden_size=2048, ffn_size=1024, reps=200),
+        marks=pytest.mark.nightly,
+        id="qwen3-medium",
     ),
 ]
 
@@ -205,9 +268,14 @@ def test_fused_moe_deterministic(case):
     w_gate_up = torch.randn(ne, ff * 2, hs, dtype=dtype, device=dev) * 0.02
     w_down = torch.randn(ne, hs, ff, dtype=dtype, device=dev) * 0.02
 
-    op = FusedMoe(
-        num_tokens=nt, num_experts=ne, top_k=tk, hidden_size=hs,
-        ffn_size=ff, scoring_func="softmax", renormalize=False,
+    op = FusedMoeFwdOp(
+        num_tokens=nt,
+        num_experts=ne,
+        top_k=tk,
+        hidden_size=hs,
+        ffn_size=ff,
+        scoring_func="softmax",
+        renormalize=False,
     )
     fk = FusedTopKOp(nt, ne, tk, "softmax", False)
     topk_weights, topk_ids = fk(gating)
@@ -233,32 +301,88 @@ class KimiFixture(FixtureBase):
             " routed_scaling_factor, with_correction_bias, dtype",
             [
                 pytest.param(
-                    32, 8, 2, 64, 32, 1.0, False, torch.bfloat16,
-                    marks=pytest.mark.smoke, id="smoke-nobias-bf16",
+                    32,
+                    8,
+                    2,
+                    64,
+                    32,
+                    1.0,
+                    False,
+                    torch.bfloat16,
+                    marks=pytest.mark.smoke,
+                    id="smoke-nobias-bf16",
                 ),
                 pytest.param(
-                    32, 8, 2, 64, 32, 1.0, True, torch.bfloat16,
-                    marks=pytest.mark.smoke, id="smoke-bias-bf16",
+                    32,
+                    8,
+                    2,
+                    64,
+                    32,
+                    1.0,
+                    True,
+                    torch.bfloat16,
+                    marks=pytest.mark.smoke,
+                    id="smoke-bias-bf16",
                 ),
                 pytest.param(
-                    32, 8, 2, 64, 32, 2.827, True, torch.bfloat16,
-                    marks=pytest.mark.smoke, id="smoke-bias-scale-bf16",
+                    32,
+                    8,
+                    2,
+                    64,
+                    32,
+                    2.827,
+                    True,
+                    torch.bfloat16,
+                    marks=pytest.mark.smoke,
+                    id="smoke-bias-scale-bf16",
                 ),
                 pytest.param(
-                    32, 8, 2, 64, 32, 2.827, True, torch.float16,
-                    marks=pytest.mark.smoke, id="smoke-bias-scale-fp16",
+                    32,
+                    8,
+                    2,
+                    64,
+                    32,
+                    2.827,
+                    True,
+                    torch.float16,
+                    marks=pytest.mark.smoke,
+                    id="smoke-bias-scale-fp16",
                 ),
                 pytest.param(
-                    64, 384, 8, 64, 32, 2.827, True, torch.bfloat16,
-                    marks=pytest.mark.smoke, id="kimi-k2-smoke-bf16",
+                    64,
+                    384,
+                    8,
+                    64,
+                    32,
+                    2.827,
+                    True,
+                    torch.bfloat16,
+                    marks=pytest.mark.smoke,
+                    id="kimi-k2-smoke-bf16",
                 ),
                 pytest.param(
-                    512, 384, 8, 256, 128, 2.827, True, torch.bfloat16,
-                    marks=pytest.mark.full, id="kimi-k2-small-bf16",
+                    512,
+                    384,
+                    8,
+                    256,
+                    128,
+                    2.827,
+                    True,
+                    torch.bfloat16,
+                    marks=pytest.mark.full,
+                    id="kimi-k2-small-bf16",
                 ),
                 pytest.param(
-                    2048, 384, 8, 256, 128, 2.827, True, torch.bfloat16,
-                    marks=pytest.mark.full, id="kimi-k2-medium-bf16",
+                    2048,
+                    384,
+                    8,
+                    256,
+                    128,
+                    2.827,
+                    True,
+                    torch.bfloat16,
+                    marks=pytest.mark.full,
+                    id="kimi-k2-medium-bf16",
                 ),
             ],
         )
@@ -267,8 +391,14 @@ class KimiFixture(FixtureBase):
 
 @KimiFixture
 def test_fused_moe_kimi(
-    num_tokens, num_experts, top_k, hidden_size, ffn_size,
-    routed_scaling_factor, with_correction_bias, dtype,
+    num_tokens,
+    num_experts,
+    top_k,
+    hidden_size,
+    ffn_size,
+    routed_scaling_factor,
+    with_correction_bias,
+    dtype,
 ) -> None:
     torch.manual_seed(42)
     dev = "cuda"
@@ -276,20 +406,20 @@ def test_fused_moe_kimi(
     gating = torch.randn(num_tokens, num_experts, dtype=dtype, device=dev)
     correction_bias = (
         torch.randn(num_experts, dtype=torch.float32, device=dev) * 0.1
-        if with_correction_bias else None
+        if with_correction_bias
+        else None
     )
-    w_gate_up = torch.randn(
-        num_experts, ffn_size * 2, hidden_size, dtype=dtype, device=dev
-    ) * 0.02
-    w_down = torch.randn(
-        num_experts, hidden_size, ffn_size, dtype=dtype, device=dev
-    ) * 0.02
+    w_gate_up = torch.randn(num_experts, ffn_size * 2, hidden_size, dtype=dtype, device=dev) * 0.02
+    w_down = torch.randn(num_experts, hidden_size, ffn_size, dtype=dtype, device=dev) * 0.02
 
-    op_nopad = FusedMoe(
-        num_tokens=num_tokens, num_experts=num_experts, top_k=top_k,
-        hidden_size=hidden_size, ffn_size=ffn_size,
-        scoring_func="sigmoid", renormalize=True,
-        with_correction_bias=with_correction_bias,
+    op_nopad = FusedMoeFwdOp(
+        num_tokens=num_tokens,
+        num_experts=num_experts,
+        top_k=top_k,
+        hidden_size=hidden_size,
+        ffn_size=ffn_size,
+        scoring_func="sigmoid",
+        renormalize=True,
         routed_scaling_factor=routed_scaling_factor,
     )
 
@@ -299,17 +429,13 @@ def test_fused_moe_kimi(
     assert out_nopad.dtype == dtype
 
     # Reference using FusedTopKOp for consistent routing
-    fk = FusedTopKOp(
-        num_tokens, num_experts, top_k, "sigmoid", True,
-        with_correction_bias=with_correction_bias,
-    )
+    fk = FusedTopKOp(num_tokens, num_experts, top_k, "sigmoid", True)
     topk_weights, topk_ids = fk(gating, correction_bias)
     ref = _ref_moe_ffn(hidden, w_gate_up, w_down, topk_weights, topk_ids.long())
     if routed_scaling_factor != 1.0:
         ref = ref * routed_scaling_factor
 
     torch.testing.assert_close(out_nopad.float(), ref.float(), rtol=1e-2, atol=1e-2)
-
 
 
 # expert_map local filtering test (EP simulation without All-to-All)
@@ -334,33 +460,44 @@ def test_expert_map_local_filter() -> None:
 
     # Rank 0 owns experts 0..3, rank 1 owns experts 4..7
     expert_map_rank0 = torch.full((E,), -1, dtype=torch.int32, device=dev)
-    expert_map_rank0[:E // 2] = torch.arange(E // 2, dtype=torch.int32, device=dev)
+    expert_map_rank0[: E // 2] = torch.arange(E // 2, dtype=torch.int32, device=dev)
 
     expert_map_rank1 = torch.full((E,), -1, dtype=torch.int32, device=dev)
-    expert_map_rank1[E // 2:] = torch.arange(E // 2, dtype=torch.int32, device=dev)
+    expert_map_rank1[E // 2 :] = torch.arange(E // 2, dtype=torch.int32, device=dev)
 
     # Full output (no expert_map)
-    op_full = FusedMoe(
-        num_tokens=T, num_experts=E, top_k=K,
-        hidden_size=H, ffn_size=F,
+    op_full = FusedMoeFwdOp(
+        num_tokens=T,
+        num_experts=E,
+        top_k=K,
+        hidden_size=H,
+        ffn_size=F,
     )
     out_full = op_full(hidden, gating, w_gate_up, w_down)
 
     # Rank-0 partial output (local experts 0..3)
-    op_r0 = FusedMoe(
-        num_tokens=T, num_experts=E, top_k=K,
-        hidden_size=H, ffn_size=F,
+    op_r0 = FusedMoeFwdOp(
+        num_tokens=T,
+        num_experts=E,
+        top_k=K,
+        hidden_size=H,
+        ffn_size=F,
         expert_map=expert_map_rank0,
+        num_experts_local=E // 2,
     )
-    out_r0 = op_r0(hidden, gating, w_gate_up[:E // 2], w_down[:E // 2])
+    out_r0 = op_r0(hidden, gating, w_gate_up[: E // 2], w_down[: E // 2])
 
     # Rank-1 partial output (local experts 4..7)
-    op_r1 = FusedMoe(
-        num_tokens=T, num_experts=E, top_k=K,
-        hidden_size=H, ffn_size=F,
+    op_r1 = FusedMoeFwdOp(
+        num_tokens=T,
+        num_experts=E,
+        top_k=K,
+        hidden_size=H,
+        ffn_size=F,
         expert_map=expert_map_rank1,
+        num_experts_local=E // 2,
     )
-    out_r1 = op_r1(hidden, gating, w_gate_up[E // 2:], w_down[E // 2:])
+    out_r1 = op_r1(hidden, gating, w_gate_up[E // 2 :], w_down[E // 2 :])
 
     # Sum of partial outputs should match full output
     out_sum = (out_r0.float() + out_r1.float()).to(dtype)
@@ -388,8 +525,11 @@ def test_correction_bias_routing_precision() -> None:
     ref_weights, ref_ids = _ref_kimi_routing(logits, bias, K)
 
     op = FusedTopKOp(
-        num_tokens=T, num_experts=E, top_k=K,
-        scoring_func="sigmoid", renormalize=True, with_correction_bias=True,
+        num_tokens=T,
+        num_experts=E,
+        top_k=K,
+        scoring_func="sigmoid",
+        renormalize=True,
     )
     tw, ti = op(logits, bias)
 
@@ -407,24 +547,51 @@ def test_correction_bias_routing_precision() -> None:
 class VllmFixture(FixtureBase):
     PARAMS = [
         (
-            "num_tokens, num_experts, top_k, hidden_size, ffn_size,"
-            " routed_scaling_factor, dtype",
+            "num_tokens, num_experts, top_k, hidden_size, ffn_size, routed_scaling_factor, dtype",
             [
                 pytest.param(
-                    32, 8, 2, 64, 32, 1.0, torch.bfloat16,
-                    marks=pytest.mark.smoke, id="smoke-bf16",
+                    32,
+                    8,
+                    2,
+                    64,
+                    32,
+                    1.0,
+                    torch.bfloat16,
+                    marks=pytest.mark.smoke,
+                    id="smoke-bf16",
                 ),
                 pytest.param(
-                    32, 8, 2, 64, 32, 2.827, torch.bfloat16,
-                    marks=pytest.mark.smoke, id="smoke-scale-bf16",
+                    32,
+                    8,
+                    2,
+                    64,
+                    32,
+                    2.827,
+                    torch.bfloat16,
+                    marks=pytest.mark.smoke,
+                    id="smoke-scale-bf16",
                 ),
                 pytest.param(
-                    64, 384, 8, 64, 32, 2.827, torch.bfloat16,
-                    marks=pytest.mark.smoke, id="kimi-k2-smoke-bf16",
+                    64,
+                    384,
+                    8,
+                    64,
+                    32,
+                    2.827,
+                    torch.bfloat16,
+                    marks=pytest.mark.smoke,
+                    id="kimi-k2-smoke-bf16",
                 ),
                 pytest.param(
-                    512, 384, 8, 256, 128, 2.827, torch.bfloat16,
-                    marks=pytest.mark.full, id="kimi-k2-small-bf16",
+                    512,
+                    384,
+                    8,
+                    256,
+                    128,
+                    2.827,
+                    torch.bfloat16,
+                    marks=pytest.mark.full,
+                    id="kimi-k2-small-bf16",
                 ),
             ],
         )
@@ -433,8 +600,13 @@ class VllmFixture(FixtureBase):
 
 @VllmFixture
 def test_fused_moe_vs_vllm(
-    num_tokens, num_experts, top_k, hidden_size, ffn_size,
-    routed_scaling_factor, dtype,
+    num_tokens,
+    num_experts,
+    top_k,
+    hidden_size,
+    ffn_size,
+    routed_scaling_factor,
+    dtype,
 ) -> None:
     if not _VLLM_AVAILABLE:
         pytest.skip("vllm not installed")
@@ -444,22 +616,20 @@ def test_fused_moe_vs_vllm(
     hidden = torch.randn(num_tokens, hidden_size, dtype=dtype, device=dev)
     gating = torch.randn(num_tokens, num_experts, dtype=dtype, device=dev)
     correction_bias = torch.randn(num_experts, dtype=torch.float32, device=dev) * 0.1
-    w_gate_up = torch.randn(
-        num_experts, ffn_size * 2, hidden_size, dtype=dtype, device=dev
-    ) * 0.02
-    w_down = torch.randn(
-        num_experts, hidden_size, ffn_size, dtype=dtype, device=dev
-    ) * 0.02
+    w_gate_up = torch.randn(num_experts, ffn_size * 2, hidden_size, dtype=dtype, device=dev) * 0.02
+    w_down = torch.randn(num_experts, hidden_size, ffn_size, dtype=dtype, device=dev) * 0.02
 
-    fk = FusedTopKOp(
-        num_tokens, num_experts, top_k, "sigmoid", True, with_correction_bias=True,
-    )
+    fk = FusedTopKOp(num_tokens, num_experts, top_k, "sigmoid", True)
     topk_weights, topk_ids = fk(gating, correction_bias)
 
-    op = FusedMoe(
-        num_tokens=num_tokens, num_experts=num_experts, top_k=top_k,
-        hidden_size=hidden_size, ffn_size=ffn_size,
-        scoring_func="sigmoid", renormalize=True, with_correction_bias=True,
+    op = FusedMoeFwdOp(
+        num_tokens=num_tokens,
+        num_experts=num_experts,
+        top_k=top_k,
+        hidden_size=hidden_size,
+        ffn_size=ffn_size,
+        scoring_func="sigmoid",
+        renormalize=True,
         routed_scaling_factor=routed_scaling_factor,
     )
     out_tileops = op(hidden, gating, w_gate_up, w_down, correction_bias)
@@ -469,7 +639,10 @@ def test_fused_moe_vs_vllm(
         out_vllm = out_vllm * routed_scaling_factor
 
     torch.testing.assert_close(
-        out_tileops.float(), out_vllm.float(), rtol=1e-2, atol=1e-2,
+        out_tileops.float(),
+        out_vllm.float(),
+        rtol=1e-2,
+        atol=1e-2,
     )
 
 
@@ -490,16 +663,22 @@ def test_fused_moe_fwd_op_identity() -> None:
     w_down = torch.randn(E, H, F_, dtype=dtype, device=dev) * 0.02
 
     op = FusedMoeFwdOp(
-        num_tokens=T, num_experts=E, top_k=K,
-        hidden_size=H, ffn_size=F_,
+        num_tokens=T,
+        num_experts=E,
+        top_k=K,
+        hidden_size=H,
+        ffn_size=F_,
     )
     out = op(hidden, gating, w_gate_up, w_down)
     assert out.shape == (T, H)
     assert out.dtype == dtype
 
-    ref_op = FusedMoe(
-        num_tokens=T, num_experts=E, top_k=K,
-        hidden_size=H, ffn_size=F_,
+    ref_op = FusedMoeFwdOp(
+        num_tokens=T,
+        num_experts=E,
+        top_k=K,
+        hidden_size=H,
+        ffn_size=F_,
     )
     ref = ref_op(hidden, gating, w_gate_up, w_down)
     torch.testing.assert_close(out.float(), ref.float(), rtol=1e-2, atol=1e-2)
@@ -509,8 +688,8 @@ def test_fused_moe_fwd_op_identity() -> None:
 
 
 @pytest.mark.smoke
-def test_fused_moe_fwd_cb_op_identity() -> None:
-    """`FusedMoeFwdCbFwdOp` (with correction bias) end-to-end smoke."""
+def test_fused_moe_fwd_correction_bias_identity() -> None:
+    """A call passing correction_bias, end-to-end smoke."""
     torch.manual_seed(7)
     dev = "cuda"
     T, E, K, H, F_ = 32, 8, 2, 64, 32
@@ -522,18 +701,27 @@ def test_fused_moe_fwd_cb_op_identity() -> None:
     w_gate_up = torch.randn(E, F_ * 2, H, dtype=dtype, device=dev) * 0.02
     w_down = torch.randn(E, H, F_, dtype=dtype, device=dev) * 0.02
 
-    op = FusedMoeFwdCbFwdOp(
-        num_tokens=T, num_experts=E, top_k=K,
-        hidden_size=H, ffn_size=F_, renormalize=True,
+    op = FusedMoeFwdOp(
+        num_tokens=T,
+        num_experts=E,
+        top_k=K,
+        hidden_size=H,
+        ffn_size=F_,
+        scoring_func="sigmoid",
+        renormalize=True,
     )
-    out = op(hidden, gating, correction_bias, w_gate_up, w_down)
+    out = op(hidden, gating, w_gate_up, w_down, correction_bias)
     assert out.shape == (T, H)
     assert out.dtype == dtype
 
-    ref_op = FusedMoe(
-        num_tokens=T, num_experts=E, top_k=K,
-        hidden_size=H, ffn_size=F_,
-        scoring_func="sigmoid", renormalize=True, with_correction_bias=True,
+    ref_op = FusedMoeFwdOp(
+        num_tokens=T,
+        num_experts=E,
+        top_k=K,
+        hidden_size=H,
+        ffn_size=F_,
+        scoring_func="sigmoid",
+        renormalize=True,
     )
     ref = ref_op(hidden, gating, w_gate_up, w_down, correction_bias)
     torch.testing.assert_close(out.float(), ref.float(), rtol=1e-2, atol=1e-2)
@@ -552,8 +740,11 @@ def test_prepare_finalize_without_experts_raises() -> None:
     from tileops.ops.moe.prepare_finalize.no_dp_ep import MoEPrepareAndFinalizeNoDPEP
 
     with pytest.raises(ValueError, match="experts="):
-        FusedMoe(
-            num_tokens=16, num_experts=4, top_k=2,
-            hidden_size=64, ffn_size=32,
+        FusedMoeFwdOp(
+            num_tokens=16,
+            num_experts=4,
+            top_k=2,
+            hidden_size=64,
+            ffn_size=32,
             prepare_finalize=MoEPrepareAndFinalizeNoDPEP(),
         )

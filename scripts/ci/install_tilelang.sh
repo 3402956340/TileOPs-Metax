@@ -16,6 +16,12 @@ assert mamba_chunk_scan_combined is not None
 print("mamba_ssm baseline import OK")
 PY
 
+# Benchmark-only baselines.  Install without dependencies so these pure-Python
+# packages cannot replace the runner's Metax torch/runtime stack.
+pip install --target="${SITE_PACKAGES}" --no-deps \
+  "sqlalchemy==2.0.52" \
+  "flag_gems==5.0.2"
+
 # Build apache-tvm-ffi from source below; skip the PyPI pin in requirements.txt
 # so it cannot overwrite the SITE_PACKAGES install (plain 0.1.11 has no +g<sha>).
 grep -vE '^apache-tvm-ffi' "3rdparty/tilelang-metax/requirements.txt" | pip install -r /dev/stdin
@@ -33,7 +39,7 @@ else
   # Drop stale top-level tvm that can shadow tilelang's vendored copy.
   rm -rf "${SITE_PACKAGES}/tvm" "${SITE_PACKAGES}"/tvm-*.dist-info
   rm -rf "3rdparty/tilelang-metax/dist"
-  python -m build -w "3rdparty/tilelang-metax"
+  python -m build -w -Cwheel.py-api=cp39 "3rdparty/tilelang-metax"
   shopt -s nullglob
   tilelang_whls=("3rdparty/tilelang-metax/dist"/tilelang-*git"${desired_tilelang_git}"*.whl)
   shopt -u nullglob

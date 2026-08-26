@@ -50,12 +50,15 @@ def _estimate_grouped_gemm_maca_smem_bytes(
 
 
 def _config_fits_smem(cfg: dict, smem_budget: int) -> bool:
-    return _estimate_grouped_gemm_maca_smem_bytes(
-        block_m=cfg["block_m"],
-        block_n=cfg["block_n"],
-        block_k=cfg["block_k"],
-        num_stages=cfg["num_stages"],
-    ) <= smem_budget
+    return (
+        _estimate_grouped_gemm_maca_smem_bytes(
+            block_m=cfg["block_m"],
+            block_n=cfg["block_n"],
+            block_k=cfg["block_k"],
+            num_stages=cfg["num_stages"],
+        )
+        <= smem_budget
+    )
 
 
 def _build_persistent_gemm_maca(
@@ -85,12 +88,12 @@ def _build_persistent_gemm_maca(
 
         @T.prim_func
         def _gemm_main(
-            A: T.Tensor(A_shape, dtype),                         # type: ignore  # noqa: F821
-            B: T.Tensor((num_experts, N, K), dtype),             # type: ignore  # noqa: F821
-            true_sizes: T.Tensor((num_experts,), "int32"),       # noqa: F821
-            true_offsets: T.Tensor((num_experts,), "int32"),     # noqa: F821
-            C: T.Tensor((numel, N), dtype),                      # type: ignore  # noqa: F821
-            tile_counter: T.Tensor((1,), "int32"),               # noqa: F821
+            A: T.Tensor(A_shape, dtype),  # type: ignore  # noqa: F821
+            B: T.Tensor((num_experts, N, K), dtype),  # type: ignore  # noqa: F821
+            true_sizes: T.Tensor((num_experts,), "int32"),  # noqa: F821
+            true_offsets: T.Tensor((num_experts,), "int32"),  # noqa: F821
+            C: T.Tensor((numel, N), dtype),  # type: ignore  # noqa: F821
+            tile_counter: T.Tensor((1,), "int32"),  # noqa: F821
         ):
             with T.Kernel(sm_count, threads=threads) as (pid,):
                 A_shared = T.alloc_shared((block_m, block_k), dtype)
@@ -103,10 +106,12 @@ def _build_persistent_gemm_maca(
                 lo = T.alloc_local((1,), "int32")
                 hi = T.alloc_local((1,), "int32")
 
-                T.annotate_layout({
-                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                    B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                })
+                T.annotate_layout(
+                    {
+                        A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+                        B_shared: tilelang.layout.make_swizzled_layout(B_shared),
+                    }
+                )
 
                 tx = T.get_thread_binding()
 
@@ -135,8 +140,7 @@ def _build_persistent_gemm_maca(
                             pid_in_group = flat_id % T.int32(num_pid_in_group)
                             group_id = flat_id // T.int32(num_pid_in_group)
                             first_pid_m = group_id * T.int32(group_size_m)
-                            actual_gsm = T.min(m_tiles_total - first_pid_m,
-                                               T.int32(group_size_m))
+                            actual_gsm = T.min(m_tiles_total - first_pid_m, T.int32(group_size_m))
                             m_tile = first_pid_m + pid_in_group % actual_gsm
                             n_tile = pid_in_group // actual_gsm
 
@@ -155,10 +159,8 @@ def _build_persistent_gemm_maca(
                         row_in_expert = (m_tile - s_cum[expert_id]) * T.int32(block_m)
                         m_start = true_offsets[expert_id] + row_in_expert
                         n_start = n_tile * T.int32(block_n)
-                        actual_rows = T.min(T.int32(block_m),
-                                            true_sizes[expert_id] - row_in_expert)
-                        actual_cols = T.min(T.int32(block_n),
-                                            T.int32(N) - n_start)
+                        actual_rows = T.min(T.int32(block_m), true_sizes[expert_id] - row_in_expert)
+                        actual_cols = T.min(T.int32(block_n), T.int32(N) - n_start)
 
                         T.clear(C_local)
 
@@ -166,13 +168,16 @@ def _build_persistent_gemm_maca(
                             k_start = k * block_k
                             if actual_rows == T.int32(block_m) and actual_cols == T.int32(block_n):
                                 T.copy(
-                                    A[m_start:m_start + block_m, k_start:k_start + block_k],
+                                    A[m_start : m_start + block_m, k_start : k_start + block_k],
                                     A_shared,
                                     disable_tma=True,
                                 )
                                 T.copy(
-                                    B[expert_id, n_start:n_start + block_n,
-                                      k_start:k_start + block_k],
+                                    B[
+                                        expert_id,
+                                        n_start : n_start + block_n,
+                                        k_start : k_start + block_k,
+                                    ],
                                     B_shared,
                                     disable_tma=True,
                                 )
@@ -180,11 +185,15 @@ def _build_persistent_gemm_maca(
                                 for i, j in T.Parallel(block_m, block_k):
                                     A_shared[i, j] = T.if_then_else(
                                         i < actual_rows and j < K - k * block_k,
-                                        A[m_start + i, k * block_k + j], 0)
+                                        A[m_start + i, k * block_k + j],
+                                        0,
+                                    )
                                 for i, j in T.Parallel(block_n, block_k):
                                     B_shared[i, j] = T.if_then_else(
                                         j < K - k * block_k and i < actual_cols,
-                                        B[expert_id, n_start + i, k * block_k + j], 0)
+                                        B[expert_id, n_start + i, k * block_k + j],
+                                        0,
+                                    )
                             T.gemm(
                                 A_shared,
                                 B_shared,
@@ -197,14 +206,15 @@ def _build_persistent_gemm_maca(
                             if i < actual_rows and j < actual_cols:
                                 C[m_start + i, n_start + j] = C_local[i, j]
     else:
+
         @T.prim_func
         def _gemm_main(
-            A: T.Tensor(A_shape, dtype),                         # type: ignore  # noqa: F821
-            B: T.Tensor((num_experts, N, K), dtype),             # type: ignore  # noqa: F821
-            true_sizes: T.Tensor((num_experts,), "int32"),       # noqa: F821
-            true_offsets: T.Tensor((num_experts,), "int32"),     # noqa: F821
-            C: T.Tensor((numel, N), dtype),                      # type: ignore  # noqa: F821
-            tile_counter: T.Tensor((1,), "int32"),               # noqa: F821
+            A: T.Tensor(A_shape, dtype),  # type: ignore  # noqa: F821
+            B: T.Tensor((num_experts, N, K), dtype),  # type: ignore  # noqa: F821
+            true_sizes: T.Tensor((num_experts,), "int32"),  # noqa: F821
+            true_offsets: T.Tensor((num_experts,), "int32"),  # noqa: F821
+            C: T.Tensor((numel, N), dtype),  # type: ignore  # noqa: F821
+            tile_counter: T.Tensor((1,), "int32"),  # noqa: F821
         ):
             with T.Kernel(sm_count, threads=threads) as (pid,):
                 A_shared = T.alloc_shared((block_m, block_k), dtype)
@@ -217,10 +227,12 @@ def _build_persistent_gemm_maca(
                 lo = T.alloc_local((1,), "int32")
                 hi = T.alloc_local((1,), "int32")
 
-                T.annotate_layout({
-                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                    B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                })
+                T.annotate_layout(
+                    {
+                        A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+                        B_shared: tilelang.layout.make_swizzled_layout(B_shared),
+                    }
+                )
 
                 tx = T.get_thread_binding()
 
@@ -249,8 +261,7 @@ def _build_persistent_gemm_maca(
                             pid_in_group = flat_id % T.int32(num_pid_in_group)
                             group_id = flat_id // T.int32(num_pid_in_group)
                             first_pid_m = group_id * T.int32(group_size_m)
-                            actual_gsm = T.min(m_tiles_total - first_pid_m,
-                                               T.int32(group_size_m))
+                            actual_gsm = T.min(m_tiles_total - first_pid_m, T.int32(group_size_m))
                             m_tile = first_pid_m + pid_in_group % actual_gsm
                             n_tile = pid_in_group // actual_gsm
 
@@ -269,23 +280,24 @@ def _build_persistent_gemm_maca(
                         row_in_expert = (m_tile - s_cum[expert_id]) * T.int32(block_m)
                         m_start = true_offsets[expert_id] + row_in_expert
                         n_start = n_tile * T.int32(block_n)
-                        actual_rows = T.min(T.int32(block_m),
-                                            true_sizes[expert_id] - row_in_expert)
-                        actual_cols = T.min(T.int32(block_n),
-                                            T.int32(N) - n_start)
+                        actual_rows = T.min(T.int32(block_m), true_sizes[expert_id] - row_in_expert)
+                        actual_cols = T.min(T.int32(block_n), T.int32(N) - n_start)
 
                         T.clear(C_local)
 
-                        for k in T.Pipelined(T.ceildiv(K, block_k),
-                                             num_stages=num_stages):
+                        for k in T.Pipelined(T.ceildiv(K, block_k), num_stages=num_stages):
                             for i, j in T.Parallel(block_m, block_k):
                                 A_shared[i, j] = T.if_then_else(
                                     i < actual_rows and j < K - k * block_k,
-                                    A[m_start + i, k * block_k + j], 0)
+                                    A[m_start + i, k * block_k + j],
+                                    0,
+                                )
                             for i, j in T.Parallel(block_n, block_k):
                                 B_shared[i, j] = T.if_then_else(
                                     j < K - k * block_k and i < actual_cols,
-                                    B[expert_id, n_start + i, k * block_k + j], 0)
+                                    B[expert_id, n_start + i, k * block_k + j],
+                                    0,
+                                )
                             T.gemm(
                                 A_shared,
                                 B_shared,
@@ -324,7 +336,7 @@ def _persistent_grouped_gemm_kernel_maca(
         max_tiles = numel // block_m + num_experts
         total_ctas_ub = max_tiles * num_pid_n
         max_iters = (total_ctas_ub + sm_count - 1) // sm_count + 2
-        k_aligned = (K % block_k == 0)
+        k_aligned = K % block_k == 0
         return _build_persistent_gemm_maca(
             numel=numel,
             num_experts=num_experts,
@@ -418,8 +430,13 @@ class GroupedGemmPersistentMACAKernel(Kernel):
         if self.K % block_k == 0:
             A = F.pad(A, (0, 0, 0, block_m))
         gemm_fn = _persistent_grouped_gemm_kernel_maca(
-            self.numel, self.num_experts, self.N, self.K,
-            self.dtype_str, self.sm_count, block_k,
+            self.numel,
+            self.num_experts,
+            self.N,
+            self.K,
+            self.dtype_str,
+            self.sm_count,
+            block_k,
         )(
             block_m,
             self.config["block_n"],

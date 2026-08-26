@@ -29,6 +29,7 @@ from tileops.kernels.reduction._primitives import (
     align_up,
     compute_tile_n,
     device_smem_budget,
+    restore_reduced,
 )
 
 __all__ = ["ArgreduceMACAKernel"]
@@ -225,16 +226,10 @@ def _argreduce_kernel_tiled(M: int, N: int, op_kind: str, dtype: str, tile_n: in
                             take_tile = (
                                 (initialized[i] == 0)
                                 or (tile_is_nan and not row_is_nan)
-                                or (
-                                    tile_is_nan
-                                    and row_is_nan
-                                    and tile_idx[i] < out_idx[i]
-                                )
+                                or (tile_is_nan and row_is_nan and tile_idx[i] < out_idx[i])
                                 or numeric_better
                             )
-                            out_idx[i] = T.if_then_else(
-                                take_tile, tile_idx[i], out_idx[i]
-                            )
+                            out_idx[i] = T.if_then_else(take_tile, tile_idx[i], out_idx[i])
                             row_extreme[i] = T.if_then_else(
                                 take_tile, tile_extreme[i], row_extreme[i]
                             )
@@ -341,16 +336,10 @@ def _argreduce_kernel_tiled(M: int, N: int, op_kind: str, dtype: str, tile_n: in
                             take_tile = (
                                 (initialized[i] == 0)
                                 or (tile_is_nan and not row_is_nan)
-                                or (
-                                    tile_is_nan
-                                    and row_is_nan
-                                    and tile_idx[i] < out_idx[i]
-                                )
+                                or (tile_is_nan and row_is_nan and tile_idx[i] < out_idx[i])
                                 or numeric_better
                             )
-                            out_idx[i] = T.if_then_else(
-                                take_tile, tile_idx[i], out_idx[i]
-                            )
+                            out_idx[i] = T.if_then_else(take_tile, tile_idx[i], out_idx[i])
                             row_extreme[i] = T.if_then_else(
                                 take_tile, tile_extreme[i], row_extreme[i]
                             )
@@ -406,15 +395,26 @@ class ArgreduceMACAKernel(Kernel):
         tune: bool = False,
         *,
         inner_stride: int = 1,
+        reduce_axes: tuple[int, ...] = (),
+        keepdim: bool = False,
+        device_index: int | None = None,
     ):
-        # Short non-last axes need the streaming output-parallel kernel.
-        # Delegate so Op/kernel_map callers that pass inner_stride!=1 still work.
-        if inner_stride != 1:
+        # Non-last or multi-axis reductions need the generic row-layout kernel.
+        # This MACA implementation only reduces one contiguous axis at a time.
+        if inner_stride != 1 or len(reduce_axes) > 1:
             from tileops.kernels.reduction.argreduce import ArgreduceKernel
 
             return ArgreduceKernel(
-                M, N, op_kind, dtype,
-                inner_stride=inner_stride, config=config, tune=tune,
+                M,
+                N,
+                op_kind,
+                dtype,
+                reduce_axes=reduce_axes,
+                keepdim=keepdim,
+                inner_stride=inner_stride,
+                config=config,
+                tune=tune,
+                device_index=device_index,
             )
         return object.__new__(cls)
 
@@ -428,9 +428,12 @@ class ArgreduceMACAKernel(Kernel):
         tune: bool = False,
         *,
         inner_stride: int = 1,
+        reduce_axes: tuple[int, ...] = (),
+        keepdim: bool = False,
+        device_index: int | None = None,
     ):
         # inner_stride!=1 is handled in __new__ (returns ArgreduceKernel).
-        super().__init__()
+        super().__init__(device_index=device_index)
         if op_kind not in _ARGREDUCE_KINDS:
             raise ValueError(
                 f"Unsupported op_kind '{op_kind}'. Expected one of {sorted(_ARGREDUCE_KINDS)}."
@@ -439,6 +442,8 @@ class ArgreduceMACAKernel(Kernel):
         self.N = N
         self.op_kind = op_kind
         self.dtype = dtype
+        self.reduce_axes = tuple(reduce_axes)
+        self.keepdim = keepdim
         self.strategy = "contiguous"
         self.N_padded = align_up(N, DEFAULT_ALIGNMENT)
         self._elem_bytes = torch.tensor([], dtype=dtype).element_size()
@@ -591,7 +596,11 @@ class ArgreduceMACAKernel(Kernel):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run the argmax/argmin kernel."""
-        return _argreduce_fwd_wrapped_maca(
+        in_shape = tuple(x.shape)
+        # The TileLang program is specialized for a two-dimensional [M, N]
+        # row layout; the Op hands kernels the original declared tensor.
+        x_rows = x.reshape(self.M, self.N)
+        result = _argreduce_fwd_wrapped_maca(
             self.M,
             self.N,
             self.op_kind,
@@ -599,5 +608,8 @@ class ArgreduceMACAKernel(Kernel):
             self.config["block_m"],
             self.config["threads"],
             self.config["tile_n"],
-            x,
+            x_rows,
         )
+        if self.reduce_axes:
+            return restore_reduced(result, in_shape, self.reduce_axes, self.keepdim)
+        return result

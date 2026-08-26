@@ -35,6 +35,7 @@ from .gqa_sliding_window_varlen_fwd import (
 )
 from .mha_decode import MHADecodeKernel
 from .mha_decode_paged import MHADecodePagedKernel
+from .mha_decode_paged_ws import MHADecodePagedWsKernel
 
 __all__ = [
     "FlashAttnBwdPostprocessMACAKernel",
@@ -60,6 +61,7 @@ __all__ = [
     "GQASlidingWindowVarlenFwdWgmmaPipelinedKernel",
     "MHADecodeKernel",
     "MHADecodePagedKernel",
+    "MHADecodePagedWsKernel",
     "MLADecodeMacaKernel",
     "MLADecodeWsKernel",
     "NSACmpFwdVarlenKernel",

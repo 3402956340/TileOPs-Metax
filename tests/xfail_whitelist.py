@@ -17,8 +17,7 @@ _TRACE_RUNTIME_ERROR = "known MACA trace payload runtime error"
 _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         _UNSUPPORTED_ARCHITECTURE,
-        (
-        ),
+        (),
     ),
     (
         _COMPILATION_FAILURE,
@@ -84,11 +83,48 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         _NUMERICAL_MISMATCH,
         (
             "tests/ops/test_fused_moe_experts.py::TestFusedMoEExpertsNopadPersistent3WGFwdOp::test_forward_matches_torch_ref_activation[float16-gelu_and_mul]",
+            "tests/ops/attention/test_mha_decode_paged.py::test_mha_decode_paged_cache_shorter_than_bound[real_lengths2]",
+            "tests/ops/test_mamba.py::test_da_cumsum_fwd[2-4-128-16-True-True-dtype6-False]",
+            "tests/ops/test_mhc.py::test_mhc_pre_op[1-4-1280-dtype0-False]",
+            "tests/ops/test_mhc.py::test_mhc_pre_op[2-4-1920-dtype1-False]",
+            "tests/ops/test_mhc.py::test_mhc_pre_op[4-4-2560-dtype2-False]",
         ),
     ),
     (
         _RUNTIME_LAUNCH_ERROR,
         (
+            # F.conv* reference / mcDNN cache miss on MACA
+            "tests/ops/test_convolution.py::test_conv1d[full-convtasnet-pointwise-k1-s1-fp16]",
+            "tests/ops/test_convolution.py::test_conv1d[full-sequence-downsample-k3-s2-bf16]",
+            "tests/ops/test_convolution.py::test_conv1d[full-padding-valid-fp16]",
+            "tests/ops/test_convolution.py::test_conv1d[full-padding-same-fp16]",
+            "tests/ops/test_convolution.py::test_conv1d_no_bias_matches_torch",
+            "tests/ops/test_convolution.py::test_conv1d_bias_matches_torch",
+            "tests/ops/test_convolution.py::test_conv1d_dilation_matches_torch[no-bias]",
+            "tests/ops/test_convolution.py::test_conv1d_dilation_matches_torch[bias]",
+            "tests/ops/test_convolution.py::test_conv1d_dispatches_kernel[pointwise]",
+            "tests/ops/test_convolution.py::test_conv2d[smoke-fp16-3x3]",
+            "tests/ops/test_convolution.py::test_conv2d[smoke-bf16-3x3]",
+            "tests/ops/test_convolution.py::test_conv2d[full-resblock-3x3-s1-fp16]",
+            "tests/ops/test_convolution.py::test_conv2d[full-stage-transition-3x3-s2-fp16]",
+            "tests/ops/test_convolution.py::test_conv2d[full-small-5x5-s1-fp16]",
+            "tests/ops/test_convolution.py::test_conv2d[full-small-5x5-s2-fp16]",
+            "tests/ops/test_convolution.py::test_conv2d[full-fp16-stride2]",
+            "tests/ops/test_convolution.py::test_conv2d[full-bf16-3x3-s2]",
+            "tests/ops/test_convolution.py::test_conv2d[full-deeplab-aspp-3x3-d2-fp16]",
+            "tests/ops/test_convolution.py::test_conv2d_no_bias_matches_torch",
+            "tests/ops/test_convolution.py::test_conv2d_dispatches_3x3_kernel",
+            "tests/ops/test_convolution.py::test_conv2d_dispatches_5x5_kernel",
+            "tests/ops/test_convolution.py::test_conv3d[smoke-3d-unet-k3-s1-fp16]",
+            "tests/ops/test_convolution.py::test_conv3d[smoke-3d-unet-k3-s1-bf16]",
+            "tests/ops/test_convolution.py::test_conv3d[full-video-stage-downsample-k3-s2-fp16]",
+            "tests/ops/test_convolution.py::test_conv3d[full-3d-aspp-3x3x3-d2-fp16]",
+            "tests/ops/test_convolution.py::test_conv3d[full-3d-resnext-grouped-k3-fp16]",
+            "tests/ops/test_convolution.py::test_conv3d_no_bias_grouped_matches_torch",
+            "tests/ops/test_convolution.py::test_conv2d_cold_traces_fullgraph_and_owns_its_graph_nodes[no-bias]",
+            "tests/ops/test_convolution.py::test_conv2d_cold_traces_fullgraph_and_owns_its_graph_nodes[bias]",
+            "tests/ops/test_convolution.py::test_conv1d_cold_traces_fullgraph_and_owns_its_graph_nodes",
+            "tests/ops/test_convolution.py::test_a_non_contiguous_input_compiles_to_the_shape_the_fake_promised",
         ),
     ),
     (
@@ -105,6 +141,8 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         _CI_EXPECTATION_MISMATCH,
         (
+            "tests/ops/test_grouped_gemm.py::test_selection_prefers_the_persistent_kernel_where_it_applies[4096-4096-False-True-grouped_gemm_persistent_3wg_kernel]",
+            "tests/ops/test_moe_shared_fused_moe.py::test_a_replaced_shared_expert_kernel_is_the_one_built",
         ),
     ),
     (
@@ -116,11 +154,7 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
 )
 
-MACA_XFAILS = {
-    nodeid: reason
-    for reason, nodeids in _MACA_XFAIL_GROUPS
-    for nodeid in nodeids
-}
+MACA_XFAILS = {nodeid: reason for reason, nodeids in _MACA_XFAIL_GROUPS for nodeid in nodeids}
 
 if len(MACA_XFAILS) != sum(len(nodeids) for _, nodeids in _MACA_XFAIL_GROUPS):
     raise ValueError("duplicate node ID in the MACA xfail allowlist")

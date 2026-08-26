@@ -16,11 +16,12 @@ import triton.language as tl
 
 try:
     from sgl_kernel import moe_align_block_size as _sgl_moe_align_block_size
+
     _SGL_KERNEL_AVAILABLE = True
 except ImportError:
     _SGL_KERNEL_AVAILABLE = False
 
-from benchmarks.benchmark_base import BenchmarkReport, ManifestBenchmark
+from benchmarks.benchmark_base import ManifestBenchmark, fields, workload_params
 from tileops.manifest import load_workloads
 from tileops.ops.moe import MoePermuteAlignFwdOp
 from workloads.moe import MoePermuteAlignWorkload
@@ -128,8 +129,15 @@ def _triton_permute_align(
     _stage2_reduce[grid](tokens_cnts, num_experts)
     _stage3_cumsum[(1,)](num_tokens_post_pad, tokens_cnts, cumsum, num_experts, block_size)
     _stage4_scatter[grid](
-        topk_ids, sorted_token_ids, expert_ids, tokens_cnts, cumsum,
-        num_experts, block_size, numel, tokens_per_thread,
+        topk_ids,
+        sorted_token_ids,
+        expert_ids,
+        tokens_cnts,
+        cumsum,
+        num_experts,
+        block_size,
+        numel,
+        tokens_per_thread,
     )
 
 
@@ -139,25 +147,12 @@ def _triton_permute_align(
 # Manifest-driven parametrize
 
 
-def _manifest_params():
-    """Convert manifest workloads to pytest params."""
-    params = []
-    for w in load_workloads(_OP_NAME):
-        label = w.get("label", "unlabeled")
-        for dtype_str in w["dtypes"]:
-            params.append(pytest.param(
-                w["total_tokens"], w["top_k"], w["num_experts"], w["block_size"],
-                id=f"{label}-{dtype_str}",
-            ))
-    return params
-
-
-# Benchmark test
-
-
 @pytest.mark.parametrize(
     "total_tokens, top_k, num_experts, block_size",
-    _manifest_params(),
+    workload_params(
+        load_workloads(_OP_NAME),
+        fields("total_tokens", "top_k", "num_experts", "block_size"),
+    ),
 )
 def test_permute_align_bench(
     total_tokens: int, top_k: int, num_experts: int, block_size: int
@@ -174,8 +169,7 @@ def test_permute_align_bench(
     op(*inputs)
     torch.cuda.synchronize()
 
-    result = bm.profile(op, *inputs)
-    BenchmarkReport.record(op, locals(), result, tag="tileops")
+    functors = {"tileops": op}
 
     # Triton baseline
     dev = inputs[0].device
@@ -188,16 +182,16 @@ def test_permute_align_bench(
 
     def _triton_fn(topk_ids):
         sorted_ids.fill_(numel)
-        _triton_permute_align(topk_ids, num_experts, block_size,
-                              sorted_ids, expert_ids, num_post_pad)
+        _triton_permute_align(
+            topk_ids, num_experts, block_size, sorted_ids, expert_ids, num_post_pad
+        )
         return sorted_ids, expert_ids, num_post_pad
 
     # Warmup Triton baseline
     _triton_fn(*inputs)
     torch.cuda.synchronize()
 
-    result_bl = bm.profile(_triton_fn, *inputs)
-    BenchmarkReport.record(op, locals(), result_bl, tag="triton")
+    functors["triton"] = _triton_fn
 
     # sgl-kernel baseline (optional -- only runs when sgl_kernel is installed)
     if _SGL_KERNEL_AVAILABLE:
@@ -208,18 +202,21 @@ def test_permute_align_bench(
 
         def _sgl_fn(topk_ids):
             sorted_ids_sgl.fill_(numel)
-            _sgl_moe_align_block_size(topk_ids, num_experts, block_size,
-                                      sorted_ids_sgl, expert_ids_sgl, num_post_pad_sgl,
-                                      cumsum_buf)
+            _sgl_moe_align_block_size(
+                topk_ids,
+                num_experts,
+                block_size,
+                sorted_ids_sgl,
+                expert_ids_sgl,
+                num_post_pad_sgl,
+                cumsum_buf,
+            )
             return sorted_ids_sgl, expert_ids_sgl, num_post_pad_sgl
 
         # Warmup sgl-kernel baseline
         _sgl_fn(*inputs)
         torch.cuda.synchronize()
 
-        result_sgl = bm.profile(_sgl_fn, *inputs)
-        BenchmarkReport.record(op, locals(), result_sgl, tag="sgl-kernel")
+        functors["sgl-kernel"] = _sgl_fn
 
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])
+    bm.compare(functors, *inputs, record_as=op, params=locals())

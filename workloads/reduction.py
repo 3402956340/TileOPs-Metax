@@ -35,6 +35,9 @@ class ProdWorkload(WorkloadBase):
         x = torch.rand(*self.shape, dtype=self.dtype, device="cuda") * 0.01 + 0.99
         return (x,)
 
+    def ref_program(self, x: torch.Tensor) -> torch.Tensor:
+        return x.float().prod(dim=-1).to(x.dtype)
+
 
 class StdWorkload(RandnWorkload):
     """Workload definition for StdFwdOp."""
@@ -165,9 +168,7 @@ class CumulativeWorkload(WorkloadBase):
         self.shape = tuple(shape)
         self.dtype = dtype
         self.op_kind = op_kind
-        self.use_small_range = (
-            op_kind == "cumprod" if use_small_range is None else use_small_range
-        )
+        self.use_small_range = op_kind == "cumprod" if use_small_range is None else use_small_range
 
     def gen_inputs(self) -> tuple[torch.Tensor]:
         if self.use_small_range:

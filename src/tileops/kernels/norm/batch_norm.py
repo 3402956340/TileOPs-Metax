@@ -2,9 +2,9 @@
 
 Reference: Ioffe & Szegedy (2015) https://arxiv.org/abs/1502.03167
 
-Input layout expected by all kernels: (C, L) where C is the channel count and
-L = N * H * W * ... is the product of batch and spatial dimensions.  The op
-layer is responsible for reshaping the user-facing tensor to this layout.
+The prim_funcs work on (C, L) where C is the channel count and L = N * H * W * ... is
+the product of batch and spatial dimensions. Each kernel takes the user-facing
+(N, C, *spatial) tensor and moves it into that layout itself.
 
 Performance notes:
   - Persistent path (block_l >= L): loads all L elements into shared memory once
@@ -77,6 +77,20 @@ def _find_best_block_l(L: int) -> dict:
 
 # Training forward
 
+
+def _to_cl(t: torch.Tensor) -> torch.Tensor:
+    """Move (N, C, *spatial) into the (C, L) layout the prim_funcs read."""
+    channels = t.shape[1]
+    return t.permute(1, 0, *range(2, t.ndim)).reshape(channels, -1).contiguous()
+
+
+def _from_cl(t: torch.Tensor, original_shape: torch.Size) -> torch.Tensor:
+    """Move a (C, L) result back to the shape the caller handed over."""
+    batch, channels, *spatial = original_shape
+    restored = t.reshape(channels, batch, *spatial)
+    return restored.permute(1, 0, *range(2, restored.ndim)).contiguous()
+
+
 @functools.lru_cache(maxsize=32)
 def _batch_norm_fwd_train_kernel(
     C: int,
@@ -107,7 +121,6 @@ def _batch_norm_fwd_train_kernel(
 
     @tilelang.jit(out_idx=[-1], compile_flags=["-O3", "-DENABLE_BF16"])
     def _bn_fwd_train_func(block_l: int, threads: int) -> Callable:
-
         @T.prim_func
         def _bn_fwd_train(
             x: T.Tensor([C, L], dtype),
@@ -156,8 +169,7 @@ def _batch_norm_fwd_train_kernel(
                 # Statistics.
                 mean_val = sum_result[0] / T.cast(L, accum_dtype)
                 var_val = sq_result[0] / T.cast(L, accum_dtype) - mean_val * mean_val
-                rstd_val = T.cast(1.0, accum_dtype) / T.sqrt(
-                    var_val + T.cast(eps, accum_dtype))
+                rstd_val = T.cast(1.0, accum_dtype) / T.sqrt(var_val + T.cast(eps, accum_dtype))
 
                 # Save for backward.
                 mean_out[bc] = mean_val
@@ -167,11 +179,19 @@ def _batch_norm_fwd_train_kernel(
                 # running_var follows PyTorch convention: updated with unbiased variance
                 # (Bessel's correction: biased_var * L / (L - 1)).
                 mom = T.cast(momentum, accum_dtype)
-                unbiased_var = var_val * T.cast(L, accum_dtype) / (T.cast(L, accum_dtype) - T.cast(1.0, accum_dtype))
+                unbiased_var = (
+                    var_val
+                    * T.cast(L, accum_dtype)
+                    / (T.cast(L, accum_dtype) - T.cast(1.0, accum_dtype))
+                )
                 # One writer per block: this running-stat RMW races if every thread runs it.
                 if T.get_thread_binding() == 0:
-                    running_mean[bc] = (T.cast(1.0, accum_dtype) - mom) * running_mean[bc] + mom * mean_val
-                    running_var[bc] = (T.cast(1.0, accum_dtype) - mom) * running_var[bc] + mom * unbiased_var
+                    running_mean[bc] = (T.cast(1.0, accum_dtype) - mom) * running_mean[
+                        bc
+                    ] + mom * mean_val
+                    running_var[bc] = (T.cast(1.0, accum_dtype) - mom) * running_var[
+                        bc
+                    ] + mom * unbiased_var
 
                 # Pass 2 – normalize.
                 if block_l >= L:
@@ -180,7 +200,8 @@ def _batch_norm_fwd_train_kernel(
                     for _i, j in T.Parallel(1, block_l):
                         xval = T.cast(x_shared[j], accum_dtype)
                         y[bc, j] = T.cast(
-                            weight[bc] * (xval - mean_val) * rstd_val + bias[bc], dtype)
+                            weight[bc] * (xval - mean_val) * rstd_val + bias[bc], dtype
+                        )
                 else:
                     # Non-persistent path: direct global memory access avoids async-copy
                     # data race that occurs when T.copy is used inside T.Pipelined.
@@ -188,7 +209,8 @@ def _batch_norm_fwd_train_kernel(
                         for _i, j in T.Parallel(1, block_l):
                             xval = T.cast(x[bc, l_tile * block_l + j], accum_dtype)
                             y[bc, l_tile * block_l + j] = T.cast(
-                                weight[bc] * (xval - mean_val) * rstd_val + bias[bc], dtype)
+                                weight[bc] * (xval - mean_val) * rstd_val + bias[bc], dtype
+                            )
 
         return _bn_fwd_train
 
@@ -207,6 +229,7 @@ class BatchNormFwdTrainKernel(Kernel):
         config: Optional tile config dict.
         tune: If True, autotune tile config.
     """
+
     supported_archs: list[int] = [80, 89, 90]
 
     def __init__(
@@ -270,28 +293,41 @@ class BatchNormFwdTrainKernel(Kernel):
     def forward(
         self,
         x: torch.Tensor,
-        weight: torch.Tensor,
-        bias: torch.Tensor,
         running_mean: torch.Tensor,
         running_var: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
     ):
-        """Run training forward pass.
+        """Run training forward pass on an ``(N, C, *spatial)`` input.
+
+        Moving the input into the $[C \\times L]$ layout, and the output back, happens here.
 
         Returns:
-            y: Normalized output tensor.
+            y: Normalized output, shaped like *x*.
             mean_out: Per-channel batch mean (saved for backward).
             rstd_out: Per-channel reciprocal std (saved for backward).
+
+        Raises:
+            ValueError: An input is not on a CUDA device.
         """
+        self._require_cuda(
+            x=x,
+            weight=weight,
+            bias=bias,
+            running_mean=running_mean,
+            running_var=running_var,
+        )
         mean_out = torch.empty(self.C, device=x.device, dtype=torch.float32)
         rstd_out = torch.empty(self.C, device=x.device, dtype=torch.float32)
         y = self.kernel(
             self.config["block_l"],
             self.config["threads"],
-        )(x, weight, bias, running_mean, running_var, mean_out, rstd_out)
-        return y, mean_out, rstd_out
+        )(_to_cl(x), weight, bias, running_mean, running_var, mean_out, rstd_out)
+        return _from_cl(y, x.shape), mean_out, rstd_out
 
 
 # Inference forward
+
 
 @functools.lru_cache(maxsize=32)
 def _batch_norm_fwd_infer_kernel(
@@ -309,7 +345,6 @@ def _batch_norm_fwd_infer_kernel(
 
     @tilelang.jit(out_idx=[-1], compile_flags=["-O3", "-DENABLE_BF16"])
     def _bn_fwd_infer_func(block_l: int, num_stages: int, threads: int) -> Callable:
-
         @T.prim_func
         def _bn_fwd_infer(
             x: T.Tensor([C, L], dtype),
@@ -321,8 +356,7 @@ def _batch_norm_fwd_infer_kernel(
         ):
             with T.Kernel(C, threads=threads) as (bc):
                 # Fused scale/shift: avoids recomputing per element.
-                scale = weight[bc] / T.sqrt(
-                    running_var[bc] + T.cast(eps, accum_dtype))
+                scale = weight[bc] / T.sqrt(running_var[bc] + T.cast(eps, accum_dtype))
                 shift = bias[bc] - running_mean[bc] * scale
 
                 # Non-persistent: direct global memory access avoids async-copy
@@ -330,7 +364,8 @@ def _batch_norm_fwd_infer_kernel(
                 for l_tile in T.Pipelined(L // block_l, num_stages=0):
                     for _i, j in T.Parallel(1, block_l):
                         y[bc, l_tile * block_l + j] = T.cast(
-                            T.cast(x[bc, l_tile * block_l + j], accum_dtype) * scale + shift, dtype)
+                            T.cast(x[bc, l_tile * block_l + j], accum_dtype) * scale + shift, dtype
+                        )
 
         return _bn_fwd_infer
 
@@ -348,6 +383,7 @@ class BatchNormFwdInferKernel(Kernel):
         config: Optional tile config dict.
         tune: If True, autotune tile config.
     """
+
     supported_archs: list[int] = [80, 89, 90]
 
     def __init__(
@@ -394,19 +430,38 @@ class BatchNormFwdInferKernel(Kernel):
     def forward(
         self,
         x: torch.Tensor,
-        weight: torch.Tensor,
-        bias: torch.Tensor,
         running_mean: torch.Tensor,
         running_var: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
     ) -> torch.Tensor:
-        return self.kernel(
+        """Run inference forward pass on an ``(N, C, *spatial)`` input.
+
+        Moving the input into the $[C \\times L]$ layout, and the output back, happens here.
+
+        Returns:
+            Normalized output, shaped like *x*.
+
+        Raises:
+            ValueError: An input is not on a CUDA device.
+        """
+        self._require_cuda(
+            x=x,
+            weight=weight,
+            bias=bias,
+            running_mean=running_mean,
+            running_var=running_var,
+        )
+        y = self.kernel(
             self.config["block_l"],
             self.config["num_stages"],
             self.config["threads"],
-        )(x, weight, bias, running_mean, running_var)
+        )(_to_cl(x), weight, bias, running_mean, running_var)
+        return _from_cl(y, x.shape)
 
 
 # Backward
+
 
 @functools.lru_cache(maxsize=32)
 def _batch_norm_bwd_kernel(
@@ -438,7 +493,6 @@ def _batch_norm_bwd_kernel(
 
     @tilelang.jit(out_idx=[-1], compile_flags=["-O3", "-DENABLE_BF16"])
     def _bn_bwd_func(block_l: int, threads: int) -> Callable:
-
         @T.prim_func
         def _bn_bwd(
             grad_out: T.Tensor([C, L], dtype),
@@ -481,7 +535,9 @@ def _batch_norm_bwd_kernel(
                     for l_tile in T.Pipelined(L // block_l, num_stages=0):
                         for _i, j in T.Parallel(1, block_l):
                             go_val = T.cast(grad_out[bc, l_tile * block_l + j], accum_dtype)
-                            x_hat = (T.cast(x[bc, l_tile * block_l + j], accum_dtype) - mean_val) * rstd_val
+                            x_hat = (
+                                T.cast(x[bc, l_tile * block_l + j], accum_dtype) - mean_val
+                            ) * rstd_val
                             do_frag[_i, j] += go_val
                             do_xhat_frag[_i, j] += go_val * x_hat
 
@@ -506,9 +562,7 @@ def _batch_norm_bwd_kernel(
                         go_val = T.cast(go_shared[j], accum_dtype)
                         x_hat = (T.cast(x_shared[j], accum_dtype) - mean_val) * rstd_val
                         gx = w_rstd_over_L * (
-                            T.cast(L, accum_dtype) * go_val
-                            - sum_do[0]
-                            - x_hat * sum_do_xhat[0]
+                            T.cast(L, accum_dtype) * go_val - sum_do[0] - x_hat * sum_do_xhat[0]
                         )
                         grad_x[bc, j] = T.cast(gx, dtype)
                 else:
@@ -517,11 +571,11 @@ def _batch_norm_bwd_kernel(
                     for l_tile in T.Pipelined(L // block_l, num_stages=0):
                         for _i, j in T.Parallel(1, block_l):
                             go_val = T.cast(grad_out[bc, l_tile * block_l + j], accum_dtype)
-                            x_hat = (T.cast(x[bc, l_tile * block_l + j], accum_dtype) - mean_val) * rstd_val
+                            x_hat = (
+                                T.cast(x[bc, l_tile * block_l + j], accum_dtype) - mean_val
+                            ) * rstd_val
                             gx = w_rstd_over_L * (
-                                T.cast(L, accum_dtype) * go_val
-                                - sum_do[0]
-                                - x_hat * sum_do_xhat[0]
+                                T.cast(L, accum_dtype) * go_val - sum_do[0] - x_hat * sum_do_xhat[0]
                             )
                             grad_x[bc, l_tile * block_l + j] = T.cast(gx, dtype)
 
@@ -540,6 +594,7 @@ class BatchNormBwdKernel(Kernel):
         config: Optional tile config dict.
         tune: If True, autotune tile config.
     """
+
     supported_archs: list[int] = [80, 89, 90]
 
     def __init__(
@@ -603,17 +658,23 @@ class BatchNormBwdKernel(Kernel):
         mean: torch.Tensor,
         rstd: torch.Tensor,
     ):
-        """Run backward pass.
+        """Run the backward pass on ``(N, C, *spatial)`` inputs.
+
+        Moving the inputs into the $[C \\times L]$ layout, and ``grad_x`` back, happens here.
 
         Returns:
-            grad_x: Gradient w.r.t. input.
+            grad_x: Gradient w.r.t. the input, shaped like *x*.
             grad_weight: Gradient w.r.t. affine scale (gamma).
             grad_bias: Gradient w.r.t. affine shift (beta).
+
+        Raises:
+            ValueError: An input is not on a CUDA device.
         """
+        self._require_cuda(grad_out=grad_out, x=x, weight=weight, mean=mean, rstd=rstd)
         grad_weight = torch.empty(self.C, device=grad_out.device, dtype=torch.float32)
         grad_bias = torch.empty(self.C, device=grad_out.device, dtype=torch.float32)
         grad_x = self.kernel(
             self.config["block_l"],
             self.config["threads"],
-        )(grad_out, x, weight, mean, rstd, grad_weight, grad_bias)
-        return grad_x, grad_weight, grad_bias
+        )(_to_cl(grad_out), _to_cl(x), weight, mean, rstd, grad_weight, grad_bias)
+        return _from_cl(grad_x, x.shape), grad_weight, grad_bias

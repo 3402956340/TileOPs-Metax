@@ -4,10 +4,13 @@ import pytest
 import torch
 from torch.nn import functional as F
 
-from benchmarks.benchmark_base import BenchmarkReport, ManifestBenchmark
-from benchmarks.ops.attention.manifest_params import (
+from benchmarks.benchmark_base import (
+    ManifestBenchmark,
+    then_dtype,
+    workload_params,
+)
+from benchmarks.ops.attention.workload_args import (
     gqa_sliding_window_args,
-    manifest_params,
 )
 from tileops.manifest import load_workloads
 from tileops.ops import GroupedQueryAttentionSlidingWindowFwdOp
@@ -97,9 +100,12 @@ def _flashinfer_sliding_window_fwd(test, q, k, v):
     return run_fn
 
 
-_GQA_SLIDING_WINDOW_FWD_BENCH_PARAMS = manifest_params(
+_GQA_SLIDING_WINDOW_FWD_BENCH_PARAMS = workload_params(
     load_workloads(_OP_NAME),
-    gqa_sliding_window_args,
+    then_dtype(
+        gqa_sliding_window_args,
+        tune=True,
+    ),
 )
 
 
@@ -141,25 +147,19 @@ def test_gqa_sliding_window_fwd_bench(
     op(*inputs)
     torch.cuda.synchronize()
 
-    result = bm.profile(op, *inputs)
-    BenchmarkReport.record(op, locals(), result, tag="tileops")
+    functors = {"tileops": op}
 
     # FA3 baseline
     fa3_fn = _fa3_baseline(is_causal, wl, wr)
     if fa3_fn is not None:
-        result_bl = bm.profile(fa3_fn, *inputs)
-        BenchmarkReport.record(op, locals(), result_bl, tag="fa3")
+        functors["fa3"] = fa3_fn
 
     # FlashInfer baseline
     fi_fn = _flashinfer_sliding_window_fwd(test, *inputs)
     if fi_fn is not None:
-        result_fi = bm.profile(fi_fn, *inputs)
-        BenchmarkReport.record(op, locals(), result_fi, tag="flashinfer")
+        functors["flashinfer"] = fi_fn
 
     if fa3_fn is None and fi_fn is None:
-        result_bl = bm.profile(_torch_sliding_window_fwd(test), *inputs)
-        BenchmarkReport.record(op, locals(), result_bl, tag="torch")
+        functors["torch"] = _torch_sliding_window_fwd(test)
 
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])
+    bm.compare(functors, *inputs, record_as=op, params=locals())

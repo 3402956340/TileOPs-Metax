@@ -3,6 +3,7 @@
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 
 from workloads.workload_base import WorkloadBase  # noqa: F401
 
@@ -35,11 +36,31 @@ class Conv1dWorkload(WorkloadBase):
     def gen_inputs(self) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         x = torch.randn(self.n, self.c_in, self.l_in, device="cuda", dtype=self.dtype).contiguous()
         weight = torch.randn(
-            self.c_out, self.c_in // self.groups, self.kernel_size,
-            device="cuda", dtype=self.dtype,
+            self.c_out,
+            self.c_in // self.groups,
+            self.kernel_size,
+            device="cuda",
+            dtype=self.dtype,
         ).contiguous()
         bias = torch.zeros(self.c_out, device="cuda", dtype=self.dtype).contiguous()
         return x, weight, bias
+
+    def ref_program(
+        self,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        out = F.conv1d(
+            x,
+            weight,
+            bias=bias,
+            stride=self.stride,
+            padding=self.padding,
+            dilation=self.dilation,
+            groups=self.groups,
+        )
+        return out.contiguous()
 
 
 class Conv2dWorkload(WorkloadBase):
@@ -70,13 +91,36 @@ class Conv2dWorkload(WorkloadBase):
         self.dtype = dtype
 
     def gen_inputs(self) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        x = torch.randn(self.n, self.c_in, self.h, self.w, device="cuda", dtype=self.dtype).contiguous()
+        x = torch.randn(
+            self.n, self.c_in, self.h, self.w, device="cuda", dtype=self.dtype
+        ).contiguous()
         weight = torch.randn(
-            self.c_out, self.c_in // self.groups, self.kernel_size[0], self.kernel_size[1],
-            device="cuda", dtype=self.dtype,
+            self.c_out,
+            self.c_in // self.groups,
+            self.kernel_size[0],
+            self.kernel_size[1],
+            device="cuda",
+            dtype=self.dtype,
         ).contiguous()
         bias = torch.zeros(self.c_out, device="cuda", dtype=self.dtype).contiguous()
         return x, weight, bias
+
+    def ref_program(
+        self,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        out = F.conv2d(
+            x,
+            weight,
+            bias=bias,
+            stride=self.stride,
+            padding=self.padding,
+            dilation=self.dilation,
+            groups=self.groups,
+        )
+        return out.contiguous()
 
 
 class Conv3dWorkload(WorkloadBase):
@@ -110,8 +154,13 @@ class Conv3dWorkload(WorkloadBase):
 
     def gen_inputs(self) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         x = torch.randn(
-            self.n, self.c_in, self.d, self.h, self.w,
-            device="cuda", dtype=self.dtype,
+            self.n,
+            self.c_in,
+            self.d,
+            self.h,
+            self.w,
+            device="cuda",
+            dtype=self.dtype,
         ).contiguous()
         weight = torch.randn(
             self.c_out,
@@ -119,7 +168,25 @@ class Conv3dWorkload(WorkloadBase):
             self.kernel_size[0],
             self.kernel_size[1],
             self.kernel_size[2],
-            device="cuda", dtype=self.dtype,
+            device="cuda",
+            dtype=self.dtype,
         ).contiguous()
         bias = torch.zeros(self.c_out, device="cuda", dtype=self.dtype).contiguous()
         return x, weight, bias
+
+    def ref_program(
+        self,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        out = F.conv3d(
+            x,
+            weight,
+            bias=bias,
+            stride=self.stride,
+            padding=self.padding,
+            dilation=self.dilation,
+            groups=self.groups,
+        )
+        return out.contiguous()

@@ -65,16 +65,20 @@ def _gemm_kernel_maca(
             b: T.Tensor((n, k) if trans_b else (k, n), dtype),  # type: ignore
             c: T.Tensor((m, n), dtype),  # type: ignore
         ) -> None:
-            with T.Kernel(
-                    T.ceildiv(n, block_n), T.ceildiv(m, block_m), threads=threads) as (bx, by):
+            with T.Kernel(T.ceildiv(n, block_n), T.ceildiv(m, block_m), threads=threads) as (
+                bx,
+                by,
+            ):
                 a_shared = T.alloc_shared(a_tile, dtype)
                 b_shared = T.alloc_shared(b_tile, dtype)
                 c_local = T.alloc_fragment((block_m, block_n), accum_dtype)
 
-                T.annotate_layout({
-                    a_shared: tilelang.layout.make_swizzled_layout(a_shared),
-                    b_shared: tilelang.layout.make_swizzled_layout(b_shared),
-                })
+                T.annotate_layout(
+                    {
+                        a_shared: tilelang.layout.make_swizzled_layout(a_shared),
+                        b_shared: tilelang.layout.make_swizzled_layout(b_shared),
+                    }
+                )
 
                 m_start = by * block_m
                 n_start = bx * block_n

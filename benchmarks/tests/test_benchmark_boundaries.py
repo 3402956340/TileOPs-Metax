@@ -1,8 +1,7 @@
 """Structural gates for the benchmark stage's boundary.
 
-Coverage is deliberately literal: these scan `benchmarks/ops` and
-`benchmarks/kernels` for a static `tests` import and for a definition named
-exactly `gen_inputs`. They do not prove input construction is absent — a
+Coverage is deliberately literal: these scan `benchmarks/ops` for a static
+`tests` import and for a definition named exactly `gen_inputs`. They do not prove input construction is absent — a
 module-level draw helper, or one injected into a workload as a callable, would
 pass. Both forms existed here and were removed rather than gated for, because
 naming every way to build a tensor is a losing game.
@@ -16,7 +15,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-BENCHMARK_DIRS = ("benchmarks/ops", "benchmarks/kernels")
+BENCHMARK_DIRS = ("benchmarks/ops",)
 
 
 def _benchmark_files() -> list[Path]:
@@ -47,8 +46,7 @@ def _imports_tests(tree: ast.AST) -> list[str]:
             hits.append(f"from {node.module} (line {node.lineno})")
         elif isinstance(node, ast.Import):
             hits += [
-                f"import {a.name} (line {node.lineno})"
-                for a in node.names if is_tests(a.name)
+                f"import {a.name} (line {node.lineno})" for a in node.names if is_tests(a.name)
             ]
     return hits
 

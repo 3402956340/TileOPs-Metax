@@ -12,19 +12,7 @@ from workloads.normalization import AdaLayerNormWorkload
 
 
 class AdaLayerNormTest(AdaLayerNormWorkload, TestBase):
-    def ref_program(
-        self, x: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor
-    ) -> torch.Tensor:
-        # AdaLN: y = scale * LayerNorm(x) + shift
-        normed = F.layer_norm(
-            x.float(),
-            (self.n,),
-            weight=None,
-            bias=None,
-            eps=self.eps,
-        )
-        y = scale.float() * normed + shift.float()
-        return y.to(x.dtype)
+    pass
 
 
 class AdaLayerNormFixture(FixtureBase):
@@ -78,7 +66,7 @@ def test_ada_layer_norm_kernel_handles_natural_unaligned_shape(
     m, n = 16, 1152
     test = AdaLayerNormTest(m, n, dtype)
     inputs = test.gen_inputs()
-    kernel = AdaLayerNormKernel(m, n, test.eps, dtype, has_gate=False)
+    kernel = AdaLayerNormKernel(n, test.eps, dtype, has_gate=False)
     actual = kernel(*inputs)
     expected = test.ref_program(*inputs)
     assert actual.shape == (m, n)
@@ -94,7 +82,6 @@ def test_ada_layer_norm_async_copy_handles_row_tail() -> None:
     test = AdaLayerNormTest(m, n, dtype)
     inputs = test.gen_inputs()
     kernel = AdaLayerNormKernel(
-        m,
         n,
         test.eps,
         dtype,
@@ -154,7 +141,7 @@ def test_ada_layer_norm_async_policy_edge_correctness(
     m = 4
     test = AdaLayerNormTest(m, n, dtype)
     inputs = test.gen_inputs()
-    kernel = AdaLayerNormKernel(m, n, test.eps, dtype, has_gate=False)
+    kernel = AdaLayerNormKernel(n, test.eps, dtype, has_gate=False)
     if n == 514:
         assert kernel.use_cp_async
     actual = kernel(*inputs)
@@ -201,7 +188,3 @@ def test_ada_layer_norm_3d(batch: int, seq: int, hidden: int, dtype: torch.dtype
     assert torch.allclose(y, y_ref, atol=atol, rtol=rtol), (
         f"3D test failed, max err: {(y - y_ref).abs().max()}"
     )
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])

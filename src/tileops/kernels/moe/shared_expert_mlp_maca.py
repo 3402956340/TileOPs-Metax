@@ -52,16 +52,20 @@ def _dense_gemm_nt_kernel_maca(m: int, n: int, k: int, dtype: str) -> Callable:
             b: T.Tensor((n, k), dtype),  # type: ignore
             c: T.Tensor((m, n), dtype),  # type: ignore
         ) -> None:
-            with T.Kernel(
-                    T.ceildiv(n, block_n), T.ceildiv(m, block_m), threads=threads) as (bx, by):
+            with T.Kernel(T.ceildiv(n, block_n), T.ceildiv(m, block_m), threads=threads) as (
+                bx,
+                by,
+            ):
                 a_shared = T.alloc_shared((block_m, block_k), dtype)
                 b_shared = T.alloc_shared((block_n, block_k), dtype)
                 c_local = T.alloc_fragment((block_m, block_n), accum_dtype)
 
-                T.annotate_layout({
-                    a_shared: tilelang.layout.make_swizzled_layout(a_shared),
-                    b_shared: tilelang.layout.make_swizzled_layout(b_shared),
-                })
+                T.annotate_layout(
+                    {
+                        a_shared: tilelang.layout.make_swizzled_layout(a_shared),
+                        b_shared: tilelang.layout.make_swizzled_layout(b_shared),
+                    }
+                )
 
                 m_start = by * block_m
                 n_start = bx * block_n
@@ -155,16 +159,23 @@ class SharedExpertMLPMACAKernel(Kernel):
 
         # [T, H] @ [2F, H]^T -> [T, 2F]
         gate_up_out = self._gemm_gate_up(
-            cfg["block_m"], cfg["block_n"], cfg["block_k"],
-            cfg["num_stages"], cfg["threads"],
+            cfg["block_m"],
+            cfg["block_n"],
+            cfg["block_k"],
+            cfg["num_stages"],
+            cfg["threads"],
         )(hidden, w_gate_up)
 
         silu_mul_fn = _silu_mul_fused_kernel(T_dim, F, self.dtype_str)(
-            cfg["block_m"], cfg["block_n"], cfg["threads"])
+            cfg["block_m"], cfg["block_n"], cfg["threads"]
+        )
         gate_up = silu_mul_fn(gate_up_out)
 
         # [T, F] @ [H, F]^T -> [T, H]
         return self._gemm_down(
-            cfg["block_m"], cfg["block_n"], cfg["block_k"],
-            cfg["num_stages"], cfg["threads"],
+            cfg["block_m"],
+            cfg["block_n"],
+            cfg["block_k"],
+            cfg["num_stages"],
+            cfg["threads"],
         )(gate_up, w_down)

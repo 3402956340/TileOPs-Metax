@@ -110,7 +110,9 @@ def test_dim_none_keepdim_false_returns_0d(op_cls: type, torch_fn: Callable) -> 
 
 @pytest.mark.smoke
 @pytest.mark.parametrize(
-    "op_cls, torch_fn", _OP_CASES, ids=[c[0].__name__ for c in _OP_CASES],
+    "op_cls, torch_fn",
+    _OP_CASES,
+    ids=[c[0].__name__ for c in _OP_CASES],
 )
 @pytest.mark.parametrize(
     "dim",
@@ -121,7 +123,9 @@ def test_dim_none_keepdim_false_returns_0d(op_cls: type, torch_fn: Callable) -> 
     ],
 )
 def test_arithmetic_reduce_unaligned_innermost(
-    op_cls: type, torch_fn: Callable, dim,
+    op_cls: type,
+    torch_fn: Callable,
+    dim,
 ) -> None:
     """Unaligned innermost dim must still match PyTorch.
 
@@ -140,7 +144,3 @@ def test_arithmetic_reduce_unaligned_innermost(
         f"{op_cls.__name__} dim={dim} unaligned: shape {y.shape} vs ref {ref.shape}"
     )
     torch.testing.assert_close(y, ref, **_tol(dtype))
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])

@@ -1,7 +1,6 @@
 """Elementwise op package.
 
-Re-exports every public symbol previously provided by the monolithic
-``src/tileops/ops/elementwise.py`` module so that
+Re-exports every public symbol of the package module so that
 ``from tileops.ops.elementwise import <Symbol>`` continues to work.
 
 Concrete ops are organised one cluster per leaf module
@@ -21,18 +20,9 @@ from ._base import (
     FusedGatedOp,
     UnaryOp,
     _register_binary_custom_op,
-    _register_clamp_max_custom_op,
-    _register_clamp_min_custom_op,
-    _register_clamp_tensor_custom_op,
     _register_fused_gated_custom_op,
-    _register_lerp_tensor_custom_op,
-    _register_masked_fill_custom_op,
-    _register_masked_fill_tensor_value_custom_op,
-    _register_prelu_custom_op,
     _register_unary_custom_op,
     _register_unary_inplace_custom_op,
-    _register_where_custom_op,
-    broadcast_out_shape,
 )
 from .activations import (
     EluFwdOp,
@@ -72,7 +62,7 @@ from .bitwise import (
     BitwiseOrFwdOp,
     BitwiseXorFwdOp,
 )
-from .clamp import ClampFwdOp, ClampMaxFwdOp, ClampMinFwdOp, ClampScalarFwdOp
+from .clamp import ClampFwdOp, ClampScalarFwdOp
 from .comparison import (
     EqFwdOp,
     GeFwdOp,
@@ -121,8 +111,6 @@ __all__ = [
     "BitwiseXorFwdOp",
     "CeilFwdOp",
     "ClampFwdOp",
-    "ClampMaxFwdOp",
-    "ClampMinFwdOp",
     "ClampScalarFwdOp",
     "CosFwdOp",
     "DivFwdOp",
@@ -185,7 +173,6 @@ __all__ = [
     "TruncFwdOp",
     "UnaryOp",
     "WhereFwdOp",
-    "broadcast_out_shape",
 ]
 
 
@@ -195,45 +182,86 @@ __all__ = [
 # have zero tensor inputs (output is fully derived from ``__init__``
 # params), so they bypass the custom-op wrapper and run eager-only.
 
-# --- Unary ops: float-preserving output (1 + 17 + 8 + 1 = 27 ops) ---
+# --- Unary ops whose output dtype follows the input ---
 for _cls in [
     ReluFwdOp,
-    # math (17)
-    ExpFwdOp, LogFwdOp, SqrtFwdOp, RsqrtFwdOp, AbsFwdOp, NegFwdOp, ReciprocalFwdOp, SignFwdOp,
-    SinFwdOp, CosFwdOp, FloorFwdOp, CeilFwdOp, RoundFwdOp, TruncFwdOp, ErfFwdOp, Log1pFwdOp, Expm1FwdOp,
-    # activations (8)
-    GeluFwdOp, SiluFwdOp, SigmoidFwdOp, TanhFwdOp, HardswishFwdOp, HardsigmoidFwdOp, MishFwdOp, SeluFwdOp,
-    # bitwise (1) -- output same dtype as input
+    # math
+    ExpFwdOp,
+    LogFwdOp,
+    SqrtFwdOp,
+    RsqrtFwdOp,
+    AbsFwdOp,
+    NegFwdOp,
+    ReciprocalFwdOp,
+    SignFwdOp,
+    SinFwdOp,
+    CosFwdOp,
+    FloorFwdOp,
+    CeilFwdOp,
+    RoundFwdOp,
+    TruncFwdOp,
+    ErfFwdOp,
+    Log1pFwdOp,
+    Expm1FwdOp,
+    # activations
+    GeluFwdOp,
+    SiluFwdOp,
+    SigmoidFwdOp,
+    TanhFwdOp,
+    HardswishFwdOp,
+    HardsigmoidFwdOp,
+    MishFwdOp,
+    SeluFwdOp,
+    # bitwise — output dtype follows the input
     BitwiseNotFwdOp,
 ]:
     _register_unary_custom_op(_cls)
 
-# --- Unary ops: bool output (4 ops) ---
+# --- Unary ops whose output is bool ---
 for _cls in [LogicalNotFwdOp, IsnanFwdOp, IsinfFwdOp, IsfiniteFwdOp]:
     _register_unary_custom_op(_cls)
 
-# --- Binary ops (arithmetic 10 + bitwise 3 + comparison 6 + logical 2 = 21) ---
+# --- Binary ops: arithmetic, bitwise, comparison, logical ---
 # Output dtype comes from each op's manifest entry, so comparison and logical
 # ops need no separate registration group.
 for _cls in [
-    AddFwdOp, SubFwdOp, MulFwdOp, DivFwdOp, RemainderFwdOp, PowFwdOp, FloorDivideFwdOp,
-    LerpFwdOp, MaximumFwdOp, MinimumFwdOp,
-    BitwiseAndFwdOp, BitwiseOrFwdOp, BitwiseXorFwdOp,
-    EqFwdOp, NeFwdOp, GtFwdOp, LtFwdOp, GeFwdOp, LeFwdOp,
-    LogicalAndFwdOp, LogicalOrFwdOp,
+    AddFwdOp,
+    SubFwdOp,
+    MulFwdOp,
+    DivFwdOp,
+    RemainderFwdOp,
+    PowFwdOp,
+    FloorDivideFwdOp,
+    LerpFwdOp,
+    MaximumFwdOp,
+    MinimumFwdOp,
+    BitwiseAndFwdOp,
+    BitwiseOrFwdOp,
+    BitwiseXorFwdOp,
+    EqFwdOp,
+    NeFwdOp,
+    GtFwdOp,
+    LtFwdOp,
+    GeFwdOp,
+    LeFwdOp,
+    LogicalAndFwdOp,
+    LogicalOrFwdOp,
 ]:
     _register_binary_custom_op(_cls)
 
-# --- Fused gated ops (3 ops) ---
+# --- Fused gated ops ---
 for _cls in [SiluAndMulFwdOp, GeluAndMulFwdOp, GeluTanhAndMulFwdOp]:
     _register_fused_gated_custom_op(_cls)
 
-# --- Independent unary-like ops (6 ops: x -> y with baked params) ---
-# ClampScalarFwdOp is the scalar-bound clamp (single-tensor input + min/max
-# baked into __init__). The Tensor-bound ClampFwdOp / ClampMinFwdOp /
-# ClampMaxFwdOp variants register their own multi-input custom_ops below.
+# --- Unary-like ops with values baked in at construction ---
+# ``ClampScalarFwdOp`` is the scalar-bound clamp; the Tensor-bound
+# ``ClampFwdOp`` registers its own operator in clamp.py.
 for _cls in [
-    LeakyReluFwdOp, EluFwdOp, HardtanhFwdOp, SoftplusFwdOp, ClampScalarFwdOp,
+    LeakyReluFwdOp,
+    EluFwdOp,
+    HardtanhFwdOp,
+    SoftplusFwdOp,
+    ClampScalarFwdOp,
     NanToNumFwdOp,
 ]:
     _register_unary_custom_op(_cls)
@@ -244,44 +272,17 @@ for _cls in [
 # so ``forward(input)`` with ``self.inplace=True`` traces correctly
 # under ``torch.compile``.
 for _cls in [
-    ReluFwdOp, SiluFwdOp, HardswishFwdOp, HardsigmoidFwdOp, MishFwdOp,
-    SeluFwdOp, LeakyReluFwdOp, EluFwdOp, HardtanhFwdOp,
+    ReluFwdOp,
+    SiluFwdOp,
+    HardswishFwdOp,
+    HardsigmoidFwdOp,
+    MishFwdOp,
+    SeluFwdOp,
+    LeakyReluFwdOp,
+    EluFwdOp,
+    HardtanhFwdOp,
 ]:
     _register_unary_inplace_custom_op(_cls)
-
-# --- PReLU op (1 op: x, weight -> y) ---
-_register_prelu_custom_op(PreluFwdOp)
-
-# --- Tensor-bound clamp variants (3 ops: multi-tensor inputs -> out) ---
-# Registered under distinct custom_op namespaces from ClampScalarFwdOp:
-# ``top::elementwise_clamp_tensor`` (Optional Tensor min/max),
-# ``top::elementwise_clamp_min`` and ``top::elementwise_clamp_max`` for the
-# single-bound variants. register_fake is broadcast-aware so
-# torch.compile(fullgraph=True) traces correctly for both same-shape and
-# broadcasting inputs.
-_register_clamp_tensor_custom_op(ClampFwdOp)
-_register_clamp_min_custom_op(ClampMinFwdOp)
-_register_clamp_max_custom_op(ClampMaxFwdOp)
-
-# --- MaskedFill variants (input, mask[, value] -> out) ---
-# Both register broadcast-aware fake functions so torch.compile(fullgraph=True)
-# works for same-shape and broadcasting inputs. The Tensor-value variant is
-# registered under a distinct ``_tensor_value`` namespace to avoid colliding
-# with the scalar variant's ``top::elementwise_masked_fill``.
-_register_masked_fill_custom_op(MaskedFillScalarFwdOp)
-_register_masked_fill_tensor_value_custom_op(MaskedFillFwdOp)
-
-# --- Where op (1 op: cond, x, y -> out) ---
-# The fake function is broadcast-aware so torch.compile(fullgraph=True)
-# traces correctly for both same-shape and broadcasting inputs.
-_register_where_custom_op(WhereFwdOp)
-
-# --- Tensor-weight lerp (1 op: input, end, weight -> out) ---
-# Registered under ``top::elementwise_lerp_tensor`` to avoid colliding with
-# the scalar ``LerpFwdOp``'s ``top::elementwise_binary_lerp`` namespace. The fake
-# function is broadcast-aware so torch.compile(fullgraph=True) traces
-# correctly for both same-shape and broadcasting inputs.
-_register_lerp_tensor_custom_op(LerpTensorFwdOp)
 
 # Clean up loop variable
 del _cls

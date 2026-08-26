@@ -7,19 +7,22 @@ forward+backward case keeps a local roofline because it aggregates four
 GEMM launches, which no single manifest workload describes.
 """
 
-from typing import Optional
-
 import pytest
 import torch
 
+from benchmarks.baselines import (
+    TORCH_COMPILE_TAG,
+    assert_matches_reference,
+    compiled_reference,
+    reference_tolerance,
+)
 from benchmarks.benchmark_base import (
-    BenchmarkBase,
-    BenchmarkReport,
     ManifestBenchmark,
-    workload_field_params,
+    fields,
+    workload_params,
 )
 from tileops.manifest import load_workloads
-from tileops.ops import GroupedGemmOp
+from tileops.ops import GroupedGemmFwdOp
 from workloads.grouped_gemm import (
     GroupedGemmWorkload,
 )
@@ -29,99 +32,78 @@ from workloads.grouped_gemm import (
 _TUNE = True
 
 
-class GroupedGemmTestBaseline(GroupedGemmWorkload):
-    """Adds baseline ref_program for benchmark profiling."""
-
-    def ref_program(self, A: torch.Tensor, B: torch.Tensor, batch_sizes: torch.Tensor,
-                    batch_offsets: torch.Tensor,
-                    batch_padded_offsets: torch.Tensor) -> torch.Tensor:
-        if not self.transpose_a:
-            # NT / NN: output is (batch_sum, N)
-            if self.transpose_b:
-                # NT: A @ B^T
-                assert A.shape[0] == sum(batch_sizes)
-                assert B.shape[0] == len(batch_sizes)
-                output = torch.empty((sum(batch_sizes), B.shape[1]), device=A.device, dtype=A.dtype)
-                start = 0
-                for i, size in enumerate(batch_sizes):
-                    size = int(size.item())
-                    end = start + size
-                    output[start:end] = torch.mm(A[start:end], B[i].transpose(0, 1).contiguous())
-                    start = end
-            else:
-                # NN: A @ B
-                assert A.shape[0] == sum(batch_sizes)
-                assert B.shape[0] == len(batch_sizes)
-                output = torch.empty((sum(batch_sizes), B.shape[2]), device=A.device, dtype=A.dtype)
-                start = 0
-                for i, size in enumerate(batch_sizes):
-                    size = int(size.item())
-                    end = start + size
-                    output[start:end] = torch.mm(A[start:end], B[i])
-                    start = end
-        else:
-            # TN / TT: output is (batch_count, N, K)
-            total_batch = int(batch_sizes.sum().item())
-            assert A.shape[0] == total_batch
-            N = A.shape[1]
-            batch_count = len(batch_sizes)
-
-            if self.transpose_b:
-                # TT: A^T @ B^T
-                K = B.shape[0]
-                assert B.shape[1] == total_batch
-                output = torch.zeros((batch_count, N, K), device=A.device, dtype=A.dtype)
-                start = 0
-                for i, size in enumerate(batch_sizes):
-                    size = int(size.item())
-                    end = start + size
-                    output[i] = torch.mm(A[start:end].transpose(0, 1),
-                                         B[:, start:end].transpose(0, 1))
-                    start = end
-            else:
-                # TN: A^T @ B
-                K = B.shape[1]
-                assert B.shape[0] == total_batch
-                output = torch.zeros((batch_count, N, K), device=A.device, dtype=A.dtype)
-                start = 0
-                for i, size in enumerate(batch_sizes):
-                    size = int(size.item())
-                    end = start + size
-                    output[i] = torch.mm(A[start:end].transpose(0, 1), B[start:end])
-                    start = end
-        return output
-
-
 # Test functions
 
-_GROUPED_GEMM_OP = "GroupedGemmOp"
-_GROUPED_GEMM_PARAMS = workload_field_params(
+_GROUPED_GEMM_OP = "GroupedGemmFwdOp"
+_GROUPED_GEMM_PARAMS = workload_params(
     load_workloads(_GROUPED_GEMM_OP),
-    ("batch_sum", "batch_count", "n", "k", "dtype", "transpose_a", "transpose_b"),
+    fields("batch_sum", "batch_count", "n", "k", "dtype", "transpose_a", "transpose_b"),
+    smoke_first=True,
 )
+
+
+def _torch_grouped_mm(test: GroupedGemmWorkload, inputs: tuple):
+    """``torch._grouped_mm`` over the same groups, or None where it cannot take them.
+
+    Reads B as ``[groups, K, N]`` and takes cumulative group ends, both built here
+    rather than inside the timed callable.
+    """
+    if not hasattr(torch, "_grouped_mm"):
+        return None
+    if test.transpose_a and test.transpose_b:
+        return None
+
+    sizes = torch.tensor(test.batch_sizes_list, device=inputs[0].device, dtype=torch.int32)
+    offsets = torch.cumsum(sizes, dim=0).to(torch.int32)
+
+    if test.transpose_a:
+
+        def fn(a, b, *_):
+            return torch._grouped_mm(a.t(), b, offs=offsets)
+    elif test.transpose_b:
+        b_kn = inputs[1].transpose(1, 2).contiguous()
+
+        def fn(a, _b, *_):
+            return torch._grouped_mm(a, b_kn, offs=offsets)
+    else:
+
+        def fn(a, b, *_):
+            return torch._grouped_mm(a, b, offs=offsets)
+
+    return fn
 
 
 @pytest.mark.parametrize(
     "batch_sum, batch_count, N, K, dtype, transpose_a, transpose_b",
     _GROUPED_GEMM_PARAMS,
 )
-def test_grouped_gemm_bench(batch_sum: int, batch_count: int, N: int, K: int,
-                            dtype: torch.dtype, transpose_a: bool,
-                            transpose_b: bool) -> None:
+def test_grouped_gemm_bench(
+    batch_sum: int,
+    batch_count: int,
+    N: int,
+    K: int,
+    dtype: torch.dtype,
+    transpose_a: bool,
+    transpose_b: bool,
+) -> None:
     layout = ("T" if transpose_a else "N") + ("T" if transpose_b else "N")
     name = f"grouped_gemm_{layout.lower()}"
 
-    test = GroupedGemmTestBaseline(batch_sum, batch_count, N, K, dtype, transpose_a, transpose_b)
+    test = GroupedGemmWorkload(batch_sum, batch_count, N, K, dtype, transpose_a, transpose_b)
     inputs = test.gen_inputs()
 
-    op = GroupedGemmOp(transpose_a=transpose_a, transpose_b=transpose_b, tune=_TUNE)
+    op = GroupedGemmFwdOp(transpose_a=transpose_a, transpose_b=transpose_b, tune=_TUNE)
     bm = ManifestBenchmark(_GROUPED_GEMM_OP, op, test)
-    result = bm.profile(op, *inputs)
-    BenchmarkReport.record(name, locals(), result, tag="tileops")
 
-    result_bl = bm.profile(test.ref_program, *inputs)
-    BenchmarkReport.record(name, locals(), result_bl, tag="torch-ref")
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])
+    functors = {
+        "tileops": op,
+        "torch-ref": test.ref_program,
+        TORCH_COMPILE_TAG: compiled_reference(test.ref_program),
+    }
+    grouped_mm_fn = _torch_grouped_mm(test, inputs)
+    if grouped_mm_fn is not None:
+        assert_matches_reference(
+            grouped_mm_fn, test.ref_program, *inputs, **reference_tolerance(dtype)
+        )
+        functors["torch"] = grouped_mm_fn
+    bm.compare(functors, *inputs, record_as=name, params=locals())

@@ -1,5 +1,6 @@
 from .utils import (
     forget_device_properties,
+    get_sm_count,
     get_sm_version,
     is_h200,
     is_hopper,
@@ -9,6 +10,7 @@ from .utils import (
 
 __all__ = [
     "forget_device_properties",
+    "get_sm_count",
     "get_sm_version",
     "is_h200",
     "is_hopper",

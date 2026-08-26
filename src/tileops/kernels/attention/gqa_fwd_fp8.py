@@ -6,12 +6,11 @@ import tilelang
 import tilelang.language as T
 import torch
 
-from tileops.kernels.online_softmax import (
+from .call_spec import ATTENTION_DTYPES, uses_sliding_window
+from .online_softmax import (
     make_log2e_scale,
     make_online_softmax_with_score_scale,
 )
-
-from .call_spec import ATTENTION_DTYPES, uses_sliding_window
 from .packed_prefill import PackedPrefillKernel
 
 __all__ = ["GQAFwdFP8Fa3ContractPtxAccBN224WsTmaVKernel"]
@@ -21,7 +20,6 @@ TMA_INTERLEAVE_NONE = 0
 TMA_SWIZZLE_128B = 3
 TMA_L2_PROMOTION_128B = 2
 TMA_OOB_FILL_NONE = 0
-_ANCHOR_HELPER_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "_anchor_helper.h"))
 _FP8_GQA_HELPER_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "_fp8_gqa_helper.h"))
 
 
@@ -61,8 +59,6 @@ def _gqa_fwd_fp8_bn224_tma_v_kernel(
         compile_flags=[
             "-O3",
             "-DENABLE_BF16",
-            "-include",
-            _ANCHOR_HELPER_PATH,
             "-include",
             _FP8_GQA_HELPER_PATH,
         ],
@@ -124,7 +120,8 @@ def _gqa_fwd_fp8_bn224_tma_v_kernel(
                 k_full = T.alloc_barrier(arrive_count=128)
                 k_empty = T.alloc_barrier(arrive_count=256)
                 v_raw_full = T.alloc_barrier(arrive_count=128)
-                v_full = T.alloc_barrier(arrive_count=128)
+                v_full_0 = T.alloc_barrier(arrive_count=128)
+                v_full_1 = T.alloc_barrier(arrive_count=128)
                 v_empty_0 = T.alloc_barrier(arrive_count=256)
                 v_empty_1 = T.alloc_barrier(arrive_count=256)
                 q_full_1 = T.alloc_barrier(arrive_count=128)
@@ -256,7 +253,10 @@ def _gqa_fwd_fp8_bn224_tma_v_kernel(
                                         v_vt_smem_1.access_ptr("rw"),
                                         v_vt_smem_1.access_ptr("rw"),
                                     )
-                                T.barrier_arrive(v_full)
+                                if gi_vp % 2 == 0:
+                                    T.barrier_arrive(v_full_0)
+                                else:
+                                    T.barrier_arrive(v_full_1)
                                 gi_vp = gi_vp + 1
                             T.barrier_wait(k_empty, (gi_kp + 1) % 2)
                             if gi_kp % 2 == 0:
@@ -372,7 +372,10 @@ def _gqa_fwd_fp8_bn224_tma_v_kernel(
                                 v_vt_smem_1.access_ptr("rw"),
                                 v_vt_smem_1.access_ptr("rw"),
                             )
-                        T.barrier_arrive(v_full)
+                        if gi_vp % 2 == 0:
+                            T.barrier_arrive(v_full_0)
+                        else:
+                            T.barrier_arrive(v_full_1)
                         gi_vp = gi_vp + 1
                 elif tx < 256:
                     T.inc_max_nreg(240)
@@ -432,7 +435,10 @@ def _gqa_fwd_fp8_bn224_tma_v_kernel(
                                 * k_scale[tile_b, head_kv, n_idx],
                             )
                             T.copy(ss_1, ss_shared_1)
-                            T.barrier_wait(v_full, gi_vc1 % 2)
+                            if gi_vc1 % 2 == 0:
+                                T.barrier_wait(v_full_0, (gi_vc1 // 2) % 2)
+                            else:
+                                T.barrier_wait(v_full_1, (gi_vc1 // 2) % 2)
                             if gi_vc1 % 2 == 0:
                                 T.call_extern(
                                     "handle",
@@ -541,7 +547,10 @@ def _gqa_fwd_fp8_bn224_tma_v_kernel(
                                 * k_scale[tile_b, head_kv, n_idx],
                             )
                             T.copy(ss_2, ss_shared_2)
-                            T.barrier_wait(v_full, gi_vc2 % 2)
+                            if gi_vc2 % 2 == 0:
+                                T.barrier_wait(v_full_0, (gi_vc2 // 2) % 2)
+                            else:
+                                T.barrier_wait(v_full_1, (gi_vc2 // 2) % 2)
                             if gi_vc2 % 2 == 0:
                                 T.call_extern(
                                     "handle",
@@ -598,7 +607,7 @@ def _gqa_fwd_fp8_bn224_tma_v_kernel(
     return func
 
 
-@torch.library.custom_op("top::gqa_fwd_fp8_bn224_tma_v_wrapped_kernel", mutates_args=())
+@torch.library.custom_op("tileops::gqa_fwd_fp8_bn224_tma_v_wrapped_kernel", mutates_args=())
 def _gqa_fwd_fp8_bn224_tma_v_wrapped_kernel(
     batch: int,
     heads: int,
@@ -790,13 +799,11 @@ class GQAFwdFP8Fa3ContractPtxAccBN224WsTmaVKernel(PackedPrefillKernel):
                 "GQAFwdFP8Fa3ContractPtxAccBN224WsTmaVKernel expects q/k/v to be torch.float8_e4m3fn."
             )
         if q_scale is None or k_scale is None or v_scale is None:
-            raise ValueError(
-                "GQAFwdFP8Fa3ContractPtxAccBN224WsTmaVKernel requires q/k/v descales."
-            )
+            raise ValueError("GQAFwdFP8Fa3ContractPtxAccBN224WsTmaVKernel requires q/k/v descales.")
         q_bshd, k_bshd, v_bshd = self._bshd(q, k, v)
         q_expanded, k_expanded, v_expanded = _expand_fa3_gqa_descales(
-            q_scale, k_scale, v_scale, self.batch, self.heads, self.heads_kv,
-            self.max_seqlen_q)
+            q_scale, k_scale, v_scale, self.batch, self.heads, self.heads_kv, self.max_seqlen_q
+        )
         output, _ = _gqa_fwd_fp8_bn224_tma_v_wrapped_kernel(
             self.batch,
             self.heads,

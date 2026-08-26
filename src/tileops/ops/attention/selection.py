@@ -5,7 +5,6 @@ contradict the user-visible ``backend`` parameter. Choosing among the keys is
 ``Op.select_kernel_key``; see docs/design/ops-design.md § Kernel selection.
 """
 
-
 from tileops.kernels.attention.call_spec import AttentionCall, fp8_dtype, uses_sliding_window
 
 __all__ = [
@@ -48,6 +47,9 @@ DECODE_KEYS = ("gqa_decode_bs1_kernel", "gqa_decode_kernel")
 #: Implementations of paged GQA decode.
 PAGED_DECODE_KEYS = ("gqa_decode_paged_bs1_kernel", "gqa_decode_paged_kernel")
 
+#: Implementations of paged MHA decode.
+MHA_PAGED_DECODE_KEYS = ("mha_decode_paged_ws_kernel", "mha_decode_paged_kernel")
+
 
 def check_packed_prefill_request(call: AttentionCall) -> None:
     """Reject a packed prefill request its ``backend`` knob cannot describe.
@@ -76,10 +78,10 @@ def check_packed_prefill_request(call: AttentionCall) -> None:
     if uses_sliding_window(call):
         if call.backend not in ("auto", "sliding_window"):
             raise ValueError(
-                "sliding-window prefill requires backend='auto' or backend='sliding_window'.")
+                "sliding-window prefill requires backend='auto' or backend='sliding_window'."
+            )
         return
     if call.backend == "sliding_window":
-        raise ValueError(
-            "backend='sliding_window' requires window_size_left or window_size_right.")
+        raise ValueError("backend='sliding_window' requires window_size_left or window_size_right.")
     if call.backend == "dense" and not call.is_uniform:
         raise ValueError("backend='dense' requires uniform packed cu_seqlens.")

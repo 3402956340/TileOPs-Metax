@@ -3,10 +3,10 @@ import functools
 import torch
 
 str2dtype = {
-    'float16': torch.float16,
-    'bfloat16': torch.bfloat16,
-    'float32': torch.float32,
-    "int32": torch.int32
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "float32": torch.float32,
+    "int32": torch.int32,
 }
 
 
@@ -25,6 +25,11 @@ def _device_name(index: int) -> str:
 def _sm_version(index: int) -> int:
     major, minor = torch.cuda.get_device_capability(index)
     return major * 10 + minor
+
+
+@functools.lru_cache(maxsize=16)
+def _sm_count(index: int) -> int:
+    return torch.cuda.get_device_properties(index).multi_processor_count
 
 
 def is_h200(index: "int | None" = None) -> bool:
@@ -53,8 +58,17 @@ def is_maca() -> bool:
     return "metax" in ver or hasattr(version, "maca")
 
 
+def get_sm_count(index: "int | None" = None) -> int:
+    """Multiprocessors on the device; defaults to current.
+
+    Persistent kernels size their grid by this, so it is read once per kernel
+    construction rather than kept as a constant per kernel.
+    """
+    return _sm_count(torch.cuda.current_device() if index is None else index)
+
+
 def forget_device_properties() -> None:
-    """Drop the cached architecture and name of every device.
+    """Drop the cached architecture, multiprocessor count and name of every device.
 
     A device's properties do not change, so the cache is normally never
     invalidated. What does change is whether the query itself can be answered —
@@ -63,3 +77,4 @@ def forget_device_properties() -> None:
     """
     _device_name.cache_clear()
     _sm_version.cache_clear()
+    _sm_count.cache_clear()

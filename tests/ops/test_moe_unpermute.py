@@ -12,42 +12,16 @@ Interface note:
   Tests use padded_batch_sum = T*K (no actual padding) for simplicity.
 """
 
-
 import pytest
 import torch
 
 from tests.test_base import FixtureBase, TestBase
 from tileops.ops.moe import MoeUnpermuteFwdOp
-from workloads.moe import MoeUnpermuteWorkload
-
-
-def _ref_moe_unpermute(
-    mm2_pad: torch.Tensor,
-    fwd_idx: torch.Tensor,
-    topk_weights: torch.Tensor,
-) -> torch.Tensor:
-    """Pure-PyTorch reference for moe_unpermute."""
-    _, H = mm2_pad.shape
-    T, K = topk_weights.shape
-    dtype = mm2_pad.dtype
-
-    output = torch.zeros(T, H, dtype=torch.float32, device=mm2_pad.device)
-    for i in range(T):
-        for k in range(K):
-            flat_idx = i * K + k
-            padded_slot = fwd_idx[flat_idx].item()
-            w = topk_weights[i, k].item()
-            output[i] += mm2_pad[padded_slot].float() * w
-
-    return output.to(dtype)
+from workloads.moe import MoeUnpermuteWorkload, ref_moe_unpermute
 
 
 class MoeUnpermuteTest(MoeUnpermuteWorkload, TestBase):
-    def ref_program(self, mm2_pad, fwd_idx, topk_weights):
-        return _ref_moe_unpermute(mm2_pad, fwd_idx, topk_weights)
-
-
-# Reference implementation
+    pass
 
 
 # Fixture
@@ -55,23 +29,30 @@ class MoeUnpermuteTest(MoeUnpermuteWorkload, TestBase):
 
 class MoeUnpermuteFixture(FixtureBase):
     PARAMS = [
-        ("total_tokens, top_k, hidden_size, dtype", [
-            pytest.param(4,    2,   64,  torch.bfloat16, marks=pytest.mark.smoke, id="tiny-bf16"),
-            pytest.param(4,    2,   64,  torch.float16,  marks=pytest.mark.smoke, id="tiny-fp16"),
-            pytest.param(16,   2,   128, torch.bfloat16, marks=pytest.mark.full,  id="small"),
-            pytest.param(128,  4,   256, torch.bfloat16, marks=pytest.mark.full,  id="medium"),
-            pytest.param(1024, 8,   128, torch.bfloat16, marks=pytest.mark.full,  id="qwen3-scale"),
-            pytest.param(1,    2,   64,  torch.bfloat16, marks=pytest.mark.full,  id="single-token"),
-            pytest.param(8,    1,   64,  torch.bfloat16, marks=pytest.mark.full,  id="top-k-1"),
-            pytest.param(32,   4,   64,  torch.bfloat16, marks=pytest.mark.full,  id="skewed"),
-            # Large H (8x the next-biggest case) with top_k=8 so the K-loop is
-            # actually pipelined (T.Pipelined num_stages=2): asserts correctness
-            # at a production-scale hidden size, where the framework must
-            # double-buffer the reused `src` fragment to avoid a WAR race
-            # between load(k+1) and accumulate(k). Smaller cases (H<=256) leave
-            # that on the benchmark path only.
-            pytest.param(64,   8,   2048, torch.bfloat16, marks=pytest.mark.full, id="large-h-pipeline"),
-        ]),
+        (
+            "total_tokens, top_k, hidden_size, dtype",
+            [
+                pytest.param(4, 2, 64, torch.bfloat16, marks=pytest.mark.smoke, id="tiny-bf16"),
+                pytest.param(4, 2, 64, torch.float16, marks=pytest.mark.smoke, id="tiny-fp16"),
+                pytest.param(16, 2, 128, torch.bfloat16, marks=pytest.mark.full, id="small"),
+                pytest.param(128, 4, 256, torch.bfloat16, marks=pytest.mark.full, id="medium"),
+                pytest.param(
+                    1024, 8, 128, torch.bfloat16, marks=pytest.mark.full, id="qwen3-scale"
+                ),
+                pytest.param(1, 2, 64, torch.bfloat16, marks=pytest.mark.full, id="single-token"),
+                pytest.param(8, 1, 64, torch.bfloat16, marks=pytest.mark.full, id="top-k-1"),
+                pytest.param(32, 4, 64, torch.bfloat16, marks=pytest.mark.full, id="skewed"),
+                # Large H (8x the next-biggest case) with top_k=8 so the K-loop is
+                # actually pipelined (T.Pipelined num_stages=2): asserts correctness
+                # at a production-scale hidden size, where the framework must
+                # double-buffer the reused `src` fragment to avoid a WAR race
+                # between load(k+1) and accumulate(k). Smaller cases (H<=256) leave
+                # that on the benchmark path only.
+                pytest.param(
+                    64, 8, 2048, torch.bfloat16, marks=pytest.mark.full, id="large-h-pipeline"
+                ),
+            ],
+        ),
     ]
 
 
@@ -107,7 +88,7 @@ def test_moe_unpermute_skewed():
 
     op = MoeUnpermuteFwdOp(T, K, H, padded_batch_sum=numel)
     output = op(mm2_pad, fwd_idx, topk_weights)
-    output_ref = _ref_moe_unpermute(mm2_pad, fwd_idx, topk_weights)
+    output_ref = ref_moe_unpermute(mm2_pad, fwd_idx, topk_weights)
 
     assert torch.allclose(output.float(), output_ref.float(), atol=1e-2), (
         f"skewed mismatch: max_err={(output.float() - output_ref.float()).abs().max()}"
@@ -119,7 +100,7 @@ def test_moe_unpermute_ep_masking():
     """EP mode: fwd_idx == -1 (non-local expert) must contribute zero, even
     inside the pipelined K-loop (the slot-0 dummy read is zeroed by weight=0).
 
-    The shared `_ref_moe_unpermute` would index `mm2_pad[-1]` for a -1 slot, so
+    The shared `ref_moe_unpermute` would index `mm2_pad[-1]` for a -1 slot, so
     this test uses a reference that skips -1 — matching the kernel's masking.
     """
     torch.manual_seed(0)
@@ -157,15 +138,14 @@ def test_moe_unpermute_out_param():
     dev = "cuda"
     mm2_pad = torch.randn(numel, H, dtype=torch.bfloat16, device=dev) * 0.02
     fwd_idx = torch.arange(numel, dtype=torch.int32, device=dev)
-    topk_weights = torch.softmax(
-        torch.randn(T, K, dtype=torch.float32, device=dev), dim=-1)
+    topk_weights = torch.softmax(torch.randn(T, K, dtype=torch.float32, device=dev), dim=-1)
 
     op = MoeUnpermuteFwdOp(T, K, H, padded_batch_sum=numel)
     ref = op(mm2_pad, fwd_idx, topk_weights)
 
     out = torch.empty((T, H), dtype=torch.bfloat16, device=dev)
     got = op(mm2_pad, fwd_idx, topk_weights, out=out)
-    assert got.data_ptr() == out.data_ptr()       # wrote into the provided buffer
+    assert got.data_ptr() == out.data_ptr()  # wrote into the provided buffer
     torch.testing.assert_close(out.float(), ref.float(), rtol=1e-2, atol=1e-2)
 
 
@@ -178,15 +158,13 @@ def test_moe_unpermute_scaling():
     dev = "cuda"
     mm2_pad = torch.randn(numel, H, dtype=torch.bfloat16, device=dev) * 0.02
     fwd_idx = torch.arange(numel, dtype=torch.int32, device=dev)
-    topk_weights = torch.softmax(
-        torch.randn(T, K, dtype=torch.float32, device=dev), dim=-1)
+    topk_weights = torch.softmax(torch.randn(T, K, dtype=torch.float32, device=dev), dim=-1)
 
     scale = 2.827
     base = MoeUnpermuteFwdOp(T, K, H, padded_batch_sum=numel)
     ref = base(mm2_pad, fwd_idx, topk_weights).float() * scale
 
-    scaled = MoeUnpermuteFwdOp(
-        T, K, H, padded_batch_sum=numel, routed_scaling_factor=scale)
+    scaled = MoeUnpermuteFwdOp(T, K, H, padded_batch_sum=numel, routed_scaling_factor=scale)
     got = scaled(mm2_pad, fwd_idx, topk_weights).float()
     torch.testing.assert_close(got, ref, rtol=2e-2, atol=2e-2)
 
@@ -201,29 +179,28 @@ def test_moe_unpermute_out_buffer_validation():
     dev = "cuda"
     mm2_pad = torch.randn(numel, H, dtype=torch.bfloat16, device=dev) * 0.02
     fwd_idx = torch.arange(numel, dtype=torch.int32, device=dev)
-    topk_weights = torch.softmax(
-        torch.randn(T, K, dtype=torch.float32, device=dev), dim=-1)
+    topk_weights = torch.softmax(torch.randn(T, K, dtype=torch.float32, device=dev), dim=-1)
     op = MoeUnpermuteFwdOp(T, K, H, padded_batch_sum=numel)
 
     with pytest.raises(ValueError, match="contiguous"):
-        op(mm2_pad, fwd_idx, topk_weights,
-           out=torch.empty(H, T, dtype=torch.bfloat16, device=dev).t())
+        op(
+            mm2_pad,
+            fwd_idx,
+            topk_weights,
+            out=torch.empty(H, T, dtype=torch.bfloat16, device=dev).t(),
+        )
     # out overlapping mm2_pad: same storage, overlapping byte intervals.
     ws = torch.empty(numel * H, dtype=torch.bfloat16, device=dev)
-    mm2_alias = ws[:numel * H].view(numel, H)
-    out_alias = ws[:T * H].view(T, H)          # overlaps mm2_alias from byte 0
+    mm2_alias = ws[: numel * H].view(numel, H)
+    out_alias = ws[: T * H].view(T, H)  # overlaps mm2_alias from byte 0
     mm2_alias.copy_(mm2_pad)
     with pytest.raises(ValueError, match="overlap"):
         op(mm2_alias, fwd_idx, topk_weights, out=out_alias)
     # Disjoint slices of one workspace must be ACCEPTED.
     ref = op(mm2_pad, fwd_idx, topk_weights)
     ws2 = torch.empty(numel * H + T * H, dtype=torch.bfloat16, device=dev)
-    mm2_ws = ws2[:numel * H].view(numel, H)
-    out_ws = ws2[numel * H:].view(T, H)
+    mm2_ws = ws2[: numel * H].view(numel, H)
+    out_ws = ws2[numel * H :].view(T, H)
     mm2_ws.copy_(mm2_pad)
     got = op(mm2_ws, fwd_idx, topk_weights, out=out_ws)
     torch.testing.assert_close(got.float(), ref.float(), rtol=1e-2, atol=1e-2)
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])

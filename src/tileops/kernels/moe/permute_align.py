@@ -23,7 +23,6 @@ Reference: sglang/sgl-kernel/csrc/moe/moe_align_kernel.cu
 
 import functools
 import math
-import os
 from typing import Optional
 
 import tilelang
@@ -32,22 +31,16 @@ import torch
 
 from tileops.kernels.kernel_base import Kernel
 
-# Path to the CUDA helper header for the scatter kernel.
-# Provides tl_atomic_add_offset() — a workaround for TileLang's codegen
-# limitation that T.atomic_add(..., return_prev=True) does not support
-# dynamic (indirect) global-memory indices.
-_ATOMIC_HELPER_H = os.path.join(os.path.dirname(__file__), "_atomic_helper.h")
-
 __all__ = ["MoePermuteAlignKernel"]
 
 _THREADS = 1024
 _SCATTER_THREADS = 256
-_SMALL_NUMEL_THRESHOLD   = 1024
+_SMALL_NUMEL_THRESHOLD = 1024
 # Keep <= 32: the small-batch kernel allocates (worker_threads+1)*num_experts
 # int32s in shared memory.  At num_experts=64 this becomes 4160 entries and
 # causes TileLang JIT to hang during compilation.
 _SMALL_EXPERTS_THRESHOLD = 32
-_FILL_THREADS            = 256
+_FILL_THREADS = 256
 
 
 @functools.lru_cache(maxsize=32)
@@ -58,7 +51,6 @@ def _make_align_kernel(numel: int, num_experts: int, block_size: int):
 
     @tilelang.jit(out_idx=[], compile_flags=["-O3"])
     def _align(threads: int):
-
         @T.prim_func
         def _align_main(
             flat: T.Tensor([numel], "int32"),
@@ -72,15 +64,15 @@ def _make_align_kernel(numel: int, num_experts: int, block_size: int):
                 num_warps = threads // 32
 
                 # --- Shared memory ---
-                s_counts    = T.alloc_shared([num_experts], "int32")
-                s_vals      = T.alloc_shared([threads], "int32")
-                s_warp_sum  = T.alloc_shared([num_warps], "int32")
+                s_counts = T.alloc_shared([num_experts], "int32")
+                s_vals = T.alloc_shared([threads], "int32")
+                s_warp_sum = T.alloc_shared([num_warps], "int32")
                 s_warp_excl = T.alloc_shared([num_warps], "int32")
                 # s_total is a running accumulator used only by tx==0 to build
                 # s_warp_excl during the inter-warp scan; its final value (grand
                 # total) is derived independently at line 135 and not re-read.
-                s_total     = T.alloc_shared([1], "int32")
-                s_cumsum    = T.alloc_shared([num_experts + 1], "int32")
+                s_total = T.alloc_shared([1], "int32")
+                s_cumsum = T.alloc_shared([num_experts + 1], "int32")
 
                 # Step 1: zero s_counts
                 for i in T.serial(T.ceildiv(num_experts, threads)):
@@ -97,12 +89,13 @@ def _make_align_kernel(numel: int, num_experts: int, block_size: int):
                 T.sync_threads()
 
                 # Step 2: warp-scan prefix-sum on padded counts
-                lane    = tx % 32
+                lane = tx % 32
                 warp_id = tx // 32
 
                 s_vals[tx] = (
                     T.ceildiv(s_counts[tx], block_size) * block_size
-                    if tx < num_experts else T.int32(0)
+                    if tx < num_experts
+                    else T.int32(0)
                 )
                 T.sync_threads()
 
@@ -110,9 +103,7 @@ def _make_align_kernel(numel: int, num_experts: int, block_size: int):
                 # 5 rounds = log2(warp_size=32): each round doubles the scan distance
                 for d in T.serial(5):
                     stride = 1 << d
-                    up_val = T.tvm_warp_shuffle_up(
-                        T.uint32(0xFFFFFFFF), s_vals[tx], stride, 32, 32
-                    )
+                    up_val = T.tvm_warp_shuffle_up(T.uint32(0xFFFFFFFF), s_vals[tx], stride, 32, 32)
                     if lane >= stride:
                         s_vals[tx] = s_vals[tx] + up_val
                 T.sync_threads()
@@ -134,7 +125,8 @@ def _make_align_kernel(numel: int, num_experts: int, block_size: int):
                 # Convert inclusive scan -> exclusive cumsum entry
                 own_padded = (
                     T.ceildiv(s_counts[tx], block_size) * block_size
-                    if tx < num_experts else T.int32(0)
+                    if tx < num_experts
+                    else T.int32(0)
                 )
                 excl = s_vals[tx] - own_padded + s_warp_excl[warp_id]
 
@@ -153,8 +145,8 @@ def _make_align_kernel(numel: int, num_experts: int, block_size: int):
                 # Loop bound is max_num_blocks (worst case: all tokens to one
                 # expert), guarded by `blk < e_end` to skip non-owned blocks.
                 if tx < num_experts:
-                    e_start = s_cumsum[tx]     // block_size
-                    e_end   = s_cumsum[tx + 1] // block_size
+                    e_start = s_cumsum[tx] // block_size
+                    e_end = s_cumsum[tx + 1] // block_size
                     for b in T.serial(max_num_blocks):
                         blk = e_start + b
                         if blk < e_end:
@@ -184,9 +176,8 @@ def _make_scatter_kernel(numel: int, num_experts: int, block_size: int):
     scatter_blocks = min(math.ceil(numel / _SCATTER_THREADS), 65535)
     total_scatter_threads = scatter_blocks * _SCATTER_THREADS
 
-    @tilelang.jit(out_idx=[], compile_flags=["-O3", "-include", _ATOMIC_HELPER_H])
+    @tilelang.jit(out_idx=[], compile_flags=["-O3"])
     def _scatter():
-
         @T.prim_func
         def _scatter_main(
             flat: T.Tensor([numel], "int32"),
@@ -201,15 +192,9 @@ def _make_scatter_kernel(numel: int, num_experts: int, block_size: int):
                     idx = gid + i * total_scatter_threads
                     if idx < numel:
                         eid = flat[idx]
-                        # T.atomic_add(..., return_prev=True) does not support dynamic
-                        # global-memory indices (TileLang codegen limitation).
-                        # Use tl_atomic_add_offset() from _atomic_helper.h instead.
-                        # Store the side-effecting result before indexing with it so
-                        # TileLang's bounds-check lowering does not duplicate the call.
-                        slot_buf[0] = T.call_extern(
-                            "int32", "tl_atomic_add_offset",
-                            T.address_of(cumsum[0]), eid, T.int32(1)
-                        )
+                        # Store the returned slot before indexing with it, so
+                        # TileLang's bounds-check lowering cannot duplicate the atomic.
+                        slot_buf[0] = T.atomic_add(cumsum[eid], T.int32(1), return_prev=True)
                         slot = slot_buf[0]
                         sorted_token_ids[slot] = idx
 
@@ -231,10 +216,10 @@ def _make_small_batch_kernel(numel: int, num_experts: int, block_size: int):
 
     Reference: moe_align_block_size_small_batch_expert_kernel in sgl-kernel.
     """
-    max_padded     = numel + (num_experts + 1) * (block_size - 1)
+    max_padded = numel + (num_experts + 1) * (block_size - 1)
     max_num_blocks = math.ceil(max_padded / block_size)
     worker_threads = max(num_experts, 32)
-    total_threads  = _FILL_THREADS + worker_threads
+    total_threads = _FILL_THREADS + worker_threads
     # tokens_cnts layout: (worker_threads+1) rows × num_experts cols (0-indexed).
     # Row k (k>=1): worker k-1's private counts per expert (0-indexed).
     # Row 0: reduce accumulator, initialised to 0 by expert threads.
@@ -242,7 +227,6 @@ def _make_small_batch_kernel(numel: int, num_experts: int, block_size: int):
 
     @tilelang.jit(out_idx=[], compile_flags=["-O3"])
     def _small():
-
         @T.prim_func
         def _small_main(
             flat: T.Tensor([numel], "int32"),
@@ -253,7 +237,7 @@ def _make_small_batch_kernel(numel: int, num_experts: int, block_size: int):
             with T.Kernel(1, threads=total_threads) as (_,):
                 tx = T.get_thread_binding()
 
-                cumsum_s    = T.alloc_shared([num_experts + 1], "int32")
+                cumsum_s = T.alloc_shared([num_experts + 1], "int32")
                 tokens_cnts = T.alloc_shared([cnts_size], "int32")
 
                 # fill_threads group: fill sentinel (concurrent with worker Phase 0)
@@ -302,10 +286,7 @@ def _make_small_batch_kernel(numel: int, num_experts: int, block_size: int):
                         cumsum_s[0] = T.int32(0)
                         for e in T.serial(num_experts):
                             cnt = tokens_cnts[worker_threads * num_experts + e]
-                            cumsum_s[e + 1] = (
-                                cumsum_s[e]
-                                + T.ceildiv(cnt, block_size) * block_size
-                            )
+                            cumsum_s[e + 1] = cumsum_s[e] + T.ceildiv(cnt, block_size) * block_size
                         num_tokens_post_pad[0] = cumsum_s[num_experts]
 
                 T.sync_threads()  # sync 3
@@ -314,8 +295,8 @@ def _make_small_batch_kernel(numel: int, num_experts: int, block_size: int):
                 if tx >= _FILL_THREADS:
                     wid = tx - _FILL_THREADS
                     if wid < num_experts:
-                        e_start = cumsum_s[wid]     // block_size
-                        e_end   = cumsum_s[wid + 1] // block_size
+                        e_start = cumsum_s[wid] // block_size
+                        e_end = cumsum_s[wid + 1] // block_size
                         for b in T.serial(max_num_blocks):
                             blk = e_start + b
                             if blk < e_end:
@@ -359,8 +340,10 @@ class MoePermuteAlignKernel(Kernel):
         GEMM index contract, so there is no free element type to select.
 
     Example:
-        >>> kernel = MoePermuteAlignKernel(numel=32, num_experts=8, block_size=16)
-        >>> sorted_ids, expert_ids, num_post_pad = kernel(topk_ids)
+        ```python linenums="1"
+        kernel = MoePermuteAlignKernel(numel=32, num_experts=8, block_size=16)
+        sorted_ids, expert_ids, num_post_pad = kernel(topk_ids)
+        ```
     """
 
     supported_archs: list[int] = [80, 86, 89, 90]
@@ -384,10 +367,10 @@ class MoePermuteAlignKernel(Kernel):
             else None
         )
         if self._small_batch_fn is None:
-            self._align_fn   = _make_align_kernel(numel, num_experts, block_size)
+            self._align_fn = _make_align_kernel(numel, num_experts, block_size)
             self._scatter_fn = _make_scatter_kernel(numel, num_experts, block_size)
         else:
-            self._align_fn   = None
+            self._align_fn = None
             self._scatter_fn = None
 
         self.init_config(config, tune)
@@ -414,19 +397,19 @@ class MoePermuteAlignKernel(Kernel):
         )
 
         flat = topk_ids.flatten().contiguous()
-        max_padded      = self.numel + (self.num_experts + 1) * (self.block_size - 1)
-        max_num_blocks  = math.ceil(max_padded / self.block_size)
-        dev             = flat.device
+        max_padded = self.numel + (self.num_experts + 1) * (self.block_size - 1)
+        max_num_blocks = math.ceil(max_padded / self.block_size)
+        dev = flat.device
 
-        sorted_token_ids    = torch.empty(max_padded,     dtype=torch.int32, device=dev)
-        expert_ids          = torch.empty(max_num_blocks, dtype=torch.int32, device=dev)
-        num_tokens_post_pad = torch.empty(1,              dtype=torch.int32, device=dev)
+        sorted_token_ids = torch.empty(max_padded, dtype=torch.int32, device=dev)
+        expert_ids = torch.empty(max_num_blocks, dtype=torch.int32, device=dev)
+        num_tokens_post_pad = torch.empty(1, dtype=torch.int32, device=dev)
 
         if self._small_batch_fn is not None:
             fn = self._small_batch_fn()
             fn(flat, sorted_token_ids, expert_ids, num_tokens_post_pad)
         else:
-            cumsum  = torch.empty(self.num_experts + 1, dtype=torch.int32, device=dev)
+            cumsum = torch.empty(self.num_experts + 1, dtype=torch.int32, device=dev)
             threads = self.config["threads"]
             align_fn = self._align_fn(threads)
             align_fn(flat, sorted_token_ids, expert_ids, num_tokens_post_pad, cumsum)

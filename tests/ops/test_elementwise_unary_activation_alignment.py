@@ -7,19 +7,24 @@ identity, ``approximate`` validation, kernel_map override
 dispatch, and end-to-end correctness against the PyTorch reference.
 """
 
-
 import pytest
 import torch
 
 _INPLACE_PARAM_FREE_OPS = (
-    "ReluFwdOp", "SiluFwdOp", "HardswishFwdOp",
-    "HardsigmoidFwdOp", "MishFwdOp", "SeluFwdOp",
+    "ReluFwdOp",
+    "SiluFwdOp",
+    "HardswishFwdOp",
+    "HardsigmoidFwdOp",
+    "MishFwdOp",
+    "SeluFwdOp",
 )
 _INPLACE_PARAMETRIC_OPS = (
-    "LeakyReluFwdOp", "EluFwdOp", "HardtanhFwdOp",
+    "LeakyReluFwdOp",
+    "EluFwdOp",
+    "HardtanhFwdOp",
 )
 
-_CLAMP_OPS = ("ClampFwdOp", "ClampScalarFwdOp", "ClampMinFwdOp", "ClampMaxFwdOp")
+_CLAMP_OPS = ("ClampFwdOp", "ClampScalarFwdOp")
 
 
 def _torch_reference(op_name: str):
@@ -41,17 +46,14 @@ def _torch_reference(op_name: str):
 def _construct_inplace_op(mod, op_name: str, n_total: int, inplace: bool):
     """Build an instance with the manifest-spec construction signature."""
     cls = getattr(mod, op_name)
-    return cls(N_total=n_total, inplace=inplace)
+    return cls(inplace=inplace)
 
 
-def _clamp_construct_kwargs(op_name: str) -> tuple[tuple, dict]:
-    """Return ``(positional, keyword)`` args needed to construct ``op_name``."""
-    shape = (2, 4)
-    if op_name == "ClampFwdOp":
-        return ((shape, shape, shape), {})
+def _clamp_construct_kwargs(op_name: str) -> dict:
+    """The manifest params each Clamp op is constructed with; shapes are not among them."""
     if op_name == "ClampScalarFwdOp":
-        return ((shape,), {"min": -1.0, "max": 1.0})
-    return ((shape, shape), {})
+        return {"min": -1.0, "max": 1.0}
+    return {}
 
 
 @pytest.mark.smoke
@@ -69,20 +71,21 @@ def test_clamp_family_kernel_map_override_is_dispatched(op_name: str) -> None:
     import tileops.ops.elementwise as mod
 
     cls = getattr(mod, op_name)
-    pos, kw = _clamp_construct_kwargs(op_name)
-    inst = cls(*pos, **kw)
-    (key, default_kernel_cls), = inst.default_kernel_map.items()
+    kw = _clamp_construct_kwargs(op_name)
+    ((key, default_kernel_cls),) = cls(**kw).default_kernel_map.items()
 
     class MarkerKernel(default_kernel_cls):  # type: ignore[misc, valid-type]
         """Subclass marker; identical behavior, distinct identity."""
 
-    override = {key: MarkerKernel}
-    inst2 = cls(*pos, **kw, kernel_map=override)
-    assert inst2.kernel_map[key] is MarkerKernel, (
+    inst = cls(**kw, kernel_map={key: MarkerKernel})
+    assert inst.kernel_map[key] is MarkerKernel, (
         f"{op_name}: kernel_map override entry was not stored on "
-        f"self.kernel_map (got {inst2.kernel_map[key]!r})"
+        f"self.kernel_map (got {inst.kernel_map[key]!r})"
     )
-    built = inst2._entry(torch.float16).kernel
+    x = torch.randn(2, 4, device="cuda", dtype=torch.float16)
+    bound = torch.zeros_like(x)
+    inst(x, bound) if op_name == "ClampFwdOp" else inst(x)
+    ((built,),) = [tuple(inst.built_kernels(key).values())]
     assert isinstance(built, MarkerKernel), (
         f"{op_name}: kernel_map override class was not used to build the "
         f"kernel (kernel type: {type(built).__name__})"
@@ -94,9 +97,7 @@ def test_nan_to_num_canonical_kwarg_names() -> None:
     """NanToNumFwdOp accepts the manifest-aligned names end-to-end."""
     import tileops.ops.elementwise as mod
 
-    op = mod.NanToNumFwdOp(
-        N_total=8, nan=0.0, posinf=1.0, neginf=-1.0,
-    )
+    op = mod.NanToNumFwdOp(nan=0.0, posinf=1.0, neginf=-1.0)
     assert op.nan == 0.0
     assert op.posinf == 1.0
     assert op.neginf == -1.0
@@ -105,7 +106,8 @@ def test_nan_to_num_canonical_kwarg_names() -> None:
 @pytest.mark.smoke
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize(
-    "op_name", _INPLACE_PARAM_FREE_OPS + _INPLACE_PARAMETRIC_OPS,
+    "op_name",
+    _INPLACE_PARAM_FREE_OPS + _INPLACE_PARAMETRIC_OPS,
 )
 def test_unary_activation_inplace_true_aliases_input(op_name: str) -> None:
     """``inplace=True`` must mutate ``input`` and return the same tensor.
@@ -135,7 +137,8 @@ def test_unary_activation_inplace_true_aliases_input(op_name: str) -> None:
 @pytest.mark.smoke
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize(
-    "op_name", _INPLACE_PARAM_FREE_OPS + _INPLACE_PARAMETRIC_OPS,
+    "op_name",
+    _INPLACE_PARAM_FREE_OPS + _INPLACE_PARAMETRIC_OPS,
 )
 def test_unary_activation_inplace_false_returns_fresh_tensor(op_name: str) -> None:
     """Default ``inplace=False`` must not alias or mutate the input."""
@@ -148,9 +151,7 @@ def test_unary_activation_inplace_false_returns_fresh_tensor(op_name: str) -> No
     x_before = x.clone()
     y = op(x)
     assert y is not x, f"{op_name}: inplace=False must return a fresh tensor"
-    assert torch.equal(x, x_before), (
-        f"{op_name}: inplace=False must not mutate the input tensor"
-    )
+    assert torch.equal(x, x_before), f"{op_name}: inplace=False must not mutate the input tensor"
 
 
 @pytest.mark.smoke
@@ -159,7 +160,7 @@ def test_gelu_approximate_validation() -> None:
     import tileops.ops.elementwise as mod
 
     with pytest.raises(ValueError, match="approximate"):
-        mod.GeluFwdOp(N_total=8, approximate="invalid")
+        mod.GeluFwdOp(approximate="invalid")
 
 
 @pytest.mark.smoke
@@ -176,7 +177,7 @@ def test_gelu_approximate_runs_through_forward(approximate: str) -> None:
 
     n_total = 128
     dtype = torch.float16
-    op = mod.GeluFwdOp(N_total=n_total, approximate=approximate)
+    op = mod.GeluFwdOp(approximate=approximate)
     x = torch.randn(n_total, dtype=dtype, device="cuda")
     y = op(x)
     expected = torch.nn.functional.gelu(x, approximate=approximate)
@@ -188,7 +189,3 @@ def test_gelu_approximate_runs_through_forward(approximate: str) -> None:
 # refactor pulling shared ``__init__`` / ``forward`` / ``_eager_forward``
 # logic up into a base or mixin must keep these byte-identical, because
 # downstream code (tests, benches, codegen) relies on them.
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-vvs"])

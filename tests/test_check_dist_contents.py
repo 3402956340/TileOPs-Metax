@@ -23,12 +23,11 @@ CHECK_SCRIPT = REPO_ROOT / "scripts" / "ci" / "check_dist_contents.py"
 
 # As they appear in the wheel; `_in_src` gives the repo and sdist form.
 MANIFEST_YAMLS = ["tileops/manifest/attention.yaml", "tileops/manifest/gemm.yaml"]
-NESTED_HEADER = "tileops/kernels/attention/_anchor_helper.h"
-MOE_HEADER = "tileops/kernels/moe/_atomic_helper.h"
+NESTED_HEADER = "tileops/kernels/attention/_fp8_gqa_helper.h"
 PERF_PROFILE = "tileops/perf/profiles/h200.yaml"
 
 # Every tracked non-.py file the fixture package ships.
-RESOURCES = [*MANIFEST_YAMLS, NESTED_HEADER, MOE_HEADER, PERF_PROFILE]
+RESOURCES = [*MANIFEST_YAMLS, NESTED_HEADER, PERF_PROFILE]
 SOURCES = ["tileops/__init__.py", "tileops/perf/profile.py"]
 
 
@@ -129,9 +128,7 @@ def test_expected_set_comes_from_git_when_available(tmp_path):
     """With git present the expectation follows the index, not the working tree."""
     repo, dist = build_dist(tmp_path, WHEEL_OK, SDIST_OK)
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    subprocess.run(
-        ["git", "add", *_in_src(RESOURCES), *_in_src(SOURCES)], cwd=repo, check=True
-    )
+    subprocess.run(["git", "add", *_in_src(RESOURCES), *_in_src(SOURCES)], cwd=repo, check=True)
     # Untracked, so it is not part of the shipped resource set.
     scratch = repo / "src" / "tileops" / "perf" / "profiles" / "scratch.yaml"
     scratch.write_text("draft\n")
