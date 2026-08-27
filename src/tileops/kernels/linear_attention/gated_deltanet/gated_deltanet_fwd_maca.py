@@ -10,8 +10,9 @@ Pipeline (same ABI as GatedDeltaNetFwdKernel):
 """
 
 import functools
+import itertools
 import math
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import tilelang
 import tilelang.language as T
@@ -155,6 +156,60 @@ def _plan_fwd_config(chunk_size: int, dim_k: int, dim_v: int, dtype: str) -> dic
         "o_block_v": o_bv,
         "block_k": fused_bk,
     }
+
+
+def _maca_thread_candidates(m: int, n: int) -> Tuple[int, ...]:
+    """Return the distinct safe launch widths worth timing for one MMA shape."""
+    candidates = []
+    for requested in (64, 128, 256):
+        threads = _maca_safe_threads(m, n, requested)
+        if threads not in candidates:
+            candidates.append(threads)
+    return tuple(candidates)
+
+
+def _maca_fwd_autotune_configs(chunk_size: int, dim_k: int, dim_v: int, dtype: str) -> list[dict]:
+    """Return the reachable MACA forward configs for one shape.
+
+    ``BK`` and ``BV`` select the generated kernel layout, rather than a runtime
+    launch parameter. The planner chooses the largest shared-memory-safe pair
+    for each stage, and tuning only sweeps the launch parameters of those three
+    generated kernels. This keeps a tune request bounded while guaranteeing
+    every candidate has already passed the MACA 64KB shared-memory budget.
+    """
+    default = _plan_fwd_config(chunk_size, dim_k, dim_v, dtype)
+    fused_threads = _maca_thread_candidates(
+        chunk_size,
+        min(chunk_size, max(default["fused_block_k"], default["fused_block_v"])),
+    )
+    h_threads = _maca_thread_candidates(min(chunk_size, default["h_block_k"]), default["h_block_v"])
+    o_threads = _maca_thread_candidates(chunk_size, default["o_block_v"])
+
+    return [
+        {
+            "fused_num_stages": fused["num_stages"],
+            "fused_threads": fused["threads"],
+            "fused_block_k": default["fused_block_k"],
+            "fused_block_v": default["fused_block_v"],
+            "h_num_stages": recurrence["num_stages"],
+            "h_threads": recurrence["threads"],
+            "h_block_k": default["h_block_k"],
+            "h_block_v": default["h_block_v"],
+            "o_threads": output["threads"],
+            "o_block_k": default["o_block_k"],
+            "o_block_v": default["o_block_v"],
+            "block_k": default["block_k"],
+        }
+        for fused, recurrence, output in itertools.product(
+            ({"num_stages": 1, "threads": threads} for threads in fused_threads),
+            (
+                {"num_stages": num_stages, "threads": threads}
+                for num_stages in (0, 1)
+                for threads in h_threads
+            ),
+            ({"threads": threads} for threads in o_threads),
+        )
+    ]
 
 
 # =============================================================================
@@ -768,6 +823,104 @@ class GatedDeltaNetFwdMACAKernel(Kernel):
     @property
     def default_config(self) -> dict:
         return _plan_fwd_config(self.chunk_size, self.dim_k, self.dim_v, self.dtype_str)
+
+    @property
+    def autotune_configs(self) -> list[dict]:
+        return _maca_fwd_autotune_configs(self.chunk_size, self.dim_k, self.dim_v, self.dtype_str)
+
+    def autotune(self, warmup: int = 10, rep: int = 10) -> None:
+        """Tune the launch parameters of the three MACA forward stages.
+
+        The stage tile sizes remain those selected by ``_plan_fwd_config``:
+        changing one changes the generated TileLang program and rapidly turns a
+        small launch sweep into a compile-heavy cross product. Every result is
+        flattened back into the public config ABI and is therefore a member of
+        ``autotune_configs``.
+        """
+        default = self.default_config
+        shape = (
+            self.batch,
+            self.head,
+            self.seq_len,
+            self.chunk_size,
+            self.dim_k,
+            self.dim_v,
+            self.dtype_str,
+        )
+
+        fused_candidates = [
+            {"num_stages": 1, "threads": threads}
+            for threads in _maca_thread_candidates(
+                self.chunk_size,
+                min(
+                    self.chunk_size,
+                    max(default["fused_block_k"], default["fused_block_v"]),
+                ),
+            )
+        ]
+        recurrence_candidates = [
+            {"num_stages": num_stages, "threads": threads}
+            for num_stages in (0, 1)
+            for threads in _maca_thread_candidates(
+                min(self.chunk_size, default["h_block_k"]), default["h_block_v"]
+            )
+        ]
+        output_candidates = [
+            {"threads": threads}
+            for threads in _maca_thread_candidates(self.chunk_size, default["o_block_v"])
+        ]
+
+        def tune_stage(label: str, jit_kernel, candidates: list[dict]) -> Dict[str, int]:
+            print(f"Autotuning {label} ({len(candidates)} configs)...")
+            tuned = self.tune_jit_kernel(
+                jit_kernel,
+                candidates,
+                warmup=warmup,
+                rep=rep,
+                seed_config=candidates[0],
+                supply_prog=None,
+            )
+            config = getattr(tuned, "config", None)
+            print(f"  Best: {config}")
+            return config or {}
+
+        print(f"Start autotuning {self.__class__.__name__}...")
+        fused = tune_stage(
+            "fused_prepare_compute_w_u",
+            _fused_prepare_compute_w_u_maca_tl(
+                *shape,
+                block_k=default["fused_block_k"],
+                block_v=default["fused_block_v"],
+            ),
+            fused_candidates,
+        )
+        recurrence = tune_stage(
+            "h_recurrence",
+            _h_recurrence_maca_tl(
+                *shape,
+                block_k=default["h_block_k"],
+                block_v=default["h_block_v"],
+            ),
+            recurrence_candidates,
+        )
+        output = tune_stage(
+            "output_o",
+            _output_o_maca_tl(
+                *shape,
+                block_k=default["o_block_k"],
+                block_v=default["o_block_v"],
+            ),
+            output_candidates,
+        )
+        self.config = {
+            **default,
+            "fused_num_stages": fused.get("num_stages", default["fused_num_stages"]),
+            "fused_threads": fused.get("threads", default["fused_threads"]),
+            "h_num_stages": recurrence.get("num_stages", default["h_num_stages"]),
+            "h_threads": recurrence.get("threads", default["h_threads"]),
+            "o_threads": output.get("threads", default["o_threads"]),
+        }
+        print(f"{self.__class__.__name__} autotuned config: {self.config}")
 
     def forward(
         self,

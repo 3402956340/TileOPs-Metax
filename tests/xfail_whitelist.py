@@ -48,7 +48,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/ops/test_gated_deltanet_fwd.py::test_gated_deltanet_fwd[1-128-4-64-64-32-dtype5-False]",
             "tests/ops/test_gated_deltanet_fwd.py::test_gated_deltanet_fwd[2-8192-4-64-64-64-dtype6-False]",
             "tests/ops/test_gated_deltanet_fwd.py::test_gated_deltanet_fwd[2-16384-4-64-64-64-dtype7-False]",
-            "tests/ops/test_gated_deltanet_fwd.py::test_gated_deltanet_fwd[full-bf16-tuned]",
             "tests/ops/test_gla_chunkwise_fwd.py::test_gla_fwd[1-128-4-64-64-64-dtype3-False]",
             "tests/ops/test_ada_layer_norm.py::test_ada_layer_norm_kernel_handles_natural_unaligned_shape[dtype0]",
             "tests/ops/test_ada_layer_norm.py::test_ada_layer_norm_kernel_handles_natural_unaligned_shape[dtype1]",
