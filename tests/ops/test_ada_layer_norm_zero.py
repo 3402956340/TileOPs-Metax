@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from tests.test_base import FixtureBase, TestBase
 from tileops.kernels.norm.ada_layer_norm import AdaLayerNormKernel
 from tileops.ops.norm.ada_layer_norm_zero import AdaLayerNormZeroFwdOp
+from tileops.utils import is_maca
 from workloads.normalization import AdaLayerNormZeroWorkload
 
 
@@ -85,7 +86,7 @@ def test_ada_layer_norm_zero_async_copy_handles_row_tail() -> None:
         has_gate=True,
         config={"block_m": block_m, "threads": 128},
     )
-    assert kernel.use_cp_async
+    assert kernel.use_cp_async is (not is_maca())
     actual = kernel(*inputs)
     expected = test.ref_program(*inputs)
     atol, rtol = _get_tolerances(dtype)
