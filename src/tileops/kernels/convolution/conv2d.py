@@ -774,7 +774,7 @@ class Conv2dSymmetricKernel(Kernel):
             "block_m": 64,
             "block_n": 256,
             "block_k": 32,
-            "num_stages": 3,
+            "num_stages": 1,
             "threads": 256,
             "enable_rasterization": True,
         }
@@ -893,7 +893,7 @@ class Conv2dKernel(Kernel):
                 "block_n": 64,
                 "block_k": 64,
                 "threads": 128,
-                "num_stages": 2,
+                "num_stages": 1,
                 "enable_rasterization": True,
             }
         return {
@@ -901,7 +901,7 @@ class Conv2dKernel(Kernel):
             "block_n": 64,
             "block_k": 64,
             "threads": 128,
-            "num_stages": 2,
+            "num_stages": 1,
             "enable_rasterization": True,
         }
 
@@ -1052,7 +1052,7 @@ class GroupConv2dKernel(Kernel):
             "block_n": 64,
             "block_k": 64,
             "threads": 128,
-            "num_stages": 2,
+            "num_stages": 1,
             "enable_rasterization": True,
         }
 

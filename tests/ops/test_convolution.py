@@ -1,3 +1,5 @@
+from typing import Optional
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -232,7 +234,25 @@ class Conv1dFixture(FixtureBase):
 
 
 class Conv1dTest(Conv1dWorkload, TestBase):
-    pass
+    def ref_program(
+        self,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        # MACA: GPU F.conv backend disagrees with CPU f32 for bf16+stride>1.
+        if is_maca() and self.stride > 1 and self.dtype == torch.bfloat16:
+            out = F.conv1d(
+                x.cpu(),
+                weight.cpu(),
+                bias=bias.cpu() if bias is not None else None,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
+                groups=self.groups,
+            )
+            return out.to(device=x.device, dtype=x.dtype).contiguous()
+        return super().ref_program(x, weight, bias)
 
 
 @Conv1dFixture
@@ -614,7 +634,27 @@ class Conv2dFixture(FixtureBase):
 
 
 class Conv2dTest(Conv2dWorkload, TestBase):
-    pass
+    def ref_program(
+        self,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        # MACA: GPU F.conv backend disagrees with CPU f32 for fp16+stride>1+c_in>=128.
+        if is_maca() and self.dtype == torch.float16 and self.c_in >= 128:
+            stride = self.stride if isinstance(self.stride, tuple) else (self.stride, self.stride)
+            if any(value > 1 for value in stride):
+                out = F.conv2d(
+                    x.cpu(),
+                    weight.cpu(),
+                    bias=bias.cpu() if bias is not None else None,
+                    stride=self.stride,
+                    padding=self.padding,
+                    dilation=self.dilation,
+                    groups=self.groups,
+                )
+                return out.to(device=x.device, dtype=x.dtype).contiguous()
+        return super().ref_program(x, weight, bias)
 
 
 @Conv2dFixture
@@ -895,7 +935,25 @@ class Conv3dFixture(FixtureBase):
 
 
 class Conv3dTest(Conv3dWorkload, TestBase):
-    pass
+    def ref_program(
+        self,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        # MACA: GPU F.conv backend disagrees with CPU f32 when c_in > 3.
+        if is_maca() and self.c_in > 3:
+            out = F.conv3d(
+                x.cpu(),
+                weight.cpu(),
+                bias=bias.cpu() if bias is not None else None,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
+                groups=self.groups,
+            )
+            return out.to(device=x.device, dtype=x.dtype).contiguous()
+        return super().ref_program(x, weight, bias)
 
 
 @Conv3dFixture
