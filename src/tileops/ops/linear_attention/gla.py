@@ -3,7 +3,12 @@ from typing import Dict, Optional, Tuple
 import torch
 
 from tileops.kernels.kernel_base import Kernel
-from tileops.kernels.linear_attention.gla import GLABwdKernel, GLABwdMACAKernel, GLAFwdKernel
+from tileops.kernels.linear_attention.gla import (
+    GLABwdKernel,
+    GLABwdMACAKernel,
+    GLAFwdKernel,
+    GLAFwdMACAKernel,
+)
 from tileops.utils import is_maca
 
 from .._validation import check_tensor_shape
@@ -79,8 +84,9 @@ class GLAFwdOp(Op):
 
     @property
     def default_kernel_map(self) -> Dict[str, Kernel]:
+        fwd_cls = GLAFwdMACAKernel if is_maca() else GLAFwdKernel
         return {
-            "GLAFwdKernel": GLAFwdKernel,
+            "GLAFwdKernel": fwd_cls,
         }
 
     def _get_kernel(
