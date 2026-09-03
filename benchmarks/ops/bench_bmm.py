@@ -119,7 +119,7 @@ def test_bmm_fp8_kn_bench(
     # b_kn is already [B, K, N], the order flashinfer's bmm_fp8 reads.
     try:
         flashinfer_fn(a, b_kn, scale_a, scale_b)
-    except (ImportError, RuntimeError) as exc:
+    except (AttributeError, ImportError, RuntimeError) as exc:
         print(f"  [skip] flashinfer-bmm-fp8: {exc}")
     else:
         functors["flashinfer-bmm-fp8"] = (flashinfer_fn, (a, b_kn, scale_a, scale_b))
@@ -160,7 +160,7 @@ def test_bmm_fp8_nk_bench(
     # numbers down with it.
     try:
         flashinfer_fn(a, b_kmajor, scale_a, scale_b)
-    except (ImportError, RuntimeError) as exc:
+    except (AttributeError, ImportError, RuntimeError) as exc:
         print(f"  [skip] flashinfer-bmm-fp8: {exc}")
     else:
         functors["flashinfer-bmm-fp8"] = (flashinfer_fn, (a, b_kmajor, scale_a, scale_b))

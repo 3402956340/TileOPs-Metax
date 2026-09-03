@@ -183,8 +183,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         _NUMERICAL_MISMATCH,
         (
-            "benchmarks/ops/bench_bmm.py::test_bmm_bench[small-b8-128-float16]",
-            "benchmarks/ops/bench_bmm.py::test_bmm_bench[small-b8-128-bfloat16]",
             "benchmarks/ops/bench_convolution.py::test_conv1d_bench[encodec-deep-float16]",
             "benchmarks/ops/bench_convolution.py::test_conv1d_bench[encodec-deep-bfloat16]",
             "benchmarks/ops/bench_convolution.py::test_conv1d_bench[encodec-deep-bias-float16]",
@@ -229,11 +227,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         _MISSING_BASELINE,
         (
-            "benchmarks/ops/bench_bmm.py::test_bmm_fp8_nk_bench[square-b4-1k-per-tensor-float8_e4m3fn]",
-            "benchmarks/ops/bench_bmm.py::test_bmm_fp8_nk_bench[square-b8-2k-per-tensor-float8_e4m3fn]",
-            "benchmarks/ops/bench_bmm.py::test_bmm_fp8_nk_bench[mha-decode-b32-pv-per-tensor-float8_e4m3fn]",
-            "benchmarks/ops/bench_bmm.py::test_bmm_fp8_nk_bench[mha-decode-b64-qk-per-tensor-float8_e4m3fn]",
-            "benchmarks/ops/bench_bmm.py::test_bmm_fp8_nk_bench[moe-prefill-b128-per-tensor-float8_e4m3fn]",
             "benchmarks/ops/bench_gemm.py::test_gemm_bench[ds-v3-decode-gate-up-bfloat16]",
             "benchmarks/ops/bench_gemm.py::test_gemm_bench[ds-v3-decode-down-bfloat16]",
             "benchmarks/ops/bench_gemm.py::test_gemm_bench[ds-v3-prefill-gate-up-bfloat16]",
