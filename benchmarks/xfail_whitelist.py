@@ -113,10 +113,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "benchmarks/ops/bench_gla_chunkwise.py::test_gla_fwdbwd_bench[2-16384-4-64-64-64-dtype7-False]",
             "benchmarks/ops/bench_gla_chunkwise.py::test_gla_bwd_bench[2-4096-4-64-64-64-dtype4-False]",
             "benchmarks/ops/bench_gla_chunkwise.py::test_gla_fwdbwd_bench[2-4096-4-64-64-64-dtype4-False]",
-            "benchmarks/ops/bench_ada_layer_norm.py::test_ada_layer_norm_bench[dit-xl-2-float16]",
-            "benchmarks/ops/bench_ada_layer_norm.py::test_ada_layer_norm_bench[dit-xl-2-bfloat16]",
-            "benchmarks/ops/bench_ada_layer_norm.py::test_ada_layer_norm_zero_bench[dit-xl-2-float16]",
-            "benchmarks/ops/bench_ada_layer_norm.py::test_ada_layer_norm_zero_bench[dit-xl-2-bfloat16]",
             # Current named-id deltanet / gated-deltanet MACA gemm.h compile failures
             "benchmarks/ops/bench_deltanet.py::test_deltanet_vs_fla_fwd[dn-b2-s2k-h4-d64-float16]",
             "benchmarks/ops/bench_deltanet.py::test_deltanet_vs_fla_fwd[dn-b2-s2k-h4-d64-bfloat16]",

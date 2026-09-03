@@ -8,6 +8,7 @@ from tileops.kernels.norm.ada_layer_norm import (
     _should_use_cp_async,
 )
 from tileops.ops.norm.ada_layer_norm import AdaLayerNormFwdOp
+from tileops.utils import is_maca
 from workloads.normalization import AdaLayerNormWorkload
 
 
@@ -88,7 +89,7 @@ def test_ada_layer_norm_async_copy_handles_row_tail() -> None:
         has_gate=False,
         config={"block_m": block_m, "threads": 128},
     )
-    assert kernel.use_cp_async
+    assert kernel.use_cp_async is (not is_maca())
     actual = kernel(*inputs)
     expected = test.ref_program(*inputs)
     atol, rtol = _get_tolerances(dtype)
@@ -143,7 +144,7 @@ def test_ada_layer_norm_async_policy_edge_correctness(
     inputs = test.gen_inputs()
     kernel = AdaLayerNormKernel(n, test.eps, dtype, has_gate=False)
     if n == 514:
-        assert kernel.use_cp_async
+        assert kernel.use_cp_async is (not is_maca())
     actual = kernel(*inputs)
     expected = test.ref_program(*inputs)
     atol, rtol = _get_tolerances(dtype)

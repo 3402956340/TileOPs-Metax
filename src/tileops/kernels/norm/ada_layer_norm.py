@@ -28,6 +28,7 @@ import torch
 
 from tileops.kernels.kernel_base import Kernel
 from tileops.kernels.tiling import ALIGNMENT, align_up
+from tileops.utils import is_maca
 
 from ._config import select_row_config, select_row_configs
 
@@ -264,7 +265,7 @@ class AdaLayerNormKernel(Kernel):
         self.has_gate = has_gate
         self.N_padded = align_up(N, ALIGNMENT)
         # Shape policy is benchmarked independently from block/thread tuning.
-        self.use_cp_async = _should_use_cp_async(N, dtype, has_gate)
+        self.use_cp_async = False if is_maca() else _should_use_cp_async(N, dtype, has_gate)
         self._tune_pending = tune  # tuning needs a program, so it waits for the first call
         self.init_config(config, tune=False)
 
