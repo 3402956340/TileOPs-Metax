@@ -17,6 +17,7 @@ from benchmarks.baselines import (
 from benchmarks.benchmark_base import ManifestBenchmark, workload_params
 from tileops.manifest import load_workloads
 from tileops.ops.norm.group_norm import GroupNormFwdOp
+from tileops.utils import is_maca
 from workloads.normalization import GroupNormWorkload
 
 _OP_NAME = "GroupNormFwdOp"
@@ -51,9 +52,12 @@ def test_group_norm_bench(
         return F.group_norm(x, num_groups, weight=weight, bias=bias, eps=1e-5)
 
     flaggems_fn = flaggems_group_norm(n, c, math.prod(spatial), num_groups, 1e-5)
-    assert_matches_reference(
-        flaggems_fn, baseline_fn, x, weight, bias, **reference_tolerance(dtype)
-    )
+    tolerances = reference_tolerance(dtype)
+    # MACA's FlagGems FP16 fused-affine path differs from torch by up to
+    # 0.0078125; retain it as a timed baseline without weakening TileOps checks.
+    if is_maca() and dtype == torch.float16:
+        tolerances = {**tolerances, "atol": 1e-2}
+    assert_matches_reference(flaggems_fn, baseline_fn, x, weight, bias, **tolerances)
 
     bm.compare(
         {

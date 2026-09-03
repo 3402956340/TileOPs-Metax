@@ -203,9 +203,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "benchmarks/ops/bench_convolution.py::test_conv3d_bench[video-stage-downsample-k3-s2-float16]",
             "benchmarks/ops/bench_convolution.py::test_conv3d_bench[3d-unet-aspp-3x3x3-rate6-float16]",
             "benchmarks/ops/bench_convolution.py::test_conv3d_bench[video-stage-downsample-k3-s2-bias-float16]",
-            "benchmarks/ops/bench_group_norm.py::test_group_norm_bench[image-g32-affine-float16]",
-            "benchmarks/ops/bench_group_norm.py::test_group_norm_bench[wider-channel-g32-affine-float16]",
-            "benchmarks/ops/bench_group_norm.py::test_group_norm_bench[tail-spatial-g16-affine-float16]",
         ),
     ),
     (
