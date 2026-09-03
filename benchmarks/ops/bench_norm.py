@@ -29,6 +29,7 @@ from tileops.ops.norm.fused_add_layer_norm import FusedAddLayerNormFwdOp
 from tileops.ops.norm.fused_add_rms_norm import FusedAddRMSNormFwdOp
 from tileops.ops.norm.layer_norm import LayerNormFwdOp
 from tileops.ops.norm.rms_norm import RMSNormFwdOp
+from tileops.utils import is_maca
 from workloads.normalization import (
     FusedAddLayerNormWorkload,
     FusedAddRMSNormWorkload,
@@ -124,8 +125,11 @@ def test_rms_norm_bench(m: int, n: int, dtype: torch.dtype, tune: bool) -> None:
     library = {
         FLAGGEMS_TAG: _flaggems_rms_norm(n, test.eps),
         FLASHINFER_TAG: _flashinfer_rms_norm(test.eps),
-        VLLM_TAG: _vllm_rms_norm(inputs[0], test.eps),
     }
+    # The MACA runner has no vLLM package.  Resolving it after flag_gems would
+    # also hit vLLM's incompatible Torch-op registry path.
+    if not is_maca():
+        library[VLLM_TAG] = _vllm_rms_norm(inputs[0], test.eps)
     for baseline_fn in library.values():
         assert_matches_reference(baseline_fn, test.ref_program, *inputs, **tolerance)
 
@@ -162,6 +166,21 @@ def test_fused_add_rms_norm_bench(m: int, n: int, dtype: torch.dtype, tune: bool
         y = ((add_result.float() / rms) * weight.float()).to(x.dtype)
         return y, add_result
 
+    # MetaX FlashInfer rejects fused-add RMSNorm with hidden_size=16384, and
+    # the MACA runner has no vLLM package.
+    if is_maca():
+        bm.compare(
+            {
+                "tileops": op,
+                "torch-ref": baseline_fn,
+                TORCH_COMPILE_TAG: compiled_reference(baseline_fn),
+            },
+            *inputs,
+            record_as=op,
+            params=locals(),
+        )
+        return
+
     tolerance = reference_tolerance(dtype)
     fused_kernels = {
         FLASHINFER_TAG: flashinfer_op("fused_add_rmsnorm"),
@@ -193,6 +212,21 @@ def test_layer_norm_bench(m: int, n: int, dtype: torch.dtype, tune: bool) -> Non
     # Baseline uses torch.nn.functional.layer_norm
     def baseline_fn(x, weight, bias):
         return F.layer_norm(x, (n,), weight=weight, bias=bias, eps=1e-5)
+
+    # MetaX FlashInfer does not expose layernorm, so keep this platform's
+    # comparison to TileOps and torch instead of selecting that baseline.
+    if is_maca():
+        bm.compare(
+            {
+                "tileops": op,
+                "torch": baseline_fn,
+                TORCH_COMPILE_TAG: compiled_reference(baseline_fn),
+            },
+            *inputs,
+            record_as=op,
+            params=locals(),
+        )
+        return
 
     flaggems_layer_norm = flaggems_op("layer_norm")
     flashinfer_layer_norm = flashinfer_op("layernorm")
