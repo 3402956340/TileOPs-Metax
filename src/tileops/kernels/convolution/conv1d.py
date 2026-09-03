@@ -517,7 +517,7 @@ class Conv1dPointwiseKernel(Kernel):
             "block_m": 64,
             "block_n": 128,
             "block_k": 128,
-            "num_stages": 2,
+            "num_stages": 1,
             "threads": 128,
             "enable_rasterization": True,
         }
@@ -603,7 +603,7 @@ class Conv1dKernel(Kernel):
             "block_m": 64,
             "block_n": 128,
             "block_k": 128,
-            "num_stages": 2,
+            "num_stages": 1,
             "threads": 128,
             "enable_rasterization": True,
         }
@@ -769,7 +769,7 @@ class GroupConv1dKernel(Kernel):
             "block_m": block_m,
             "block_n": 128,
             "block_k": 128,
-            "num_stages": 2,
+            "num_stages": 1,
             "threads": 128,
             "enable_rasterization": True,
         }

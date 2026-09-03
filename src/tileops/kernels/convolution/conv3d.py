@@ -421,7 +421,7 @@ class Conv3dKernel(Kernel):
             "block_m": 64,
             "block_n": 64,
             "block_k": 64,
-            "num_stages": 2,
+            "num_stages": 1,
             "threads": 128,
             "enable_rasterization": True,
         }
@@ -556,7 +556,7 @@ class GroupConv3dKernel(Kernel):
             "block_m": 64,
             "block_n": 64,
             "block_k": 64,
-            "num_stages": 2,
+            "num_stages": 1,
             "threads": 128,
             "enable_rasterization": True,
         }
