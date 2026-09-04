@@ -37,10 +37,7 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (
         _RUNTIME_LAUNCH_ERROR,
-        (
-            "benchmarks/ops/bench_batch_norm.py::test_batch_norm_fwd_bench[resnet50-stage1-float16]",
-            "benchmarks/ops/bench_batch_norm.py::test_batch_norm_fwd_bench[large-spatial-float16]",
-        ),
+        (),
     ),
     (
         _COMPILATION_FAILURE,

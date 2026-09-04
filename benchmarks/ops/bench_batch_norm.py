@@ -21,6 +21,7 @@ from benchmarks.baselines import (
 from benchmarks.benchmark_base import ManifestBenchmark, backward_of, workload_params
 from tileops.manifest import load_workloads
 from tileops.ops.norm.batch_norm import BatchNormBwdOp, BatchNormFwdOp
+from tileops.utils import is_maca
 from workloads.normalization import BatchNormBwdWorkload, BatchNormFwdWorkload
 
 _FWD_OP_NAME = "BatchNormFwdOp"
@@ -145,6 +146,21 @@ def test_batch_norm_fwd_bench(N, C, spatial, dtype, training, tune):
 
     def torch_fn(x, rm, rv, w, b):
         return _torch_bn_fwd(x, w, b, rm, rv)
+
+    # MetaX FlagGems BatchNorm's Triton launcher cannot represent some launch
+    # arguments in 32 bits. Keep the upstream baseline path below unchanged.
+    if is_maca():
+        bm.compare(
+            {
+                "tileops": lambda *a: op(*a),
+                "torch-cudnn": torch_fn,
+                TORCH_COMPILE_TAG: compiled_reference(torch_fn),
+            },
+            *inputs,
+            record_as=op,
+            params=locals(),
+        )
+        return
 
     flaggems_fn = _flaggems_bn_fwd(running_mean, running_var)
     # cuDNN and Triton both reduce over N*H*W in fp32; agreement is at fp32 strength.
