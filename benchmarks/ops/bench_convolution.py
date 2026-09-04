@@ -32,6 +32,7 @@ from benchmarks.baselines import (
 from benchmarks.benchmark_base import ManifestBenchmark, workload_params
 from tileops.manifest import load_workloads
 from tileops.ops import Conv1dFwdOp, Conv2dFwdOp, Conv3dFwdOp
+from tileops.utils import is_maca
 
 # Bench-local: autotuning is benchmark infrastructure, not a workload property.
 _TUNE = True
@@ -158,6 +159,34 @@ def _torch_conv_baseline(
     return baseline_fn
 
 
+def _cpu_conv_reference(
+    conv_fn: Callable,
+    stride: tuple[int, ...],
+    padding: tuple[int, ...],
+    dilation: tuple[int, ...],
+    groups: int,
+) -> Callable:
+    """Return a CPU convolution reference, converted back to the input device."""
+
+    def reference_fn(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        out = conv_fn(
+            x.cpu(),
+            weight.cpu(),
+            bias=bias.cpu() if bias is not None else None,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=groups,
+        )
+        return out.to(device=x.device, dtype=x.dtype).contiguous()
+
+    return reference_fn
+
+
 def _flaggems_conv_baseline(
     rank: int,
     stride: tuple[int, ...],
@@ -227,9 +256,20 @@ def _run_conv(
         case.dilation,
         case.groups,
     )
+    reference = (
+        _cpu_conv_reference(
+            torch_fn,
+            case.stride,
+            case.padding,
+            case.dilation,
+            case.groups,
+        )
+        if is_maca()
+        else baseline
+    )
     assert_matches_reference(
         flaggems,
-        baseline,
+        reference,
         *inputs,
         rtol=_BASELINE_RTOL,
         atol=_BASELINE_ATOL,
