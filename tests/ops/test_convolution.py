@@ -22,8 +22,8 @@ from tileops.ops import (
     Conv2dFwdOp,
     Conv3dFwdOp,
 )
-from tileops.utils import is_maca
 from tileops.ops.convolution import _can_use_conv3d_ndhwc
+from tileops.utils import is_maca
 from workloads.convolution import Conv1dWorkload, Conv2dWorkload, Conv3dWorkload
 
 for _op_cls in (Conv1dFwdOp, Conv2dFwdOp, Conv3dFwdOp):

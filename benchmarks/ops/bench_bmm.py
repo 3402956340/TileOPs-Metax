@@ -109,7 +109,7 @@ def test_bmm_fp8_kn_bench(
         return _flashinfer_bmm_fp8_per_tensor_ref(workload, a_, b_, sa_, sb_)
 
     # FlashInfer 0.6.6+ is required for the FP8 BMM benchmark.
-    flashinfer = pytest.importorskip("flashinfer", minversion="0.6.6")
+    pytest.importorskip("flashinfer", minversion="0.6.6")
     # b_kn is already [B, K, N], the order flashinfer's bmm_fp8 reads.
     try:
         flashinfer_fn(a, b_kn, scale_a, scale_b)

@@ -8,13 +8,10 @@ This covers the invariant every family owes its L1 kernel slots.
 import pytest
 import torch
 
-from tileops.kernels.attention.gqa_decode_bs1 import GQADecodeBs1Kernel
-from tileops.kernels.attention.gqa_fwd_ws import GQAFwdWsPersistentCausalKernel
 from tileops.manifest import load_manifest
 from tileops.ops.norm.layer_norm import LayerNormFwdOp
 from tileops.ops.norm.rms_norm import RMSNormFwdOp
 from tileops.ops.reduction.reduce import SumFwdOp
-from tileops.utils import get_sm_version
 
 _DTYPES = (torch.float16, torch.bfloat16)
 

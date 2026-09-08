@@ -142,8 +142,6 @@ def test_batch_norm_fwd_bench(N, C, spatial, dtype, training, tune):
                 TORCH_COMPILE_TAG: compiled_reference(torch_fn),
             },
             *inputs,
-            record_as=op,
-            params=locals(),
         )
         return
 

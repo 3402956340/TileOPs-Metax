@@ -9,7 +9,7 @@ import torch
 
 from tileops.kernels.kernel_base import Kernel
 
-from ._common import CONV_SWIZZLE_PANEL, _launch, conv_autotune_configs, conv_num_stages
+from ._common import CONV_SWIZZLE_PANEL, _launch, conv_autotune_configs
 from .call_spec import Conv1dCall, conv1d_dense_region, conv1d_group_region, conv1d_pointwise_region
 
 __all__ = [

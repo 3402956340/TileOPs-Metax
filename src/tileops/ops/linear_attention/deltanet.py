@@ -8,8 +8,8 @@ from tileops.kernels.linear_attention.deltanet import (
     DeltaNetBwdMACAKernel,
     DeltaNetFwdKernel,
 )
-from tileops.utils import is_maca
 from tileops.perf.profile import tensor_core_roof
+from tileops.utils import is_maca
 
 from .._validation import check_tensor_shape
 from ..op_base import Op

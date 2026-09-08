@@ -6,7 +6,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from benchmarks.benchmark_base import BenchmarkBase, ManifestBenchmark, workloads_to_params
+from benchmarks.benchmark_base import (
+    BenchmarkBase,
+    ManifestBenchmark,
+    OpBenchmark,
+    workloads_to_params,
+)
 from benchmarks.timing import (
     Sample,
     Trace,
@@ -266,7 +271,7 @@ def test_result_rejects_non_positive_device_time():
 
 
 def test_compare_remeasures_every_tag_after_timing_method_changes(monkeypatch):
-    class Benchmark(BenchmarkBase):
+    class Benchmark(OpBenchmark):
         def calculate_flops(self):
             return None
 
@@ -292,7 +297,9 @@ def test_compare_remeasures_every_tag_after_timing_method_changes(monkeypatch):
 
     monkeypatch.setattr("benchmarks.benchmark_base.bench_kernel", fake_bench_kernel)
 
-    results = Benchmark(None).compare({"tileops": lambda: None, "torch": lambda: None})
+    results = Benchmark(object(), SimpleNamespace()).compare(
+        {"tileops": lambda: None, "torch": lambda: None}
+    )
 
     assert {result["timing"] for result in results.values()} == {"cuda-events"}
 

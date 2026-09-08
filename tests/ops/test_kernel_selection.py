@@ -9,6 +9,7 @@ from tileops.ops import (
     GroupedQueryAttentionPrefillPagedWithKVCacheFwdOp,
 )
 from tileops.ops.attention.selection import PAGED_DECODE_KEYS, PAGED_PREFILL_KEYS
+from tileops.utils import get_sm_version
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(),

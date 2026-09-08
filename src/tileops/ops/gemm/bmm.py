@@ -11,8 +11,8 @@ import torch
 
 from tileops.kernels.gemm.bmm import BmmFp8Kernel, BmmFp8MACAKernel, BmmKernel
 from tileops.kernels.kernel_base import Kernel
-from tileops.utils import is_maca
 from tileops.perf.profile import tensor_core_roof
+from tileops.utils import is_maca
 
 from ..op_base import Op
 

@@ -168,8 +168,6 @@ def test_fused_add_rms_norm_bench(m: int, n: int, dtype: torch.dtype, tune: bool
                 TORCH_COMPILE_TAG: compiled_reference(baseline_fn),
             },
             *inputs,
-            record_as=op,
-            params=locals(),
         )
         return
 
@@ -212,8 +210,6 @@ def test_layer_norm_bench(m: int, n: int, dtype: torch.dtype, tune: bool) -> Non
                 TORCH_COMPILE_TAG: compiled_reference(baseline_fn),
             },
             *inputs,
-            record_as=op,
-            params=locals(),
         )
         return
 

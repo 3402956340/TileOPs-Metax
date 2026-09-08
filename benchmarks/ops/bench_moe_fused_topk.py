@@ -13,15 +13,11 @@ Real model configurations:
 import pytest
 import torch
 
-try:
-    from vllm.model_executor.layers.fused_moe import fused_topk as _vllm_fused_topk
-    from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
-        fused_topk_bias as _vllm_fused_topk_bias,
-    )
-
-    _VLLM_AVAILABLE = True
-except ImportError:
-    _VLLM_AVAILABLE = False
+pytest.importorskip("vllm", reason="vLLM is required for the fused-topk benchmark")
+from vllm.model_executor.layers.fused_moe import fused_topk as _vllm_fused_topk
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    fused_topk_bias as _vllm_fused_topk_bias,
+)
 
 from benchmarks.benchmark_base import ManifestBenchmark, fields, workload_params
 from tileops.manifest import load_workloads
@@ -75,10 +71,6 @@ def test_fused_topk_bench(
     torch.cuda.synchronize()
 
     functors = {"tileops": op}
-
-    if not _VLLM_AVAILABLE:
-        bm.compare(functors, *inputs)
-        return
 
     # Cast bf16->f32 inside the timed call to match TileOPs' input conditions.
     hidden_dummy = torch.empty(num_tokens, 1, device=gating_output.device)

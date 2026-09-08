@@ -20,8 +20,8 @@ from tileops.kernels.attention import (
     GQASlidingWindowVarlenFwdWgmmaPipelinedKernel,
 )
 from tileops.kernels.kernel_base import Kernel
-from tileops.utils import is_maca
 from tileops.perf.profile import tensor_core_roof
+from tileops.utils import is_maca
 
 from ..op_base import Op
 from ..rope import base_freqs

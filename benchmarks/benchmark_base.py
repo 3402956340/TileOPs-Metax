@@ -123,49 +123,6 @@ class BenchmarkBase(Generic[W], ABC):
         return {
             name: value for name, value in vars(self.workload).items() if not name.startswith("_")
         }
-        tags = list(plan)
-        order = tags + tags[::-1]
-        # Split the budget across the two passes rather than spending it twice:
-        # the point is symmetry, not more samples.
-        passes = 2
-
-        def measure() -> tuple[dict[str, list[Sample]], dict[str, dict], set[str]]:
-            samples: dict[str, list[Sample]] = {tag: [] for tag in tags}
-            meta: dict[str, dict] = {}
-            methods = set()
-            for tag in order:
-                functor, args = plan[tag]
-                with torch.no_grad():
-                    samples[tag].extend(
-                        bench_kernel(
-                            functor,
-                            args=args,
-                            dry_run_ms=DRY_RUN_MS / passes,
-                            repeat_ms=REPEAT_MS / passes,
-                            max_iters=_MAX_ITERS // passes,
-                            min_iters=max(1, _MIN_ITERS // passes),
-                        )
-                    )
-                pass_meta = _capture_bench_meta()
-                methods.add(pass_meta["timing"])
-                meta[tag] = pass_meta
-            return samples, meta, methods
-
-        samples, meta, methods = measure()
-        if len(methods) > 1:
-            # A timing backend failed partway through the comparison. Its fallback
-            # is now sticky, so discard the mixed readings and remeasure every tag
-            # with one method; ratios between different methods are meaningless.
-            samples, meta, methods = measure()
-        if len(methods) > 1:
-            raise RuntimeError(
-                f"benchmark timing remained inconsistent after retry: {sorted(methods)}"
-            )
-        results = {tag: self._build_result(samples[tag], meta[tag]) for tag in tags}
-        if record_as is not None:
-            for tag in tags:
-                BenchmarkReport.record(record_as, params or {}, results[tag], tag=tag)
-        return results
 
     def profile(self, functor: Any, *inputs: Any) -> dict:
         """Profile a callable and return its structured result."""
@@ -408,32 +365,40 @@ class OpBenchmark(BenchmarkBase[W]):
         # Split the budget across the two passes rather than spending it twice:
         # the point is symmetry, not more samples.
         passes = 2
-        samples: dict[str, list[Sample]] = {tag: [] for tag in tags}
-        meta: dict[str, dict] = {}
-        for tag in order:
-            functor, args = plan[tag]
-            with torch.no_grad():
-                samples[tag].extend(
-                    bench_kernel(
-                        functor,
-                        args=args,
-                        dry_run_ms=DRY_RUN_MS / passes,
-                        repeat_ms=REPEAT_MS / passes,
-                        max_iters=_MAX_ITERS // passes,
-                        min_iters=max(1, _MIN_ITERS // passes),
-                        count_copies=count_copies,
+
+        def measure() -> tuple[dict[str, list[Sample]], dict[str, dict], set[str]]:
+            samples: dict[str, list[Sample]] = {tag: [] for tag in tags}
+            meta: dict[str, dict] = {}
+            methods: set[str] = set()
+            for tag in order:
+                functor, args = plan[tag]
+                with torch.no_grad():
+                    samples[tag].extend(
+                        bench_kernel(
+                            functor,
+                            args=args,
+                            dry_run_ms=DRY_RUN_MS / passes,
+                            repeat_ms=REPEAT_MS / passes,
+                            max_iters=_MAX_ITERS // passes,
+                            min_iters=max(1, _MIN_ITERS // passes),
+                            count_copies=count_copies,
+                        )
                     )
-                )
-            pass_meta = _capture_bench_meta()
-            previous = meta.get(tag)
-            if previous is not None and previous["timing"] != pass_meta["timing"]:
-                raise RuntimeError(
-                    f"{tag}: the two passes timed with different methods "
-                    f"({previous['timing']} then {pass_meta['timing']}); pooling "
-                    "them would report one median over two kinds of measurement. "
-                    "Only reachable with TILEOPS_ALLOW_CUDA_EVENTS_FALLBACK=1."
-                )
-            meta[tag] = pass_meta
+                pass_meta = _capture_bench_meta()
+                methods.add(pass_meta["timing"])
+                meta[tag] = pass_meta
+            return samples, meta, methods
+
+        samples, meta, methods = measure()
+        if len(methods) > 1:
+            # A timing backend failed partway through the comparison. Its fallback
+            # is now sticky, so discard the mixed readings and remeasure every tag
+            # with one method; ratios between different methods are meaningless.
+            samples, meta, methods = measure()
+        if len(methods) > 1:
+            raise RuntimeError(
+                f"benchmark timing remained inconsistent after retry: {sorted(methods)}"
+            )
         results = {tag: self._build_result(samples[tag], meta[tag]) for tag in tags}
         params = self.case_params()
         for tag in tags:

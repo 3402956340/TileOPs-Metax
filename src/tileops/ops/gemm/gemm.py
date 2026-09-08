@@ -14,8 +14,8 @@ from tileops.kernels.gemm.w4a16 import GROUP_SIZE, GemmW4A16Kernel
 from tileops.kernels.gemm.w4a16_decode import GemmW4A16DecodeKernel
 from tileops.kernels.gemm_maca import GemmMACAKernel
 from tileops.kernels.kernel_base import Kernel
-from tileops.utils import get_sm_version, is_maca
 from tileops.perf.profile import tensor_core_roof
+from tileops.utils import get_sm_version, is_maca
 
 from ..op_base import Op
 
