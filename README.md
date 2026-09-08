@@ -6,10 +6,9 @@
 <p>The spec is the source; kernels are derived from it and judged against it.</p>
 
 <p>
-    <a href="https://github.com/tile-ai/tilelang"><img src="https://img.shields.io/badge/built%20on-TileLang-1E90FF" alt="Built on TileLang"></a>
     <a href="https://tile-ai.github.io/TileOPs.github.io/manifest/"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Ftile-ai%2FTileOPs%2Fstats%2Fmanifest-implemented.json" alt="Spec coverage"></a>
     <a href="https://tile-ai.github.io/TileOPs.github.io/benchmarks/"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Ftile-ai%2FTileOPs%2Fstats%2Fmanifest-benchmark.json" alt="Bench coverage"></a>
-    <a href="https://tile-ai.github.io/TileOPs.github.io/api/"><img src="https://img.shields.io/badge/docs-API%20reference-1E90FF" alt="API reference"></a>
+    <a href="https://github.com/tile-ai/TileFoundry"><img src="https://img.shields.io/github/issues-search/tile-ai/TileOPs?query=is%3Apr%20is%3Amerged%20label%3Afoundry&label=Forged%20by%20TileFoundry&color=0891b2&logo=github" alt="Kernels forged by TileFoundry"></a>
     <!-- <a href="https://pypi.org/project/src/tileops/"><img src="https://img.shields.io/badge/PyPI-tileops-1E90FF" alt="PyPI version"></a> -->
   </p>
 
@@ -27,7 +26,7 @@
 
 ```python
 import torch
-from tileops.ops import GemmFwdOp
+from tileops.gemm import GemmFwdOp
 
 gemm = GemmFwdOp()  # shapes and dtype are inferred at call time
 
@@ -116,6 +115,7 @@ build troubleshooting.
 
 |                                                |                                                  |
 | ---------------------------------------------- | ------------------------------------------------ |
+| [CONTRIBUTING.md](CONTRIBUTING.md)             | Naming, PR shape, what a review checks           |
 | [development.md](docs/development.md)          | Build, test, benchmark, dev image                |
 | [architecture.md](docs/design/architecture.md) | Module map and the agent production loop         |
 | [manifest.md](docs/design/manifest.md)         | The spec format every operator starts from       |

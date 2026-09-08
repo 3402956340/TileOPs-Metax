@@ -1,3 +1,5 @@
+"""Benchmarks for MeanPoolingFwdOp, the chunked sequence mean."""
+
 from typing import List, Optional
 
 import pytest
@@ -8,67 +10,42 @@ from benchmarks.baselines import (
     assert_matches_reference,
     compiled_reference,
 )
-from benchmarks.benchmark_base import BenchmarkBase
-from tileops.ops import MeanPoolingForwardOp
-from workloads.nsa_utils import prepare_chunk_indices
+from benchmarks.benchmark_base import (
+    ManifestBenchmark,
+    fields,
+    workload_params,
+)
+from tileops.manifest import load_workloads
+from tileops.pool import MeanPoolingFwdOp
 from workloads.pool import MeanPoolingWorkload
 
-
-class MeanPoolingBenchmark(BenchmarkBase[MeanPoolingWorkload]):
-    def calculate_flops(self) -> Optional[float]:
-        t = self.workload
-        # Mean pooling: sum chunk_size elements + divide, per output element
-        return t.batch_size * t.chunks_per_batch * t.heads * t.dim * t.chunk_size
-
-    def calculate_memory(self) -> Optional[float]:
-        t = self.workload
-        # Read input + write output
-        input_bytes = t.batch_size * t.seq_len * t.heads * t.dim * t.dtype.itemsize
-        output_bytes = t.batch_size * t.chunks_per_batch * t.heads * t.dim * t.dtype.itemsize
-        return input_bytes + output_bytes
+# Autotuning is a bench-run policy; manifest workloads do not carry it.
+_TUNE = True
 
 
-_MEAN_POOLING_BENCH_PARAMS = [
-    pytest.param(
-        1, 8192, 64, 128, 64, torch.float16, torch.float32, True, None, id="dense-mainstream"
+_MEAN_POOLING_PARAMS = workload_params(
+    load_workloads(MeanPoolingFwdOp),
+    fields(
+        "batch",
+        "seq_len",
+        "heads",
+        "dim",
+        "chunk_size",
+        "accum_dtype",
+        "seq_lens",
+        dtype_last=True,
     ),
-    pytest.param(
-        2, 2048, 64, 128, 64, torch.float16, torch.float32, True, None, id="dense-batched"
-    ),
-    pytest.param(
-        1,
-        8192,
-        64,
-        128,
-        64,
-        torch.float16,
-        torch.float32,
-        True,
-        [0, 2048, 4096, 6144, 8192],
-        id="varlen-long",
-    ),
-    pytest.param(
-        1,
-        1000,
-        64,
-        128,
-        32,
-        torch.float16,
-        torch.float32,
-        True,
-        [0, 100, 300, 600, 1000],
-        id="varlen-tail",
-    ),
-]
+    smoke_first=True,
+)
 
 
 def _torch_view_mean(test: MeanPoolingWorkload):
     """The same mean over a reshaped view, or None where the chunks are ragged.
 
-    ``ref_program`` averages one slice per chunk, a launch each. Where every chunk is
-    full the chunk axis is a reshape away and the pooling is a single reduction.
+    ``ref_program`` averages one slice per chunk, a launch each. Where every chunk is full
+    the chunk axis is a reshape away and the pooling is a single reduction.
     """
-    if test.use_offsets != 0 or test.seq_len % test.chunk_size:
+    if test.seq_lens is not None or test.seq_len % test.chunk_size:
         return None
 
     chunks = test.seq_len // test.chunk_size
@@ -81,74 +58,33 @@ def _torch_view_mean(test: MeanPoolingWorkload):
 
 
 @pytest.mark.parametrize(
-    "batch_size, seq_len, heads, dim, chunk_size, dtype, accum_dtype, tune, offsets",
-    _MEAN_POOLING_BENCH_PARAMS,
+    "batch, seq_len, heads, dim, chunk_size, accum_dtype, seq_lens, dtype",
+    _MEAN_POOLING_PARAMS,
 )
 def test_mean_pooling_bench(
-    batch_size: int,
+    batch: int,
     seq_len: int,
     heads: int,
     dim: int,
     chunk_size: int,
-    dtype: torch.dtype,
     accum_dtype: torch.dtype,
-    tune: bool,
-    offsets: Optional[List[int]],
+    seq_lens: Optional[List[int]],
+    dtype: torch.dtype,
 ) -> None:
-    if offsets is not None:
-        assert batch_size == 1
-        assert offsets[-1] == seq_len
-        offset_tensor = torch.tensor(offsets, dtype=torch.int32, device="cuda")
-        indices = prepare_chunk_indices(offset_tensor, chunk_size)
-        chunks_per_batch = indices.shape[0]
-        seq_num = offset_tensor.shape[0] - 1
-        use_offsets = 1
-    else:
-        offset_tensor = torch.arange(
-            0,
-            (batch_size + 1) * seq_len,
-            seq_len,
-            dtype=torch.int32,
-            device="cuda",
-            requires_grad=False,
-        )
-        chunks_per_batch = (seq_len + chunk_size - 1) // chunk_size
-        indices = torch.empty((chunks_per_batch, 2), dtype=torch.int32, device="cuda")
-        seq_num = batch_size
-        use_offsets = 0
-
-    params = {
-        "batch_size": batch_size,
-        "seq_len": seq_len,
-        "heads": heads,
-        "dim": dim,
-        "chunk_size": chunk_size,
-        "chunks_per_batch": chunks_per_batch,
-        "seq_num": seq_num,
-        "use_offsets": use_offsets,
-        "accum_dtype": accum_dtype,
-        "tune": tune,
-    }
-
     test = MeanPoolingWorkload(
-        batch_size=batch_size,
+        batch=batch,
         seq_len=seq_len,
         heads=heads,
         dim=dim,
         chunk_size=chunk_size,
-        chunks_per_batch=chunks_per_batch,
-        seq_num=seq_num,
-        use_offsets=use_offsets,
         dtype=dtype,
         accum_dtype=accum_dtype,
-        offsets=offset_tensor,
-        indices=indices,
+        seq_lens=seq_lens,
     )
+    op = MeanPoolingFwdOp(chunk_size=chunk_size, accum_dtype=accum_dtype, tune=_TUNE)
 
-    bm = MeanPoolingBenchmark(test)
     inputs = test.gen_inputs()
-
-    op = MeanPoolingForwardOp(**params)
+    bm = ManifestBenchmark(op, test)
 
     functors = {
         "tileops": op,
@@ -160,4 +96,4 @@ def test_mean_pooling_bench(
         assert_matches_reference(view_mean, test.ref_program, *inputs)
         functors["torch-view-mean"] = view_mean
 
-    bm.compare(functors, *inputs, record_as=op, params=locals())
+    bm.compare(functors, *inputs)

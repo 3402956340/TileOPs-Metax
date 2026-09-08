@@ -434,7 +434,7 @@ are defined in [roofline.md](roofline.md).
 
 #### kernel_map
 
-Op→Kernel dispatch registration table. Declares which Kernels an Op uses so agents know what to implement. Does not describe dispatch strategy (runtime concern). Format: `dispatch_key: KernelClassName`. See [ops-design-reference.md § S14 `default_kernel_map`](../../.claude/skills/scaffold-op/slot-rules.md#slot-s14).
+Op→Kernel dispatch registration table. Declares which Kernels an Op uses so agents know what to implement. Does not describe dispatch strategy (runtime concern). Format: `dispatch_key: KernelClassName`. See [op-slot-rules.md § Slot S14 `default_kernel_map`](op-slot-rules.md#slot-s14).
 
 ```yaml
 # Single-kernel op
@@ -585,15 +585,17 @@ workloads:
 
 [`scripts/validate_manifest.py`](../../scripts/validate_manifest.py) runs five levels:
 
-| Level | Check     | Description                                                                                                                 |
-| ----- | --------- | --------------------------------------------------------------------------------------------------------------------------- |
-| L0    | Schema    | Required fields exist, correct types                                                                                        |
-| L1    | Signature | Params ⊆ `__init__()` ∪ `forward()` names; `forward()` order matches                                                        |
-| L2    | Shape     | `shape_rules` are valid Python expressions                                                                                  |
-| L3    | Dtype     | dtype strings are valid torch types, `same_as()` refs, or `promote_int_to_float()` refs                                     |
-| L4    | Benchmark | Bench file imports/calls `load_workloads` and `eval_roofline` (directly or via `workloads_to_params` / `ManifestBenchmark`) |
+| Level | Check     | Description                                                                                                                                                                                                                                                                  |
+| ----- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| L0    | Schema    | Required fields exist, correct types                                                                                                                                                                                                                                         |
+| L1    | Signature | Params ⊆ `__init__()` ∪ `forward()` names; `forward()` order matches                                                                                                                                                                                                         |
+| L2    | Shape     | `shape_rules` are valid Python expressions                                                                                                                                                                                                                                   |
+| L3    | Dtype     | dtype strings are valid torch types, `same_as()` refs, or `promote_int_to_float()` refs                                                                                                                                                                                      |
+| L4    | Benchmark | Bench file calls `load_workloads` / `workloads_to_params` and takes its roofline off an Op — `eval_roofline()` or a `ManifestBenchmark`. It matches no op name: which entry a file benchmarks is settled by a run, see [trust-model.md §Benchmark](trust-model.md#benchmark) |
 
 `spec-only` ops → L0 only. `implemented` ops → all levels. `--check-op <name>` forces L0-L4 on the targeted entry. L2 and L3 additionally run parity extensions against the implemented Op's `_infer_output_shapes` / `_validate_dtypes` methods; see [ops-design.md](ops-design.md).
+
+Those parity extensions block only under `--strict`, which is how CI runs the validator. A default run reports them as warnings and says so — its first lines name the `parity-mode:` in force, so a green default run is not the same claim as a green CI run.
 
 ```bash
 python scripts/validate_manifest.py

@@ -3,7 +3,6 @@
 Covers:
   - Qwen3 config: softmax, renormalize=False/True
   - Kimi K2 config: sigmoid, correction_bias, routed_scaling_factor=2.827
-  - expert_map local filtering (EP simulation without All-to-All)
   - vLLM correctness (optional, skipped when vLLM is not installed)
   - correction_bias routing precision (weights from original sigmoid, not biased)
 """
@@ -206,7 +205,7 @@ def test_fused_moe_qwen3(
     assert out_nopad.dtype == dtype
 
     # Reference using the same FusedTopKOp routing
-    fk = FusedTopKOp(num_tokens, num_experts, top_k, scoring_func, renormalize)
+    fk = FusedTopKOp(top_k, scoring_func, renormalize)
     topk_weights, topk_ids = fk(gating)
     ref = _ref_moe_ffn(hidden, w_gate_up, w_down, topk_weights, topk_ids.long())
 
@@ -277,7 +276,7 @@ def test_fused_moe_deterministic(case):
         scoring_func="softmax",
         renormalize=False,
     )
-    fk = FusedTopKOp(nt, ne, tk, "softmax", False)
+    fk = FusedTopKOp(tk, "softmax", False)
     topk_weights, topk_ids = fk(gating)
     ref = _ref_moe_ffn(hidden, w_gate_up, w_down, topk_weights, topk_ids.long())
 
@@ -429,79 +428,13 @@ def test_fused_moe_kimi(
     assert out_nopad.dtype == dtype
 
     # Reference using FusedTopKOp for consistent routing
-    fk = FusedTopKOp(num_tokens, num_experts, top_k, "sigmoid", True)
+    fk = FusedTopKOp(top_k, "sigmoid", True)
     topk_weights, topk_ids = fk(gating, correction_bias)
     ref = _ref_moe_ffn(hidden, w_gate_up, w_down, topk_weights, topk_ids.long())
     if routed_scaling_factor != 1.0:
         ref = ref * routed_scaling_factor
 
     torch.testing.assert_close(out_nopad.float(), ref.float(), rtol=1e-2, atol=1e-2)
-
-
-# expert_map local filtering test (EP simulation without All-to-All)
-
-
-@pytest.mark.smoke
-def test_expert_map_local_filter() -> None:
-    """Simulate EP=2 on a single GPU: each rank owns half the experts.
-
-    Verification: sum of outputs from rank-0 and rank-1 (with their disjoint
-    expert_maps) equals the output without expert_map.
-    """
-    torch.manual_seed(42)
-    dev = "cuda"
-    T, E, K, H, F = 32, 8, 2, 64, 32
-    dtype = torch.bfloat16
-
-    hidden = torch.randn(T, H, dtype=dtype, device=dev)
-    gating = torch.randn(T, E, dtype=dtype, device=dev)
-    w_gate_up = torch.randn(E, F * 2, H, dtype=dtype, device=dev) * 0.02
-    w_down = torch.randn(E, H, F, dtype=dtype, device=dev) * 0.02
-
-    # Rank 0 owns experts 0..3, rank 1 owns experts 4..7
-    expert_map_rank0 = torch.full((E,), -1, dtype=torch.int32, device=dev)
-    expert_map_rank0[: E // 2] = torch.arange(E // 2, dtype=torch.int32, device=dev)
-
-    expert_map_rank1 = torch.full((E,), -1, dtype=torch.int32, device=dev)
-    expert_map_rank1[E // 2 :] = torch.arange(E // 2, dtype=torch.int32, device=dev)
-
-    # Full output (no expert_map)
-    op_full = FusedMoeFwdOp(
-        num_tokens=T,
-        num_experts=E,
-        top_k=K,
-        hidden_size=H,
-        ffn_size=F,
-    )
-    out_full = op_full(hidden, gating, w_gate_up, w_down)
-
-    # Rank-0 partial output (local experts 0..3)
-    op_r0 = FusedMoeFwdOp(
-        num_tokens=T,
-        num_experts=E,
-        top_k=K,
-        hidden_size=H,
-        ffn_size=F,
-        expert_map=expert_map_rank0,
-        num_experts_local=E // 2,
-    )
-    out_r0 = op_r0(hidden, gating, w_gate_up[: E // 2], w_down[: E // 2])
-
-    # Rank-1 partial output (local experts 4..7)
-    op_r1 = FusedMoeFwdOp(
-        num_tokens=T,
-        num_experts=E,
-        top_k=K,
-        hidden_size=H,
-        ffn_size=F,
-        expert_map=expert_map_rank1,
-        num_experts_local=E // 2,
-    )
-    out_r1 = op_r1(hidden, gating, w_gate_up[E // 2 :], w_down[E // 2 :])
-
-    # Sum of partial outputs should match full output
-    out_sum = (out_r0.float() + out_r1.float()).to(dtype)
-    torch.testing.assert_close(out_sum.float(), out_full.float(), rtol=1e-2, atol=1e-2)
 
 
 # correction_bias routing precision
@@ -524,13 +457,7 @@ def test_correction_bias_routing_precision() -> None:
 
     ref_weights, ref_ids = _ref_kimi_routing(logits, bias, K)
 
-    op = FusedTopKOp(
-        num_tokens=T,
-        num_experts=E,
-        top_k=K,
-        scoring_func="sigmoid",
-        renormalize=True,
-    )
+    op = FusedTopKOp(top_k=K, scoring_func="sigmoid", renormalize=True)
     tw, ti = op(logits, bias)
 
     ref_ids_sorted = ref_ids.sort(dim=-1).values
@@ -619,7 +546,7 @@ def test_fused_moe_vs_vllm(
     w_gate_up = torch.randn(num_experts, ffn_size * 2, hidden_size, dtype=dtype, device=dev) * 0.02
     w_down = torch.randn(num_experts, hidden_size, ffn_size, dtype=dtype, device=dev) * 0.02
 
-    fk = FusedTopKOp(num_tokens, num_experts, top_k, "sigmoid", True)
+    fk = FusedTopKOp(top_k, "sigmoid", True)
     topk_weights, topk_ids = fk(gating, correction_bias)
 
     op = FusedMoeFwdOp(

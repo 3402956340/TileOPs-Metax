@@ -17,11 +17,8 @@ from tileops.manifest import load_workloads
 from tileops.ops import DeepSeekSparseAttentionDecodeWithKVCacheFwdOp
 from workloads.attention.deepseek import DsaDecodeWorkload
 
-_OP_NAME = "DeepSeekSparseAttentionDecodeWithKVCacheFwdOp"
-
-
 _DSA_DECODE_BENCH_PARAMS = workload_params(
-    load_workloads(_OP_NAME),
+    load_workloads(DeepSeekSparseAttentionDecodeWithKVCacheFwdOp),
     then_dtype(
         dsa_decode_args,
         tune=False,
@@ -132,7 +129,7 @@ def test_dsa_decode_bench(
         sm_scale=sm_scale,
         tune=tune,
     )
-    bm = ManifestBenchmark(_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
 
     baselines = {}
     sdpa_fn = _torch_sdpa_dsa(test)
@@ -152,6 +149,4 @@ def test_dsa_decode_bench(
             **baselines,
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )

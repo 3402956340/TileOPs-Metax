@@ -155,7 +155,6 @@ def _fp8_lightning_indexer_kernel(
                             logits[bn_i, bq_i, g]
                         )
 
-        # Return the kernel function handle
         return _fp8_lightning_indexer_main
 
     return _fp8_lightning_indexer_func

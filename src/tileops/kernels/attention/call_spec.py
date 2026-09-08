@@ -17,7 +17,6 @@ __all__ = [
     "ATTENTION_DTYPES",
     "WS_ARCH",
     "AttentionCall",
-    "causal_ws_prefill_region",
     "decode_bs1_region",
     "dense_prefill_region",
     "fp8_dtype",
@@ -30,9 +29,9 @@ ATTENTION_DTYPES = (torch.float16, torch.bfloat16)
 
 _WS_BLOCK_M = 128
 _H200_SMS = 132
-#: Architecture the warp-specialized prefill kernels are written for. The
-#: classes declare it as their ``supported_archs`` and the region below reads
-#: the same name, so the two statements of one fact cannot drift apart.
+# Architecture the warp-specialized prefill kernels are written for. The
+# classes declare it as their ``supported_archs`` and the region below reads
+# the same name, so the two statements of one fact cannot drift apart.
 WS_ARCH = 90
 
 
@@ -123,27 +122,12 @@ def square_ws_prefill_region(call: AttentionCall) -> bool:
     return work_items >= _H200_SMS
 
 
-def causal_ws_prefill_region(call: AttentionCall) -> bool:
-    """The warp-specialized causal packed-prefill region: head dim 128, 16-bit.
-
-    Owned by ``GQAPrefillFwdWsPersistentCausalKernel``. Architecture is not part
-    of it: ``Kernel.refusal`` settles ``supported_archs`` before it asks
-    ``applies``, so a region never repeats what the class already declares.
-    """
-    return (
-        dense_prefill_region(call)
-        and call.is_causal
-        and call.dim == 128
-        and call.dtype in ATTENTION_DTYPES
-    )
-
-
-#: Tile heights the warp-specialized paged decode kernel can pick from. A tile
-#: divides the page size, so one tile never straddles two pages, and it splits
-#: evenly across the four consumer warps.
+# Tile heights the warp-specialized paged decode kernel can pick from. A tile
+# divides the page size, so one tile never straddles two pages, and it splits
+# evenly across the four consumer warps.
 _WS_DECODE_TILES = (16, 32, 64, 128)
-#: Head dims that map onto one warp: the score reduction is a shuffle chain over
-#: 32 lanes, so a lane owns ``dim / 32`` elements of the head vector.
+# Head dims that map onto one warp: the score reduction is a shuffle chain over
+# 32 lanes, so a lane owns ``dim / 32`` elements of the head vector.
 _WS_DECODE_LANES = 32
 
 

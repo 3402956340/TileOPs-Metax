@@ -11,6 +11,7 @@ import torch
 
 from tileops.kernels.gemm.bmm import BmmFp8Kernel, BmmFp8MACAKernel, BmmKernel
 from tileops.kernels.kernel_base import Kernel
+from tileops.perf.profile import tensor_core_roof
 from tileops.utils import is_maca
 
 from ..op_base import Op
@@ -166,6 +167,10 @@ class BmmFwdOp(Op):
 
         return self._active_kernel(a, b)
 
+    def compute_roof(self) -> str:
+        """FLOPs are matmul contractions; priced on tensor cores."""
+        return tensor_core_roof(self.dtype)
+
 
 class BmmFp8KNFwdOp(Op):
     """Batched FP8 GEMM over ``b`` in $[B \\times K \\times N]$: ``d[i] = (a[i] @ b[i]) * scale_a * scale_b``.
@@ -176,7 +181,7 @@ class BmmFp8KNFwdOp(Op):
 
     """
 
-    #: Whether ``b`` arrives with K innermost, which is what the kernel wants.
+    # Whether ``b`` arrives with K innermost, which is what the kernel wants.
     B_IS_NK: ClassVar[bool] = False
 
     def __init__(
@@ -203,9 +208,8 @@ class BmmFp8KNFwdOp(Op):
         self.dispatch_kernel(kernel_map)
         self._active_sig: Optional[tuple] = None
         self._active: Optional[Kernel] = None
-        # Shape-signatures for which we've already emitted the "slow path"
-        # warning; keeps a single BmmFp8KNFwdOp from spamming the log on every
-        # forward when a caller consistently passes b in [B,K,N] layout.
+        # Shape-signatures whose "slow path" warning has already been emitted, so a
+        # single BmmFp8KNFwdOp warns once per shape rather than on every forward.
         self._kn_warned: Set[Tuple[int, int, int, int]] = set()
         self.batch: Optional[int] = None
         self.m: Optional[int] = None
@@ -407,6 +411,10 @@ class BmmFp8KNFwdOp(Op):
         scale_a = scale_a.reshape(1)
         scale_b = scale_b.reshape(1)
         return self._active(a, b, scale_a, scale_b)
+
+    def compute_roof(self) -> str:
+        """FLOPs are matmul contractions; priced on tensor cores."""
+        return tensor_core_roof(self.dtype)
 
 
 class BmmFp8NKFwdOp(BmmFp8KNFwdOp):

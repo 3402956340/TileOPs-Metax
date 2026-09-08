@@ -11,8 +11,6 @@ from tests.test_base import FixtureBase, TestBase
 from tileops.ops.elementwise import EqFwdOp, GeFwdOp, GtFwdOp, LeFwdOp, LtFwdOp, NeFwdOp
 from workloads.elementwise import RandnPairWorkload
 
-# Shared helpers
-
 
 def _bool_compare(output: torch.Tensor, output_ref: torch.Tensor) -> None:
     """Exact comparison for boolean outputs."""
@@ -31,9 +29,6 @@ class ComparisonTest(RandnPairWorkload, TestBase):
 
     def ref_program(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         return self.ref_fn(a, b)
-
-
-# Eq op
 
 
 class EqFixture(FixtureBase):
@@ -56,9 +51,6 @@ def test_eq_op(n_total: int, dtype: torch.dtype) -> None:
     test.check(op, *test.gen_inputs(), compare=_bool_compare)
 
 
-# Ne op
-
-
 class NeFixture(FixtureBase):
     PARAMS = [
         (
@@ -77,9 +69,6 @@ def test_ne_op(n_total: int, dtype: torch.dtype) -> None:
     test = ComparisonTest(n_total, dtype, torch.ne)
     op = NeFwdOp()
     test.check(op, *test.gen_inputs(), compare=_bool_compare)
-
-
-# Gt op
 
 
 class GtFixture(FixtureBase):
@@ -102,9 +91,6 @@ def test_gt_op(n_total: int, dtype: torch.dtype) -> None:
     test.check(op, *test.gen_inputs(), compare=_bool_compare)
 
 
-# Lt op
-
-
 class LtFixture(FixtureBase):
     PARAMS = [
         (
@@ -125,9 +111,6 @@ def test_lt_op(n_total: int, dtype: torch.dtype) -> None:
     test.check(op, *test.gen_inputs(), compare=_bool_compare)
 
 
-# Ge op
-
-
 class GeFixture(FixtureBase):
     PARAMS = [
         (
@@ -146,9 +129,6 @@ def test_ge_op(n_total: int, dtype: torch.dtype) -> None:
     test = ComparisonTest(n_total, dtype, torch.ge)
     op = GeFwdOp()
     test.check(op, *test.gen_inputs(), compare=_bool_compare)
-
-
-# Le op
 
 
 class LeFixture(FixtureBase):
@@ -392,3 +372,45 @@ def test_comparison_rejects_unsupported_dtype(
     x = torch.zeros(shape, device="cuda", dtype=dtype)
     with pytest.raises(ValueError, match="has dtype|does not support dtype"):
         op(x, x)
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("strategy", ["explicit_parallel", "direct"])
+def test_comparison_bool_result_per_strategy(strategy: str) -> None:
+    """Every strategy returns the same bool tensor, whatever it stores underneath.
+
+    Every strategy but ``direct`` now writes an int8 buffer the op views back as
+    bool; only ``register_copy`` used to.
+    """
+    from tileops.kernels.elementwise import GtFwdKernel
+
+    shape = (4096,)
+    a = torch.randn(shape, device="cuda", dtype=torch.float16)
+    b = torch.randn(shape, device="cuda", dtype=torch.float16)
+    out = GtFwdKernel(shape, shape, torch.float16, config={"strategy": strategy}).forward(a, b)
+    assert out.dtype == torch.bool
+    assert torch.equal(out, torch.gt(a, b))
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_comparison_nan_ordering(dtype: torch.dtype) -> None:
+    """``ne`` is the one comparison IEEE 754 reads as true against a NaN.
+
+    ``<``, ``<=``, ``>``, ``>=`` and ``==`` are ordered and answer false when
+    either operand is NaN; ``!=`` is unordered and answers true, NaN against
+    itself included. CUDA's half comparison intrinsics are all ordered, so the
+    half formats are where the two can disagree.
+    """
+    nan = float("nan")
+    a = torch.tensor([nan, nan, 1.0, 1.0, 2.0], device="cuda", dtype=dtype)
+    b = torch.tensor([nan, 1.0, nan, 1.0, 3.0], device="cuda", dtype=dtype)
+    for op_cls, ref_fn in (
+        (EqFwdOp, torch.eq),
+        (NeFwdOp, torch.ne),
+        (LtFwdOp, torch.lt),
+        (LeFwdOp, torch.le),
+        (GtFwdOp, torch.gt),
+        (GeFwdOp, torch.ge),
+    ):
+        assert torch.equal(op_cls()(a, b), ref_fn(a, b)), op_cls.__name__

@@ -23,8 +23,6 @@ _TUNE = False
 _CONFIG = None
 
 
-_FP8_LIGHTNING_INDEXER_OP = "FP8LightningIndexerFwdOp"
-
 _SHAPE_KEYS = (
     "batch",
     "seq_len",
@@ -56,7 +54,7 @@ def _one_row_per_shape(workloads: list[dict]) -> list[dict]:
 @pytest.mark.parametrize(
     "batch, seq_len, heads, index_dim, seq_len_kv, kv_group, clean_logits",
     workload_params(
-        _one_row_per_shape(load_workloads(_FP8_LIGHTNING_INDEXER_OP)),
+        _one_row_per_shape(load_workloads(FP8LightningIndexerFwdOp)),
         fields(*_SHAPE_KEYS),
         smoke_first=True,
     ),
@@ -76,7 +74,7 @@ def test_fp8_lightning_indexer_bench(
     inputs = test.gen_inputs()
 
     op = FP8LightningIndexerFwdOp(clean_logits=clean_logits, config=_CONFIG, tune=_TUNE)
-    bm = ManifestBenchmark(_FP8_LIGHTNING_INDEXER_OP, op, test)
+    bm = ManifestBenchmark(op, test)
 
     bm.compare(
         {
@@ -85,6 +83,4 @@ def test_fp8_lightning_indexer_bench(
             TORCH_COMPILE_TAG: compiled_reference(test.ref_program),
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )

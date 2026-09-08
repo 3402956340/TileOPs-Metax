@@ -15,8 +15,8 @@ from tilelang.profiler import do_bench
 
 from tileops.kernels.kernel_base import Kernel
 
-from .gla_bwd import LOG2_E
 from .gla_fwd import _gla_precompute_g_kernel
+from .gla_fwd_maca import LOG2_E
 
 __all__ = ["GLABwdMACAKernel"]
 

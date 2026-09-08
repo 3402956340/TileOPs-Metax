@@ -4,8 +4,6 @@ permissions: read-all
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 18 * * *"
 
 concurrency:
   group: nightly-${{ github.ref }}
@@ -37,6 +35,9 @@ jobs:
   # =========================================================================
   benchmark:
     if: ${{ github.repository == 'MetaX-MACA/TileOPs-Metax' && (github.event_name == 'schedule' || github.ref == 'refs/heads/dev') }}
+    # Sized for a cold cache: the full sweep takes hours with nothing cached and
+    # minutes once it is. Must exceed --total-budget below so the runner, not
+    # GitHub, ends the sweep.
     timeout-minutes: 380
     runs-on: tileops-metax-runner
     env:
@@ -179,6 +180,20 @@ jobs:
           fi
         shell: bash
 
+      - name: Check benchmark coverage
+        id: bench_coverage
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="${GITHUB_WORKSPACE}${PYTHONPATH:+:$PYTHONPATH}"
+          # Which op each bench file measured is read off the run's own report:
+          # a benchmark that passes without benchmarking the op its manifest
+          # entry declares is a coverage gap no static check can see.
+          python3 scripts/check_bench_coverage.py \
+            --bench-xml bench_results.xml \
+            --output bench_coverage.md
+        shell: bash
+
       - name: Record the run environment
         if: ${{ always() }}
         run: |
@@ -196,13 +211,16 @@ jobs:
           path: |
             tileops_benchmarks.log
             bench_results.xml
+            bench_coverage.md
             env.json
             bench_stack_dumps/
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Fail benchmark job if pytest failed
-        if: ${{ always() && steps.benchmark_tests.outcome == 'failure' }}
+      - name: Fail benchmark job if pytest or the coverage check failed
+        if: >-
+          ${{ always() && (steps.benchmark_tests.outcome == 'failure'
+          || steps.bench_coverage.outcome == 'failure') }}
         run: exit 1
         shell: bash
 
@@ -388,8 +406,9 @@ jobs:
     if: ${{ always() && github.repository == 'tile-ai/TileOPs' && (github.event_name == 'schedule' || github.ref == 'refs/heads/main') }}
     needs: [op_test]
     runs-on: ubuntu-latest
+    # The data goes elsewhere now, under a token of its own.
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -440,15 +459,24 @@ jobs:
           echo "ok=${ok}" >> "$GITHUB_OUTPUT"
         shell: bash
 
-      - name: Publish to nightly-bench branch
+      # One commit per run, kept. On a branch of this repository the history
+      # would cost 314 KB a night packed — 112 MB a year against a 9 MB
+      # repository that everyone clones.
+      - name: Publish the snapshot to TileOPs-nightly
         if: ${{ steps.assemble.outputs.ok == '1' }}
         uses: peaceiris/actions-gh-pages@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_branch: nightly-bench
+          # GITHUB_TOKEN cannot reach another repository.
+          personal_token: ${{ secrets.BENCH_ARCHIVE_TOKEN }}
+          external_repository: tile-ai/TileOPs-nightly
+          # Not main: that branch is the repository's own. Everything not in
+          # _publish is deleted here, so a stale test_results.xml cannot pass
+          # for tonight's.
+          publish_branch: snapshots
           publish_dir: _publish
-          force_orphan: true
-          commit_message: "chore(bench): nightly benchmark data from ${{ github.sha }}"
+          # The action writes .nojekyll otherwise, which means nothing here.
+          disable_nojekyll: true
+          full_commit_message: "bench: ${{ github.sha }} (run ${{ github.run_id }})"
           user_name: "github-actions[bot]"
           user_email: "41898282+github-actions[bot]@users.noreply.github.com"
 

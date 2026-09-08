@@ -1,8 +1,8 @@
 """Shared reduction primitives for reduction kernels.
 
-Provides reusable utility functions, constants, and T.macro factories
-used across all reduction sub-category kernels (sum, max, softmax,
-variance, prefix-scan, etc.), plus the row layout every one of them wants.
+Launch planning, shared-memory arithmetic and the row layout the reduction
+kernels build on, plus the engine that reduces an ``(A, B)`` buffer down its
+rows.
 
 A reduction kernel reduces the trailing axis of a 2-D ``(M, N)`` buffer, while an op
 declares an arbitrary-rank tensor and the axes to reduce; the permute and flatten between
@@ -12,63 +12,90 @@ reduction runs over — which forms an empty ``dim`` takes, and which ranks it m
 the op's contract rather than a kernel's.
 """
 
+import functools
 import itertools
+from dataclasses import dataclass
 from math import prod
 
+import tilelang
 import tilelang.language as T
 import torch
 
-from tileops.kernels.tiling import align_up
+from tileops.kernels.constants import SHARED_BANK_SPAN_BYTES, VECTOR_ACCESS_BYTES
+from tileops.kernels.tiling import ALIGNMENT, align_up
+from tileops.utils import device_busy_of
 
 __all__ = [
     "AUTOTUNE_THREADS",
     "DEFAULT_ALIGNMENT",
     "DEFAULT_THREADS",
+    "FP32_EXACT_INT_LIMIT",
+    "FRAGMENT_ELEMS_PER_THREAD",
     "MAX_SINGLE_TILE_COLS",
+    "SHARED_BANK_SPAN_BYTES",
     "SHARED_MEMORY_BUDGET_BYTES",
     "VECTOR_ACCESS_BYTES",
     "BlockConfigPlanner",
     "RowTiledAutotuneMixin",
     "align_up",
+    "ceildiv_int",
     "compute_tile_n",
     "device_smem_budget",
-    "make_cumulative_scan",
-    "make_reduce_epilogue",
-    "make_softmax_epilogue",
-    "make_welford_update",
-    "reduce_column_alignment",
+    "edge_axis_plan",
+    "edge_axis_split",
+    "identity_for",
+    "reduce_down_rows",
     "restore_reduced",
     "restore_same_shape",
     "rows_for_axes",
+    "torch_dtype_nbytes",
     "tune_by_forward",
 ]
 
 # 256-element alignment (512 bytes for fp16/bf16) required by T.copy()
 # shared memory instructions.  Sub-categories may override this default.
-DEFAULT_ALIGNMENT: int = 256
+DEFAULT_ALIGNMENT: int = ALIGNMENT
 
-# Maximum column count for a single fragment/shared-memory tile.
-# TileLang's vectorizer fails when the *column dimension* of a
-# fragment or shared buffer reaches 32768 (a LLVM scalable-vector
-# boundary).  Empirical testing on H200 (SM90) confirms that
-# 32512 columns compile and execute correctly, while 32768 triggers
-# the "scalable vector" error.  We use 32512 (= 32768 - 256) as the
-# safe upper bound.
-MAX_SINGLE_TILE_COLS: int = 32512
+# Widest single fragment/shared-memory tile the reduction kernels plan; shared memory
+# and the register file are checked separately.
+MAX_SINGLE_TILE_COLS: int = 32768
 
 # Default shared memory budget per SM (48 KiB) used to compute the maximum
 # block_m that fits within a single thread block's shared memory allocation.
 SHARED_MEMORY_BUDGET_BYTES: int = 48 * 1024
 
-# Width of the vectorized ``ld/st`` TileLang plans for a tile buffer on the
-# architectures the reduction kernels declare (SM80-SM90): 128 bits.
-VECTOR_ACCESS_BYTES: int = 16
 
 # Thread counts offered by the reduction autotune candidate lists.
-AUTOTUNE_THREADS: tuple[int, ...] = (128, 256)
+AUTOTUNE_THREADS: tuple[int, ...] = (128, 256, 512)
 
 # Thread count used when no candidate sweep runs.
-DEFAULT_THREADS: int = 128
+DEFAULT_THREADS: int = 256
+
+# Tile elements one thread may hold across its live fragments before ptxas spills.
+FRAGMENT_ELEMS_PER_THREAD: int = 64
+
+
+def ceildiv_int(x: int, y: int) -> int:
+    """Return ``ceil(x / y)`` for positive integer dimensions."""
+    return -(-x // y)
+
+
+def identity_for(op_kind: str) -> float:
+    """The value a masked lane contributes, leaving the reduction unchanged."""
+    if op_kind in ("prod", "all"):
+        return 1.0
+    if op_kind == "amin":
+        return float("inf")
+    if op_kind == "amax":
+        return float("-inf")
+    return 0.0
+
+
+def torch_dtype_nbytes(dtype: torch.dtype | str) -> int:
+    """Return element size for a torch dtype object or dtype-name string."""
+    if isinstance(dtype, str):
+        dtype = getattr(torch, dtype)
+    return torch.empty(0, dtype=dtype).element_size()
 
 
 def reduce_column_alignment(elem_bytes: int, threads: int) -> int:
@@ -84,14 +111,20 @@ def reduce_column_alignment(elem_bytes: int, threads: int) -> int:
 class BlockConfigPlanner:
     """Derives ``block_m`` / ``threads`` / ``tile_n`` for a row-wise reduction.
 
-    Every reduction kernel that maps one row per ``block_m`` slot makes the same
-    three decisions -- whether a row fits in shared memory, which config to run
-    untuned, and which candidates to offer the autotuner.  Derived here once so
-    the kernels cannot answer them differently.
+    Answers three questions for a kernel that maps one row per ``block_m`` slot:
+    whether a row fits in shared memory, which config to run untuned, and which
+    candidates to offer the autotuner.
+
+    ``autotune_configs`` here serves the ``tune_by_forward`` sweeps. A kernel
+    baking ``tile_n`` into the PrimFunc sweeps `RowTiledAutotuneMixin`'s list
+    instead, which differs at every width.
 
     Args:
         num_buffers: ``(block_m, tile_n)`` shared buffers alive at once.
             Welford's two-pass kernels allocate 2.
+        frag_slots: ``(block_m, tile_n)`` fragments the kernel keeps alive at once.
+            Registers, not shared memory: a tile that fits in shared memory can still
+            spill.
     """
 
     _BLOCK_MS = (1, 2, 4, 8)
@@ -104,11 +137,13 @@ class BlockConfigPlanner:
         elem_bytes: int,
         smem_budget: int,
         num_buffers: int = 1,
+        frag_slots: int = 1,
     ):
         self.N_padded = N_padded
         self.elem_bytes = elem_bytes
         self.smem_budget = smem_budget
         self.num_buffers = num_buffers
+        self.frag_slots = frag_slots
 
     @property
     def _row_bytes(self) -> int:
@@ -119,20 +154,38 @@ class BlockConfigPlanner:
         """
         return self.N_padded * self.elem_bytes
 
+    def frag_elems(self, block_m: int, cols: int, threads: int) -> int:
+        """Tile elements one thread holds across every live fragment."""
+        return ceildiv_int(block_m * cols, threads) * self.frag_slots
+
+    def frag_fits(self, block_m: int, cols: int, threads: int) -> bool:
+        """Whether a ``(block_m, cols)`` tile stays in registers for this pair."""
+        return self.frag_elems(block_m, cols, threads) <= FRAGMENT_ELEMS_PER_THREAD
+
     @property
     def needs_tiling(self) -> bool:
-        """Whether one padded row exceeds the column cap or the smem budget."""
-        return self.N_padded > MAX_SINGLE_TILE_COLS or self._row_bytes > self.smem_budget
+        """Whether one padded row exceeds what a single untiled pass can hold.
+
+        Three capacities, any one of which forces the tiled kernel: the tile column
+        cap, shared memory, and the register file. The register question is
+        asked of the narrowest untiled configuration, one row over
+        ``DEFAULT_THREADS`` threads, since a larger ``block_m`` only adds to it.
+        """
+        return (
+            self.N_padded > MAX_SINGLE_TILE_COLS
+            or self._row_bytes > self.smem_budget
+            or not self.frag_fits(1, self.N_padded, DEFAULT_THREADS)
+        )
 
     def _column_alignment(self, block_m: int, threads: int) -> int:
         """Column granularity a tile must respect for this pair.
 
-        ``block_m == 1`` needs only the ``T.copy`` alignment: one row cannot
-        have a row-to-row thread-map shift, and the coarser granularity would
-        only quantise the width away from an exact divisor of N_padded.
+        ``block_m == 1`` has no row-to-row thread-map shift to respect, so the
+        ``T.copy`` alignment would be enough for the copy itself -- but the fragment
+        still has to divide across the block, which is what ``layout_ok`` measures.
         """
         if block_m == 1:
-            return DEFAULT_ALIGNMENT
+            return max(DEFAULT_ALIGNMENT, threads)
         return reduce_column_alignment(self.elem_bytes, threads)
 
     def tile_n_for(self, block_m: int, threads: int) -> int:
@@ -144,7 +197,9 @@ class BlockConfigPlanner:
         """
         # Single-tile probe: one buffer, because the single-tile kernels hold
         # the row in fragments and allocate no second shared copy.
-        if self.N_padded <= MAX_SINGLE_TILE_COLS:
+        if self.N_padded <= MAX_SINGLE_TILE_COLS and self.frag_fits(
+            block_m, self.N_padded, threads
+        ):
             single = compute_tile_n(
                 block_m,
                 self.elem_bytes,
@@ -153,7 +208,16 @@ class BlockConfigPlanner:
             )
             if single == self.N_padded:
                 return 0
+        return self.tiled_tile_n(block_m, threads)
 
+    def tiled_tile_n(self, block_m: int, threads: int) -> int:
+        """Return the widest tile this pair can build, untiled fit or not.
+
+        Raises:
+            ValueError: If no tile of the required column granularity fits in
+                shared memory for this pair.
+        """
+        # The register budget bounds the untiled probe above, not the tile width.
         col_budget = MAX_SINGLE_TILE_COLS * self.num_buffers * block_m * self.elem_bytes
         return compute_tile_n(
             block_m,
@@ -207,10 +271,13 @@ class BlockConfigPlanner:
         stays as the guard.  Everything it admits builds; some of what it
         rejects would now build too.
 
-        ``block_m == 1`` is unconstrained: a single row cannot shift.
+        ``block_m == 1`` has no row-to-row shift, but the columns still have to divide
+        across the block: layout inference finds no layout otherwise. Exact over 72 of
+        72 combinations of nine widths, four thread counts and fp16/fp32 -- a
+        ``(1, cols)`` fragment builds if and only if ``threads`` divides ``cols``.
         """
         if block_m == 1:
-            return True
+            return cols % threads == 0
         one_pass = reduce_column_alignment(self.elem_bytes, threads)
         return cols % one_pass == 0 or one_pass % cols == 0
 
@@ -230,6 +297,11 @@ class BlockConfigPlanner:
                 f"shared memory, over the {self.smem_budget} budget"
             )
         if not self.layout_ok(block_m, tile_n, threads):
+            if block_m == 1:
+                return (
+                    f"tile_n={tile_n} is not a multiple of threads={threads}, so a "
+                    f"(1, tile_n) fragment has no reducible layout"
+                )
             one_pass = reduce_column_alignment(self.elem_bytes, threads)
             return (
                 f"tile_n={tile_n} neither divides nor is a multiple of the "
@@ -240,20 +312,19 @@ class BlockConfigPlanner:
         return ""
 
     def _untiled_block_ms(self, threads: int, budget: int | None = None) -> list[int]:
-        """Row counts an untiled kernel can build within *budget*.
+        """Row counts an untiled kernel can build within *budget*, ascending.
 
         ``default_config`` passes the conservative ``SHARED_MEMORY_BUDGET_BYTES``
-        and the sweep passes the device budget.  Largest-that-fits is a
-        capacity rule, not a performance one -- at 2048x4096 fp16 on H200,
-        ``block_m=4`` beats ``block_m=8`` on sum, var and l2 alike -- so the
-        untuned path stays inside the smaller envelope and the sweep, which
-        times every row count, is what reaches the wider one.
+        and the sweep passes the device budget.  Capacity only, not a ranking:
+        which of these to run untuned is ``default_config``'s call.
         """
         max_block_m = (budget or self.smem_budget) // self._row_bytes
         return [
             bm
             for bm in self._BLOCK_MS
-            if bm <= max_block_m and self.layout_ok(bm, self.N_padded, threads)
+            if bm <= max_block_m
+            and self.layout_ok(bm, self.N_padded, threads)
+            and self.frag_fits(bm, self.N_padded, threads)
         ]
 
     def _num_tiles(self, tile_n: int) -> int:
@@ -266,8 +337,9 @@ class BlockConfigPlanner:
                 DEFAULT_THREADS,
                 budget=SHARED_MEMORY_BUDGET_BYTES,
             )
+            # The fewest rows a block can take, not the most it can hold.
             return {
-                "block_m": block_ms[-1] if block_ms else 1,
+                "block_m": block_ms[0] if block_ms else 1,
                 "threads": DEFAULT_THREADS,
             }
 
@@ -439,12 +511,6 @@ def compute_tile_n(
     return tile_n_max
 
 
-# Supported op_kind values for each macro factory
-_REDUCE_KINDS = {"sum", "max", "min"}
-_SOFTMAX_KINDS = {"softmax", "log_softmax"}
-_SCAN_KINDS = {"sum", "prod"}
-
-
 def tune_by_forward(
     kernel,
     *probe_inputs,
@@ -498,215 +564,6 @@ def tune_by_forward(
 
     kernel.config = best_config
     print(f"Best config: {kernel.config}")
-
-
-def make_reduce_epilogue(op_kind: str):
-    """Create a post-reduce processing T.macro.
-
-    The returned macro applies a final element-wise transformation to the
-    reduced result depending on *op_kind*.
-
-    Supported op_kind values: ``"sum"``, ``"max"``, ``"min"``.
-
-    Args:
-        op_kind: The reduction operation kind.
-
-    Returns:
-        A ``T.macro`` that performs the post-reduce epilogue step.
-        The macro signature is ``epilogue(result, output)`` where both
-        are 1-D fragments of the same shape.
-
-    Raises:
-        ValueError: If *op_kind* is not supported.
-    """
-    if op_kind not in _REDUCE_KINDS:
-        raise ValueError(
-            f"Unsupported op_kind '{op_kind}' for reduce epilogue. "
-            f"Expected one of {sorted(_REDUCE_KINDS)}."
-        )
-
-    # All reduce epilogues currently use a simple copy; sub-category PRs
-    # will specialize the bodies (e.g. abs for L1 norm, noop for max/min).
-    @T.macro
-    def epilogue(result, output):
-        T.copy(result, output)
-
-    return epilogue
-
-
-def make_welford_update(block_m: int, N_padded: int):
-    """Create a single-pass Welford mean+variance update T.macro.
-
-    Uses a two-phase approach that is safe under ``T.Parallel``:
-      1. **Parallel phase**: compute per-row sum and sum-of-squares via
-         ``T.reduce_sum`` (hardware-accelerated, no data races).
-      2. **Per-row phase**: derive mean and M2 from the aggregated sums
-         using the standard Welford combination formula.
-
-    This avoids the race condition inherent in naively updating shared
-    accumulators (mean, m2, count) inside a ``T.Parallel`` loop.
-
-    Args:
-        block_m: Number of rows per thread block.
-        N_padded: Padded hidden dimension (aligned to DEFAULT_ALIGNMENT).
-
-    Returns:
-        A ``T.macro`` with signature
-        ``welford_update(x, mean, m2, count)`` where:
-
-        - *x*: input fragment ``(block_m, N_padded)`` in fp32.
-        - *mean*: running mean ``(block_m,)`` in fp32 (updated in-place).
-        - *m2*: running M2 ``(block_m,)`` in fp32 (updated in-place).
-        - *count*: running element count ``(block_m,)`` in fp32 (updated).
-    """
-
-    @T.macro
-    def welford_update(x, mean, m2, count):
-        # Phase 1: parallel reduction -- safe because T.reduce_sum handles
-        # the intra-row reduction internally without user-level races.
-        row_sum = T.alloc_fragment((block_m,), "float32")
-        sq_diff = T.alloc_fragment((block_m, N_padded), "float32")
-        row_sq_sum = T.alloc_fragment((block_m,), "float32")
-
-        T.reduce_sum(x, row_sum, dim=1)
-
-        # Phase 2: per-row combination (no j dimension, no race).
-        batch_mean = T.alloc_fragment((block_m,), "float32")
-        new_count = T.alloc_fragment((block_m,), "float32")
-        new_mean = T.alloc_fragment((block_m,), "float32")
-        for i in T.Parallel(block_m):
-            batch_mean[i] = row_sum[i] / float(N_padded)
-            new_count[i] = count[i] + float(N_padded)
-            new_mean[i] = (mean[i] * count[i] + row_sum[i]) / new_count[i]
-
-        # Compute M2_b = sum((x[j] - batch_mean)^2) -- deviations from
-        # the *batch's own mean*, not the combined mean.  The parallel
-        # Welford merge formula requires this to be correct.
-        for i in T.serial(block_m):
-            for j in T.Parallel(N_padded):
-                dev = x[i, j] - batch_mean[i]
-                sq_diff[i, j] = dev * dev
-        T.reduce_sum(sq_diff, row_sq_sum, dim=1)
-
-        # Combine with existing M2 using parallel Welford merge formula:
-        #   M2_combined = M2_a + M2_b + delta^2 * (n_a * n_b / n_combined)
-        # Here M2_b = row_sq_sum and delta = batch_mean - mean (old).
-        for i in T.Parallel(block_m):
-            delta = batch_mean[i] - mean[i]
-            m2[i] = (
-                m2[i] + row_sq_sum[i] + delta * delta * (count[i] * float(N_padded) / new_count[i])
-            )
-            mean[i] = new_mean[i]
-            count[i] = new_count[i]
-
-    return welford_update
-
-
-def make_softmax_epilogue(op_kind: str):
-    """Create a softmax family post-processing T.macro.
-
-    The returned macro applies the final normalization step for softmax
-    or log-softmax.
-
-    Supported op_kind values: ``"softmax"``, ``"log_softmax"``.
-
-    Args:
-        op_kind: The softmax variant.
-
-    Returns:
-        A ``T.macro`` with signature
-        ``epilogue(row_exp, row_sum, block_rows, block_cols, output)``
-        where:
-
-        - *row_exp*: exponentiated scores ``(block_rows, block_cols)``.
-        - *row_sum*: per-row sums ``(block_rows,)`` in fp32.
-        - *block_rows*: number of rows (compile-time constant).
-        - *block_cols*: number of columns (compile-time constant).
-        - *output*: destination fragment ``(block_rows, block_cols)``.
-
-    Raises:
-        ValueError: If *op_kind* is not supported.
-    """
-    if op_kind not in _SOFTMAX_KINDS:
-        raise ValueError(
-            f"Unsupported op_kind '{op_kind}' for softmax epilogue. "
-            f"Expected one of {sorted(_SOFTMAX_KINDS)}."
-        )
-
-    if op_kind == "softmax":
-
-        @T.macro
-        def epilogue(row_exp, row_sum, block_rows, block_cols, output):
-            """Normalize exponentials: output[i,j] = row_exp[i,j] / row_sum[i]."""
-            for i, j in T.Parallel(block_rows, block_cols):
-                output[i, j] = row_exp[i, j] / row_sum[i]
-
-    else:  # log_softmax
-
-        @T.macro
-        def epilogue(row_exp, row_sum, block_rows, block_cols, output):
-            """Log-normalize: output[i,j] = log(row_exp[i,j] / row_sum[i])."""
-            for i, j in T.Parallel(block_rows, block_cols):
-                output[i, j] = T.log(row_exp[i, j] / row_sum[i])
-
-    return epilogue
-
-
-def make_cumulative_scan(op_kind: str):
-    """Create an inclusive prefix scan T.macro.
-
-    The returned macro performs an inclusive scan (prefix sum or prefix
-    product) along the last dimension using a sequential loop
-    (``T.Serial``) to maintain the correct data dependency chain.
-
-    Supported op_kind values: ``"sum"``, ``"prod"``.
-
-    Args:
-        op_kind: The scan operation kind.
-
-    Returns:
-        A ``T.macro`` with signature
-        ``scan(input_buf, block_rows, block_cols, output_buf)`` where:
-
-        - *input_buf*: source fragment ``(block_rows, block_cols)``.
-        - *block_rows*: number of rows (compile-time constant).
-        - *block_cols*: number of columns (compile-time constant).
-        - *output_buf*: destination fragment ``(block_rows, block_cols)``.
-
-    Raises:
-        ValueError: If *op_kind* is not supported.
-    """
-    if op_kind not in _SCAN_KINDS:
-        raise ValueError(
-            f"Unsupported op_kind '{op_kind}' for cumulative scan. "
-            f"Expected one of {sorted(_SCAN_KINDS)}."
-        )
-
-    if op_kind == "sum":
-
-        @T.macro
-        def scan(input_buf, block_rows, block_cols, output_buf):
-            """Inclusive prefix sum along the last dimension."""
-            # First column is copied as-is.
-            for i in T.Parallel(block_rows):
-                output_buf[i, 0] = input_buf[i, 0]
-            # Sequential scan across columns to maintain dependency.
-            for j in T.Serial(1, block_cols):
-                for i in T.Parallel(block_rows):
-                    output_buf[i, j] = output_buf[i, j - 1] + input_buf[i, j]
-
-    else:  # prod
-
-        @T.macro
-        def scan(input_buf, block_rows, block_cols, output_buf):
-            """Inclusive prefix product along the last dimension."""
-            for i in T.Parallel(block_rows):
-                output_buf[i, 0] = input_buf[i, 0]
-            for j in T.Serial(1, block_cols):
-                for i in T.Parallel(block_rows):
-                    output_buf[i, j] = output_buf[i, j - 1] * input_buf[i, j]
-
-    return scan
 
 
 # The row layout a reduction kernel reduces, and the shape its caller declared.
@@ -774,8 +631,18 @@ class RowTiledAutotuneMixin:
 
     A subclass must set, before autotuning: ``_planner`` (a
     `BlockConfigPlanner`), ``_smem_budget``, ``N_padded``, ``_elem_bytes``,
-    and ``_MAX_TILE_N_CANDIDATES``.
+    ``_MAX_TILE_N_CANDIDATES``, ``_tile_n`` and ``_split_target``, and implement
+    ``_build_row_kernel`` and ``_row_forward``.
     """
+
+    def _build_row_kernel(self, tile_n: int):
+        raise NotImplementedError
+
+    def _row_forward(self, x):
+        raise NotImplementedError
+
+    def _sweep_applies(self) -> bool:
+        return True
 
     def _tile_n_for_block_m(self, block_m: int) -> int:
         """Return tile_n for a given block_m (0 means no tiling needed).
@@ -786,6 +653,27 @@ class RowTiledAutotuneMixin:
         satisfy all of them.
         """
         return self._planner.tile_n_for(block_m, max(AUTOTUNE_THREADS))
+
+    def _untiled_tile_alternative(self) -> list[int]:
+        """Return the tiles to time beside an untiled row, widest first.
+
+        tile_n is baked in at build time and reused across every ``threads`` the
+        sweep tries, and the register budget binds at the fewest of them, where each
+        thread holds the most of the row. A row admitted untiled at the most threads
+        can still be run at the fewest, over that budget; offering it a tile leaves
+        the choice to measurement. Empty when the row fits untiled at every candidate
+        thread count, which is where the fragment is cheap enough not to ask.
+        """
+        if self._planner.frag_fits(1, self.N_padded, min(AUTOTUNE_THREADS)):
+            return []
+        try:
+            widest = self._planner.tiled_tile_n(1, max(AUTOTUNE_THREADS))
+        except ValueError:
+            return []
+        if widest <= 0:
+            return []
+        half = widest // 2 // DEFAULT_ALIGNMENT * DEFAULT_ALIGNMENT
+        return [widest] if half in (0, widest) else [widest, half]
 
     def _tile_n_candidates(self) -> list[int]:
         """Return candidate tile_n values for autotune exploration.
@@ -812,7 +700,7 @@ class RowTiledAutotuneMixin:
         """
         default_tn = self._tile_n_for_block_m(1)
         if default_tn == 0:
-            return [0]
+            return [0, *self._untiled_tile_alternative()]
 
         candidates: set[int] = {default_tn}
         # Explore tile_n values implied by small block_m values.
@@ -836,6 +724,71 @@ class RowTiledAutotuneMixin:
         sorted_candidates = sorted(candidates, reverse=True)
         return sorted_candidates[: self._MAX_TILE_N_CANDIDATES]
 
+    def autotune(self, warmup: int = 10, rep: int = 10) -> None:
+        """Sweep the candidates, rebuilding per tile_n, then judge the split pair.
+
+        The split pair is timed on device kernel time: paths launching different
+        kernel counts cannot be compared on wall time, which carries the
+        host-launch gaps.
+        """
+        from tilelang.autotuner import autotune as tl_autotune
+
+        from ._split_softmax import split_seg_n
+
+        if not self._sweep_applies():
+            self.config = self.default_config
+            return
+
+        default = self.default_config
+        split_eligible = bool(split_seg_n(self.M, self.N, default["block_m"], self._split_target))
+
+        configs = self.autotune_configs
+        if not configs:
+            self.config = default
+            return
+
+        by_tile_n: dict[int, list[dict]] = {}
+        for cfg in configs:
+            by_tile_n.setdefault(cfg["tile_n"], []).append(
+                {"block_m": cfg["block_m"], "threads": cfg["threads"]}
+            )
+
+        best_time = float("inf")
+        best_config = None
+        for tile_n, group_cfgs in by_tile_n.items():
+            kernel = self._build_row_kernel(tile_n)
+            tunable_params = list(self._autotune_initial_kwargs(kernel, group_cfgs[0]).keys())
+            autotune_kwargs: dict = dict(configs=group_cfgs, warmup=warmup, rep=rep)
+            if tunable_params:
+                autotune_kwargs["do_not_specialize"] = tunable_params
+            if self.autotune_supply_prog is not None:
+                autotune_kwargs["supply_prog"] = self.autotune_supply_prog
+            autotuned = tl_autotune(**autotune_kwargs)(kernel)
+            tuned = self._call_autotuned_kernel(autotuned, kernel, group_cfgs[0])
+            if tuned.latency < best_time:
+                best_time = tuned.latency
+                best_config = {**tuned.config, "tile_n": tile_n}
+
+        if best_config is not None:
+            self.config = best_config
+            if best_config["tile_n"] != self._tile_n:
+                self._tile_n = best_config["tile_n"]
+                self.kernel = self._build_row_kernel(self._tile_n)
+
+        if split_eligible and best_config is not None:
+            device = torch.device(
+                "cuda",
+                self.device_index if self.device_index is not None else torch.cuda.current_device(),
+            )
+            probe = torch.randn(self.M, self.N, dtype=self.dtype, device=device)
+            swept_config = dict(self.config, split=False)
+            self.config = swept_config
+            swept_ms = device_busy_of(lambda: self._row_forward(probe), device)
+            self.config = default
+            split_ms = device_busy_of(lambda: self._row_forward(probe), device)
+            if split_ms > swept_ms:
+                self.config = swept_config
+
     @property
     def autotune_configs(self) -> list[dict]:
         """Generate autotune configs including tile_n candidates.
@@ -847,18 +800,18 @@ class RowTiledAutotuneMixin:
         budget = self._smem_budget
         smem_per_row = self.N_padded * self._elem_bytes
         max_block_m_no_tile = budget // smem_per_row if smem_per_row > 0 else 16
-        threads_list = [128, 256]
+        threads_list = list(AUTOTUNE_THREADS)
 
         configs = []
         for tile_n in self._tile_n_candidates():
             if tile_n == 0:
                 # Single-tile regime: explore multiple block_m values.
                 for bm in [1, 2, 4, 8, 16]:
+                    # Can this row count build a tile, and is that tile the whole row.
                     try:
-                        compute_tile_n(bm, self._elem_bytes, self.N_padded, budget=budget)
+                        bm_tile_n = self._tile_n_for_block_m(bm)
                     except ValueError:
                         continue
-                    bm_tile_n = self._tile_n_for_block_m(bm)
                     if bm_tile_n != 0:
                         continue
                     if bm > max_block_m_no_tile:
@@ -868,9 +821,9 @@ class RowTiledAutotuneMixin:
                             continue
                         configs.append({"block_m": bm, "threads": t, "tile_n": 0})
             else:
-                # Tiled regime: use block_m=1 with each tile_n candidate.
-                # Each distinct tile_n triggers a kernel recompilation, so
-                # we only vary threads within each tile_n regime.
+                # Tiled regime: block_m=1 with each tile_n candidate. Each
+                # distinct tile_n triggers a kernel recompilation, so only
+                # threads vary within a tile_n regime.
                 for t in threads_list:
                     configs.append({"block_m": 1, "threads": t, "tile_n": tile_n})
 
@@ -878,3 +831,291 @@ class RowTiledAutotuneMixin:
             configs = [{"block_m": 1, "threads": 256, "tile_n": self._tile_n}]
 
         return configs
+
+
+# ---------------------------------------------------------------------------
+# Reducing an (A, B) buffer down its rows: the outer pass every edge-axis
+# reduction shares. The inner pass is each kernel class's own; this engine
+# takes its partials and reduces them down the lead axis.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _LeadingAxisReducePolicy:
+    """Launch heuristics for reductions down contiguous leading axes.
+
+    The column tile ``threads * cols_per_thread`` is what a block reads from
+    one row, and 512 columns is flat across the shapes this serves; how that
+    tile is divided is not. Sixty-four lanes reading eight columns each leaves
+    a block too narrow to cover the read's latency, and costs several times
+    what 256 lanes reading two costs at the same tile, split count and grid.
+    """
+
+    cols_per_thread: int = 2
+
+    threads: int = 256
+
+    target_blocks: int = 256
+
+
+_LEADING_POLICY = _LeadingAxisReducePolicy()
+
+
+# Largest integer count fp32 carries exactly; a statistic folded through
+# fp32 counts or weights is trusted only below it.
+FP32_EXACT_INT_LIMIT = 1 << 24
+
+
+def edge_axis_plan(
+    shape: "tuple[int, ...]",
+    k: int,
+    j: int,
+    elem_bytes: int,
+    smem_budget: int,
+    **planner_kwargs,
+):
+    """Split *shape* for an edge-axis reduction and plan its rows pass.
+
+    Returns ``(lead, kept, trail, planner, cfg)``: the leading and trailing
+    reduced element counts, the kept middle, and the ``BlockConfigPlanner``
+    with its default config for rows of ``trail`` elements.
+    """
+    ndim = len(shape)
+    lead = prod(shape[:k])
+    kept = prod(shape[k : ndim - j])
+    trail = prod(shape[ndim - j :])
+    planner = BlockConfigPlanner(
+        align_up(trail, DEFAULT_ALIGNMENT),
+        elem_bytes,
+        smem_budget,
+        **planner_kwargs,
+    )
+    return lead, kept, trail, planner, planner.default_config()
+
+
+def edge_axis_split(ndim: int, axes: "tuple[int, ...]") -> "tuple[int, int]":
+    """Split *axes* into ``(leading, trailing)`` counts when they hug both edges.
+
+    Returns ``(0, 0)`` unless *axes* is a non-empty prefix plus a non-empty
+    suffix with at least one kept axis in between — the layout an edge-axis
+    reduction handles without permuting the tensor.
+    """
+    k = 0
+    while k < len(axes) and axes[k] == k:
+        k += 1
+    j = len(axes) - k
+    if k == 0 or j == 0:
+        return (0, 0)
+    if tuple(axes[k:]) != tuple(range(ndim - j, ndim)):
+        return (0, 0)
+    if k + j >= ndim:
+        return (0, 0)
+    return (k, j)
+
+
+def _leading_row_splits(reduced: int, kept: int, threads: int) -> int:
+    """How many ways to split the reduced axis so the grid fills the device."""
+    block_b = threads * _LEADING_POLICY.cols_per_thread
+    column_blocks = ceildiv_int(kept, block_b)
+    return max(1, min(reduced, ceildiv_int(_LEADING_POLICY.target_blocks, column_blocks)))
+
+
+def _make_down_rows_ops(op_kind: str, divisor: float, out_dtype: str, epilogue: str):
+    """Create the per-op macros used by the down-rows reduction."""
+
+    @T.macro
+    def init(acc):
+        if op_kind == "amax":
+            T.fill(acc, -T.infinity("float32"))
+        elif op_kind == "amin":
+            T.fill(acc, T.infinity("float32"))
+        else:
+            T.fill(acc, 0.0)
+
+    @T.macro
+    def combine(acc, slot, value):
+        if op_kind == "amax":
+            acc[slot] = T.max(acc[slot], value)
+        elif op_kind == "amin":
+            acc[slot] = T.min(acc[slot], value)
+        else:
+            acc[slot] = acc[slot] + value
+
+    @T.macro
+    def finish(out_local, slot, accumulated):
+        if divisor and epilogue == "sqrt":
+            out_local[slot] = T.cast(T.sqrt(accumulated / divisor), out_dtype)
+        elif divisor:
+            out_local[slot] = T.cast(accumulated / divisor, out_dtype)
+        elif epilogue == "sqrt":
+            out_local[slot] = T.cast(T.sqrt(accumulated), out_dtype)
+        else:
+            out_local[slot] = T.cast(accumulated, out_dtype)
+
+    return init, combine, finish
+
+
+@functools.lru_cache(maxsize=32)
+def _down_rows_kernel(
+    A: int,
+    B: int,
+    op_kind: str,
+    in_dtype: str,
+    out_dtype: str,
+    threads: int,
+    splits: int,
+    divisor: float,
+    epilogue: str,
+):
+    """Build a reduce down the leading axis of an ``(A, B)`` buffer.
+
+    One accumulator per output column, walked down the rows the block owns. Adjacent
+    threads take adjacent columns, so every row of the walk is one coalesced pass and
+    the buffer is read once in the layout it already has.
+
+    The grid is ``(column blocks, splits)``: a leading-axis reduction has only as many
+    output columns as the axes it keeps, and one block per column tile would leave
+    the device running a handful of them.
+
+    Args:
+        A: Elements the reduction consumes per output column.
+        B: Output columns.
+        op_kind: One of ``sum`` / ``mean`` / ``amax`` / ``amin``.
+        in_dtype: TileLang dtype string of the input.
+        out_dtype: TileLang dtype string of the output. A split pass writes fp32
+            partials whatever it read; the pass that finishes writes the declared dtype.
+        threads: Threads per block.
+        splits: Row slices, each its own block row. Above 1 the output is one row of
+            partials per slice, for a second call with ``splits=1`` to finish.
+        divisor: What the accumulator is divided by before the output cast, or 0 for
+            none. Mean's divisor is the row count of the whole reduction, which a
+            second pass over partials can no longer see.
+        epilogue: ``"sqrt"`` applies a square root before the output cast, for a
+            caller whose outer pass finishes a sum-of-squares; ``""`` for none.
+    """
+    block_b = threads * _LEADING_POLICY.cols_per_thread
+    rows_per_split = ceildiv_int(A, splits)
+    exact = B % block_b == 0
+    rows_exact = rows_per_split * splits == A
+    init_acc, combine, finish = _make_down_rows_ops(op_kind, divisor, out_dtype, epilogue)
+
+    @tilelang.jit(out_idx=[1])
+    def _func():
+        @T.macro
+        def walk_row(x, acc, row, pid_b):
+            for j in T.Parallel(block_b):
+                combine(acc, j, T.cast(x[row, pid_b * block_b + j], "float32"))
+
+        @T.prim_func
+        def main(
+            x: T.Tensor[(A, B), in_dtype],
+            out: T.Tensor[(splits * B,), out_dtype],
+        ):
+            with T.Kernel(T.ceildiv(B, block_b), splits, threads=threads) as (pid_b, pid_a):
+                acc = T.alloc_fragment((block_b,), "float32")
+                out_local = T.alloc_fragment((block_b,), out_dtype)
+
+                init_acc(acc)
+
+                # A per-lane select for a bound the whole block shares scalarizes
+                # the loop and costs it its vector loads.
+                for step in T.serial(rows_per_split):
+                    row = pid_a * rows_per_split + step
+                    if exact and rows_exact:
+                        walk_row(x, acc, row, pid_b)
+                    elif exact:
+                        with T.If(row < A):  # noqa: SIM117
+                            with T.Then():
+                                walk_row(x, acc, row, pid_b)
+                    else:
+                        for j in T.Parallel(block_b):
+                            col = pid_b * block_b + j
+                            val = T.if_then_else(
+                                T.And(row < A, col < B),
+                                T.cast(x[row, col], "float32"),
+                                T.cast(identity_for(op_kind), "float32"),
+                            )
+                            combine(acc, j, val)
+
+                if exact:
+                    for j in T.Parallel(block_b):
+                        finish(out_local, j, acc[j])
+                    T.copy(out_local, out[pid_a * B + pid_b * block_b])
+                else:
+                    # Finish only stored lanes: a masked lane holds the identity
+                    # (e.g. +inf), which an integer output dtype cannot take.
+                    for j in T.Parallel(block_b):
+                        # TileLang requires T.If/T.Then as nested context managers.
+                        with T.If(pid_b * block_b + j < B):  # noqa: SIM117
+                            with T.Then():
+                                finish(out_local, j, acc[j])
+                                out[pid_a * B + pid_b * block_b + j] = out_local[j]
+
+        return main
+
+    return _func
+
+
+def reduce_down_rows(
+    flat: torch.Tensor,
+    op_kind: str,
+    in_dtype: str,
+    out_dtype: str,
+    divisor: float,
+    epilogue: str = "",
+) -> torch.Tensor:
+    """Reduce an ``(A, B)`` buffer down its rows, writing one *out_dtype* row.
+
+    Splitting the reduced axis is what fills the grid, and each slice leaves an
+    fp32 partial row; a second call over those rows finishes the op. The partials
+    are a few thousand values against the millions the first pass reads, so the
+    second call costs about nothing. ``divisor`` and ``epilogue`` apply only at
+    the finishing call.
+    """
+    reduced, kept = flat.shape
+    # An input smaller than one grid's worth of work cannot amortize the
+    # extra pass a split costs; reduce it in a single call.
+    grid_work = (
+        _LEADING_POLICY.threads * _LEADING_POLICY.cols_per_thread * _LEADING_POLICY.target_blocks
+    )
+    if reduced * kept <= grid_work:
+        splits = 1
+    else:
+        splits = _leading_row_splits(reduced, kept, _LEADING_POLICY.threads)
+    if splits == 1:
+        single = _down_rows_kernel(
+            reduced,
+            kept,
+            op_kind,
+            in_dtype,
+            out_dtype,
+            _LEADING_POLICY.threads,
+            1,
+            divisor,
+            epilogue,
+        )
+        return single()(flat)
+    partials = _down_rows_kernel(
+        reduced,
+        kept,
+        op_kind,
+        in_dtype,
+        "float32",
+        _LEADING_POLICY.threads,
+        splits,
+        0.0,
+        "",
+    )()(flat)
+    # Partials are summed even for mean, whose divisor is the whole row count.
+    finish = _down_rows_kernel(
+        splits,
+        kept,
+        "sum" if op_kind == "mean" else op_kind,
+        "float32",
+        out_dtype,
+        _LEADING_POLICY.threads,
+        1,
+        divisor,
+        epilogue,
+    )
+    return finish()(partials.reshape(splits, kept))

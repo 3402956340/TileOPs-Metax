@@ -11,6 +11,7 @@ from tileops.kernels.grouped_gemm import (
 )
 from tileops.kernels.kernel_base import Kernel
 from tileops.kernels.moe.moe_grouped_gemm_nopad import MoeGroupedGemmNopadKernel
+from tileops.perf.profile import tensor_core_roof
 from tileops.utils import is_maca
 
 from ...compile_boundary import get_instance
@@ -19,7 +20,7 @@ from ._common import GroupedOperandEagerForward
 
 __all__ = ["MoeGroupedGemmNopadFwdOp"]
 
-#: The implementations of this role; each states its own region.
+# The implementations of this role; each states its own region.
 _GEMM_KEYS = ("moe_grouped_gemm_kernel", "moe_grouped_gemm_persistent_kernel")
 
 
@@ -40,7 +41,6 @@ class MoeGroupedGemmNopadFwdOp(GroupedOperandEagerForward, Op):
         ```
     """
 
-    #: The operator this op registers; a test asserts the graph holds nothing else.
     compile_op_names: ClassVar[Tuple[str, ...]] = ("tileops::moe_grouped_gemm_nopad_fwd",)
 
     def __init__(
@@ -132,6 +132,10 @@ class MoeGroupedGemmNopadFwdOp(GroupedOperandEagerForward, Op):
             C: [numel, N] GEMM output.
         """
         return _moe_grouped_gemm_nopad_fwd(a, b, true_sizes, true_offsets, self._instance_key)
+
+    def compute_roof(self) -> str:
+        """FLOPs are matmul contractions; priced on tensor cores."""
+        return tensor_core_roof(self.dtype)
 
 
 @torch.library.custom_op("tileops::moe_grouped_gemm_nopad_fwd", mutates_args=())

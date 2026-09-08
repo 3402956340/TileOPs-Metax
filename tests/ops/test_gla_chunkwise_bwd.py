@@ -11,18 +11,24 @@ from tileops.ops import GLABwdOp, GLAFwdOp
 
 
 def gla_autograd_bwd_torch(do, q, k, v, g, chunk_size, scale=-1.0):
-    """Compute GLA backward gradients via autograd on the differentiable forward."""
-    sc = (q.shape[-1] ** -0.5) if scale <= 0 else scale
+    """Compute GLA backward gradients via autograd on the differentiable forward.
 
-    q_ = q.float().detach().requires_grad_(True)
-    k_ = k.float().detach().requires_grad_(True)
-    v_ = v.float().detach().requires_grad_(True)
-    g_ = g.float().detach().requires_grad_(True)
+    Run the reference on CPU: MetaX MACA aborts in GPU ``torch.autograd.grad``
+    for this graph (same class of failure as DeltaNet's inv-based reference).
+    """
+    sc = (q.shape[-1] ** -0.5) if scale <= 0 else scale
+    device = q.device
+
+    q_ = q.float().detach().cpu().requires_grad_(True)
+    k_ = k.float().detach().cpu().requires_grad_(True)
+    v_ = v.float().detach().cpu().requires_grad_(True)
+    g_ = g.float().detach().cpu().requires_grad_(True)
+    do_cpu = do.float().cpu()
 
     o = gla_fwd_chunked_torch(q_, k_, v_, g_, chunk_size, scale=sc)
-    loss = (o * do.float()).sum()
+    loss = (o * do_cpu).sum()
     dq, dk, dv, dg = torch.autograd.grad(loss, [q_, k_, v_, g_])
-    return dq, dk, dv, dg
+    return dq.to(device), dk.to(device), dv.to(device), dg.to(device)
 
 
 try:
@@ -57,9 +63,6 @@ def _fla_autograd_bwd(
     loss = (o * do.float()).sum()
     dq, dk, dv, dg = torch.autograd.grad(loss, [q_, k_, v_, g_])
     return dq, dk, dv, dg
-
-
-# Backward correctness tests
 
 
 class GLABwdFixture(FixtureBase):

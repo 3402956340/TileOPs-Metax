@@ -4,6 +4,7 @@ import torch
 
 from tileops.kernels.attention import MLADecodeMacaKernel, MLADecodeWsKernel
 from tileops.kernels.kernel_base import Kernel
+from tileops.perf.profile import tensor_core_roof
 from tileops.utils import is_maca
 
 from ..op_base import Op
@@ -90,3 +91,7 @@ class MultiHeadLatentAttentionDecodeWithKVCacheFwdOp(Op):
         self._validate_dtypes(q, q_pe, k, k_pe)
         self.dtype = q.dtype
         return self._get_kernel((q, q_pe, k, k_pe), q.dtype)(q, q_pe, k, k_pe)
+
+    def compute_roof(self) -> str:
+        """FLOPs are matmul contractions; priced on tensor cores."""
+        return tensor_core_roof(self.dtype)

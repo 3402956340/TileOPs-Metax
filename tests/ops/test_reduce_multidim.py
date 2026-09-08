@@ -13,8 +13,6 @@ import torch
 
 from tests.test_base import FixtureBase
 
-# Fixtures
-
 
 class MultiDimFixture(FixtureBase):
     PARAMS = [
@@ -64,9 +62,6 @@ class MultiDimFixture(FixtureBase):
     ]
 
 
-# Helpers
-
-
 def _tol(dtype: torch.dtype) -> dict:
     if dtype == torch.float32:
         return {"atol": 1e-4, "rtol": 1e-4}
@@ -110,6 +105,21 @@ def test_mean_multidim(
     tol = _tol(dtype)
     assert y.shape == ref.shape, f"shape mismatch: {y.shape} vs {ref.shape}"
     assert torch.allclose(y, ref, **tol), f"max err: {(y - ref).abs().max()}"
+
+
+@pytest.mark.smoke
+def test_mean_edge_axes_fp16_keeps_fp32_intermediates() -> None:
+    """A mean over edge axes must not narrow its partial sums to the storage dtype.
+
+    fp16 rows of 100.0 sum to 409600 per row — past fp16's max — so any pass
+    that casts an undivided sum back to fp16 answers inf instead of 100.
+    """
+    from tileops.ops.reduction.reduce import MeanFwdOp
+
+    x = torch.full((4, 8, 1024), 100.0, dtype=torch.float16, device="cuda")
+    y = MeanFwdOp(dim=[0, 2])(x)
+    assert torch.isfinite(y).all(), "edge-axes mean overflowed an intermediate"
+    assert torch.allclose(y, torch.full_like(y, 100.0))
 
 
 @MultiDimFixture
@@ -247,6 +257,22 @@ def test_logsumexp_multidim(
     tol = _tol(dtype)
     assert y.shape == ref.shape, f"shape mismatch: {y.shape} vs {ref.shape}"
     assert torch.allclose(y, ref, **tol), f"max err: {(y - ref).abs().max()}"
+
+
+@pytest.mark.smoke
+def test_logsumexp_edge_axes_special_values() -> None:
+    """Own-layout edge-axis logsumexp preserves -inf and NaN row semantics."""
+    from tileops.ops.reduction.softmax import LogSumExpFwdOp
+
+    x = torch.randn(4, 32, 256, dtype=torch.float16, device="cuda")
+    x[:, 0, :] = float("-inf")
+    x[2, 1, 7] = float("nan")
+    y = LogSumExpFwdOp(dim=[0, 2])(x).float()
+    ref = torch.logsumexp(x.float(), dim=[0, 2])
+    assert y[0].item() == float("-inf")
+    assert torch.isnan(y[1])
+    finite = torch.isfinite(ref)
+    assert torch.allclose(y[finite], ref[finite], **_tol(torch.float16))
 
 
 # Logical reduce ops: all, any, count_nonzero
@@ -598,3 +624,39 @@ def test_duplicate_dims_raises() -> None:
     op = SumFwdOp(dim=[1, 1], keepdim=False)
     with pytest.raises(ValueError, match="Duplicate dims"):
         op(x)
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_edge_axis_reduce_returns_the_storage_dtype(dtype: torch.dtype) -> None:
+    """The edge-axis columns pass writes the result dtype itself, with no cast after.
+
+    Nothing downstream converts, so a pass left writing fp32 reaches the caller
+    as fp32.
+    """
+    from tileops.ops.reduction import CountNonzeroFwdOp
+    from tileops.ops.reduction.reduce import AmaxFwdOp, MeanFwdOp, SumFwdOp
+
+    x = torch.randn(4, 32, 512, dtype=dtype, device="cuda")
+    for op_cls, ref in (
+        (SumFwdOp, lambda z: torch.sum(z.float(), dim=[0, 2])),
+        (MeanFwdOp, lambda z: torch.mean(z.float(), dim=[0, 2])),
+        (AmaxFwdOp, lambda z: torch.amax(z.float(), dim=[0, 2])),
+    ):
+        out = op_cls(dim=[0, 2])(x)
+        assert out.dtype == dtype, f"{op_cls.__name__} returned {out.dtype}"
+        torch.testing.assert_close(out.float(), ref(x), rtol=1.6e-2, atol=1.6e-2)
+
+    counted = CountNonzeroFwdOp(dim=[0, 2])(x)
+    assert counted.dtype == torch.int64
+    assert torch.equal(counted, torch.count_nonzero(x, dim=[0, 2]))
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("shape", [(768, 512), (1536, 512)], ids=["ragged-split", "exact-split"])
+def test_leading_axis_split_reduces_every_row(shape):
+    """A split that does not divide the reduced extent still sums every row."""
+    from tileops.ops.reduction.reduce import SumFwdOp
+
+    x = torch.randn(shape, dtype=torch.float32, device="cuda")
+    torch.testing.assert_close(SumFwdOp(dim=0)(x), x.sum(dim=0), rtol=1e-4, atol=1e-4)

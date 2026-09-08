@@ -18,10 +18,8 @@ from workloads.attention.gqa import (
     GroupedQueryAttentionSlidingWindowVarlenFwdWorkload,
 )
 
-_OP_NAME = "GroupedQueryAttentionSlidingWindowVarlenFwdOp"
-
 _GQA_SLIDING_WINDOW_VARLEN_FWD_BENCH_PARAMS = workload_params(
-    load_workloads(_OP_NAME),
+    load_workloads(GroupedQueryAttentionSlidingWindowVarlenFwdOp),
     then_dtype(
         gqa_sliding_window_varlen_args,
         tune=False,
@@ -182,9 +180,8 @@ def test_gqa_sliding_window_varlen_fwd_bench(
     op.k_lens = seqlens_k
     op.max_seqlen_q = max(seqlens_q)
     op.max_seqlen_k = max(seqlens_k)
-    bm = ManifestBenchmark(_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
 
-    # Warmup: trigger JIT compilation before timed profiling
     op(*inputs)
     torch.cuda.synchronize()
 
@@ -204,4 +201,4 @@ def test_gqa_sliding_window_varlen_fwd_bench(
     if fa3_fn is None and fi_fn is None:
         functors["torch"] = _torch_sliding_window_varlen_fwd(test)
 
-    bm.compare(functors, *inputs, record_as=op, params=locals())
+    bm.compare(functors, *inputs)

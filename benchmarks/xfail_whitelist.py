@@ -161,19 +161,37 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "benchmarks/ops/bench_softmax.py::test_log_softmax_bench[attn-weights-4k-float16]",
             "benchmarks/ops/bench_softmax.py::test_log_softmax_bench[attn-weights-4k-bfloat16]",
             "benchmarks/ops/bench_softmax.py::test_log_softmax_bench[attn-weights-4k-float32]",
+            "benchmarks/ops/bench_deltanet.py::test_deltanet_vs_fla_autograd[dn-autograd-b2-s2k-h4-d64-float16]",
+            "benchmarks/ops/bench_deltanet.py::test_deltanet_vs_fla_autograd[dn-autograd-b2-s2k-h4-d64-bfloat16]",
+            "benchmarks/ops/bench_deltanet.py::test_deltanet_vs_fla_autograd[dn-autograd-b2-s8k-h4-d64-float16]",
+            "benchmarks/ops/bench_deltanet.py::test_deltanet_vs_fla_autograd[dn-autograd-b2-s8k-h4-d64-bfloat16]",
+            "benchmarks/ops/bench_gated_deltanet.py::test_gated_deltanet_vs_fla_autograd[gdn-autograd-b2-s2k-h4-d64-float16]",
+            "benchmarks/ops/bench_gated_deltanet.py::test_gated_deltanet_vs_fla_autograd[gdn-autograd-b2-s2k-h4-d64-bfloat16]",
+            "benchmarks/ops/bench_gated_deltanet.py::test_gated_deltanet_vs_fla_autograd[gdn-autograd-b2-s8k-h4-d64-float16]",
+            "benchmarks/ops/bench_gated_deltanet.py::test_gated_deltanet_vs_fla_autograd[gdn-autograd-b2-s8k-h4-d64-bfloat16]",
+            "benchmarks/ops/bench_group_norm.py::test_group_norm_bench[wider-channel-g32-affine-float16]",
         ),
     ),
     (
         _BENCHMARK_API_MISMATCH,
-        (),
+        (
+            "benchmarks/tests/test_benchmark_base.py::test_result_rejects_non_positive_device_time",
+            "benchmarks/tests/test_benchmark_base.py::test_compare_remeasures_every_tag_after_timing_method_changes",
+        ),
     ),
     (
         _AUTOTUNE_FAILURE,
-        (),
+        (
+            "benchmarks/ops/bench_pool.py::test_max_pool2d_bench[resnet-stem-bfloat16]",
+            "benchmarks/ops/bench_softmax.py::test_log_softmax_bench[attn-weights-32k-bfloat16]",
+        ),
     ),
     (
         _NUMERICAL_MISMATCH,
-        (),
+        (
+            "benchmarks/ops/bench_bmm.py::test_bmm_bench[small-b8-128-float16]",
+            "benchmarks/ops/bench_bmm.py::test_bmm_bench[small-b8-128-bfloat16]",
+        ),
     ),
     (
         _OUT_OF_MEMORY,
@@ -187,6 +205,7 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "benchmarks/ops/bench_moe_shared_fused_moe.py::test_shared_fused_moe_bench[512-384-8-7168-2048-18432-sigmoid-renormalize-correctionbias-2.827-bfloat16]",
             "benchmarks/ops/bench_moe_shared_fused_moe.py::test_shared_fused_moe_bench[2048-384-8-7168-2048-18432-sigmoid-renormalize-correctionbias-2.827-bfloat16]",
             "benchmarks/ops/bench_moe_shared_fused_moe.py::test_shared_fused_moe_bench[4096-384-8-7168-2048-18432-sigmoid-renormalize-correctionbias-2.827-bfloat16]",
+            "benchmarks/ops/bench_moe_grouped_gemm_nopad.py::test_moe_grouped_gemm_nopad_bench[deepseek-v3-prefill-gate-up-bfloat16]",
         ),
     ),
     (

@@ -1,29 +1,18 @@
 # Copyright (c) Tile-AI. All rights reserved.
-"""Reduction kernel primitives and shared utilities.
-
-This package provides the foundational building blocks (macros, constants,
-and utility functions) used by all reduction sub-category kernels.
-"""
+"""Reduction kernels, one module per sub-category."""
 
 from ._primitives import (
     DEFAULT_ALIGNMENT,
     SHARED_MEMORY_BUDGET_BYTES,
     align_up,
-    make_cumulative_scan,
-    make_reduce_epilogue,
-    make_softmax_epilogue,
-    make_welford_update,
 )
 from .argreduce import ArgreduceKernel
 from .argreduce_maca import ArgreduceMACAKernel
 from .cumulative import CumulativeKernel
-from .logical_reduce import LogicalReduceKernel
+from .logical_reduce import LogicalReduceEdgeFusedKernel, LogicalReduceKernel
 from .logsumexp import LogSumExpKernel
 from .reduce import ReduceKernel
 from .softmax import SoftmaxKernel
-
-# Placeholder imports for reduction kernels.
-# Each sub-category PR uncomments its own lines.
 from .vector_norm import VectorNormKernel
 
 __all__: list[str] = [
@@ -33,13 +22,10 @@ __all__: list[str] = [
     "ArgreduceMACAKernel",
     "CumulativeKernel",
     "LogSumExpKernel",
+    "LogicalReduceEdgeFusedKernel",
     "LogicalReduceKernel",
     "ReduceKernel",
     "SoftmaxKernel",
     "VectorNormKernel",
     "align_up",
-    "make_cumulative_scan",
-    "make_reduce_epilogue",
-    "make_softmax_epilogue",
-    "make_welford_update",
 ]

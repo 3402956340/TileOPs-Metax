@@ -8,12 +8,10 @@ import torch
 from tilelang import language as T
 from tilelang.profiler import do_bench
 
+from tileops.kernels.constants import LOG2E
 from tileops.kernels.kernel_base import Kernel
 
 from ..v_tile import GEMM_MIN_N
-
-LOG2_E = 1.44269504
-
 
 # Pre-compute: g_cumsum per chunk (parallel, B*H*NC thread blocks)
 
@@ -200,14 +198,14 @@ def _gla_fwd_h_kernel(
 
                     # Decay h
                     for i_k, i_v in T.Parallel(dim_k_part, dim_v_part):
-                        h_s[i_k, i_v] = h_s[i_k, i_v] * T.exp2(g_last[i_k] * LOG2_E)
+                        h_s[i_k, i_v] = h_s[i_k, i_v] * T.exp2(g_last[i_k] * LOG2E)
 
                     # k_adj in fragment (RS GEMM: A=register, B=shared)
                     k_adj_f = T.alloc_fragment([chunk_size, dim_k_part], dtype)
                     for i_t, i_k in T.Parallel(chunk_size, dim_k_part):
                         k_adj_f[i_t, i_k] = T.cast(
                             T.cast(k_s[i_t, i_k], accum_dtype)
-                            * T.exp2((g_last[i_k] - g_cumsum_s[i_t, i_k]) * LOG2_E),
+                            * T.exp2((g_last[i_k] - g_cumsum_s[i_t, i_k]) * LOG2E),
                             dtype,
                         )
 
@@ -283,17 +281,14 @@ def _gla_fwd_o_kernel(
                 # h cast to native dtype for tensor core
                 h_cast_s = T.alloc_shared([dim_k, dim_v], dtype)
 
-                # Input buffers
                 q_s = T.alloc_shared([chunk_size, dim_k], dtype)
                 k_s = T.alloc_shared([chunk_size, dim_k], dtype)
                 v_s = T.alloc_shared([chunk_size, dim_v], dtype)
                 g_cumsum_s = T.alloc_shared([chunk_size, dim_k], accum_dtype)
 
-                # Compute buffers
                 q_gated_s = T.alloc_shared([chunk_size, dim_k], dtype)
                 A_s = T.alloc_shared([chunk_size, chunk_size], dtype)
 
-                # Load inputs via T.copy
                 T.copy(
                     q[i_b, chunk_start : chunk_start + chunk_size, i_h, :], q_s, disable_tma=True
                 )
@@ -316,7 +311,7 @@ def _gla_fwd_o_kernel(
                 # ---- Gated q (inter-chunk term, exp(g_cumsum) <= 1) ----
                 for i_t, i_k in T.Parallel(chunk_size, dim_k):
                     q_gated_s[i_t, i_k] = T.cast(
-                        T.cast(q_s[i_t, i_k], accum_dtype) * T.exp2(g_cumsum_s[i_t, i_k] * LOG2_E),
+                        T.cast(q_s[i_t, i_k], accum_dtype) * T.exp2(g_cumsum_s[i_t, i_k] * LOG2E),
                         dtype,
                     )
 
@@ -328,7 +323,7 @@ def _gla_fwd_o_kernel(
                         A_frag[i_t, i_j] = A_frag[i_t, i_j] + (
                             T.cast(q_s[i_t, i_k], accum_dtype)
                             * T.cast(k_s[i_j, i_k], accum_dtype)
-                            * T.exp2((g_cumsum_s[i_t, i_k] - g_cumsum_s[i_j, i_k]) * LOG2_E)
+                            * T.exp2((g_cumsum_s[i_t, i_k] - g_cumsum_s[i_j, i_k]) * LOG2E)
                         )
                 for i_t, i_j in T.Parallel(chunk_size, chunk_size):
                     A_s[i_t, i_j] = T.cast(
@@ -530,7 +525,6 @@ class GLAFwdKernel(Kernel):
         B, T, H, K, V = (self.batch, self.seq_len, self.heads, self.dim_k, self.dim_v)
         dtype_torch = getattr(torch, self.dtype_name)
 
-        # Generate representative inputs
         q = torch.randn(B, T, H, K, device="cuda", dtype=dtype_torch) * 0.1
         k = torch.randn(B, T, H, K, device="cuda", dtype=dtype_torch) * 0.1
         v = torch.randn(B, T, H, V, device="cuda", dtype=dtype_torch) * 0.1

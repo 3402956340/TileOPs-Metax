@@ -2641,42 +2641,53 @@ class TestRequiredParamWitness:
 
 # Bench checks
 class TestBench:
-    """bench checks that bench files use manifest workloads and op roofline.
+    """bench checks that a bench file obeys the benchmark contract.
 
-    Case table: direct (``load_workloads`` + ``op.eval_roofline()``) and
-    indirect (``benchmarks.benchmark_base`` helpers) usage passes; missing
-    helpers, wrong op names, and syntax errors fail with the named
-    diagnostics. Rows with ``None`` expect a clean pass.
+    Workloads come from the manifest and the roofline comes from the op. Which
+    op the file benchmarks is a run-time fact, checked against a benchmark run
+    by ``scripts/check_bench_coverage.py``, so no case here names an op: a file
+    reaching its op through a loop, a factory or a helper is as good as one
+    naming it.
     """
 
     def test_bench_file_usage_matrix(self, validator, tmp_path):
         cases = [
             # (description, bench file text, expected substrings or None)
             (
-                "direct load_workloads + eval_roofline passes",
+                "ManifestBenchmark wrapping the declared op passes",
                 """\
                 from tileops.manifest import load_workloads
-                workloads = load_workloads('test_op')
+                workloads = load_workloads('TestOp')
                 op.eval_roofline()
             """,
                 None,
             ),
             (
-                "indirect base helpers pass",
+                "direct load_workloads with the op built in the file passes",
                 """\
                 from benchmarks.benchmark_base import workloads_to_params, ManifestBenchmark
-                params = workloads_to_params('test_op')
-                ManifestBenchmark('test_op', op, params[0])
+                params = workloads_to_params('TestOp')
+                ManifestBenchmark(op, params[0])
             """,
                 None,
             ),
             (
-                "load_workloads without eval_roofline fails",
+                "an op reached through a loop passes",
+                """\
+                from benchmarks.benchmark_base import workloads_to_params, ManifestBenchmark
+                for name, cls in FAMILY:
+                    params = workloads_to_params(name)
+                    ManifestBenchmark(cls(), params[0])
+            """,
+                None,
+            ),
+            (
+                "load_workloads without a roofline fails",
                 """\
                 from tileops.manifest import load_workloads
-                workloads = load_workloads('test_op')
+                workloads = load_workloads('TestOp')
             """,
-                ["eval_roofline"],
+                ["roofline"],
             ),
             (
                 "no load_workloads fails",
@@ -2687,33 +2698,20 @@ class TestBench:
                 ["load_workloads"],
             ),
             (
-                "wrong op name fails (direct path)",
+                "importing the helpers without calling them fails",
                 """\
                 from tileops.manifest import load_workloads
-                workloads = load_workloads('wrong_op')
-                op.eval_roofline()
+                from benchmarks.benchmark_base import ManifestBenchmark
+                shapes = [(1024, 4096)]
             """,
-                ["load_workloads"],
-            ),
-            (
-                "wrong op name fails (indirect path)",
-                """\
-                from benchmarks.benchmark_base import workloads_to_params, ManifestBenchmark
-                params = workloads_to_params('wrong_op')
-                ManifestBenchmark('wrong_op', op, params[0])
-            """,
-                ["load_workloads", "eval_roofline"],
+                ["load_workloads", "roofline"],
             ),
             ("syntax error fails", "def broken(\n", ["syntax error"]),
         ]
         for desc, text, expected in cases:
             bench_file = tmp_path / "bench_test.py"
             bench_file.write_text(textwrap.dedent(text))
-            errors = validator.check_l4_benchmark(
-                "test_op",
-                str(bench_file),
-                REPO_ROOT,
-            )
+            errors = validator.check_l4_benchmark("TestOp", str(bench_file), REPO_ROOT)
             if expected is None:
                 assert errors == [], (desc, errors)
             else:
@@ -2874,10 +2872,11 @@ class TestResolveOpClass:
 
     def test_single_class_file_rejects_mismatched_name(self, validator):
         """Single-class files reject mismatched manifest keys — no bypass."""
-        result = validator._resolve_op_class(
-            "tileops/ops/reduction/softmax.py",
-            "SoftmaxBwdOp",
-        )
+        with pytest.warns(UserWarning, match="No class named 'SoftmaxBwdOp'"):
+            result = validator._resolve_op_class(
+                "tileops/ops/reduction/softmax.py",
+                "SoftmaxBwdOp",
+            )
         assert result.cls is None
         assert result.warning is not None
 

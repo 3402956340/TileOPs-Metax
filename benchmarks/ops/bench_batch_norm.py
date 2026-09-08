@@ -24,14 +24,6 @@ from tileops.ops.norm.batch_norm import BatchNormBwdOp, BatchNormFwdOp
 from tileops.utils import is_maca
 from workloads.normalization import BatchNormBwdWorkload, BatchNormFwdWorkload
 
-_FWD_OP_NAME = "BatchNormFwdOp"
-_BWD_OP_NAME = "BatchNormBwdOp"
-
-# Benchmark classes
-
-
-# Benchmark helpers
-
 
 def _make_inputs(N, C, spatial, dtype, device="cuda"):
     shape = (N, C, *spatial)
@@ -113,9 +105,6 @@ def _aten_bn_bwd(grad_out, x, weight, mean, rstd):
     )
 
 
-# Manifest-driven params
-
-
 def _fwd_args(w: dict, dtype: torch.dtype) -> tuple:
     n, c, *spatial = w["x_shape"]
     return (n, c, tuple(spatial), dtype, True, False)
@@ -126,11 +115,9 @@ def _bwd_args(w: dict, dtype: torch.dtype) -> tuple:
     return (n, c, tuple(spatial), dtype)
 
 
-# Benchmark tests
-
-
 @pytest.mark.parametrize(
-    "N, C, spatial, dtype, training, tune", workload_params(load_workloads(_FWD_OP_NAME), _fwd_args)
+    "N, C, spatial, dtype, training, tune",
+    workload_params(load_workloads(BatchNormFwdOp), _fwd_args),
 )
 def test_batch_norm_fwd_bench(N, C, spatial, dtype, training, tune):
     x, weight, bias, running_mean, running_var = _make_inputs(N, C, spatial, dtype)
@@ -140,9 +127,7 @@ def test_batch_norm_fwd_bench(N, C, spatial, dtype, training, tune):
     op = BatchNormFwdOp(training=training, tune=tune)
 
     test = BatchNormFwdWorkload(N, C, spatial, dtype, training)
-    bm = ManifestBenchmark(_FWD_OP_NAME, op, test)
-
-    spatial = str(spatial)  # stringify tuple so it survives BenchmarkReport.record filtering
+    bm = ManifestBenchmark(op, test)
 
     def torch_fn(x, rm, rv, w, b):
         return _torch_bn_fwd(x, w, b, rm, rv)
@@ -157,8 +142,6 @@ def test_batch_norm_fwd_bench(N, C, spatial, dtype, training, tune):
                 TORCH_COMPILE_TAG: compiled_reference(torch_fn),
             },
             *inputs,
-            record_as=op,
-            params=locals(),
         )
         return
 
@@ -174,13 +157,11 @@ def test_batch_norm_fwd_bench(N, C, spatial, dtype, training, tune):
             TORCH_COMPILE_TAG: compiled_reference(torch_fn),
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )
 
 
 @pytest.mark.parametrize(
-    "N, C, spatial, dtype", workload_params(load_workloads(_BWD_OP_NAME), _bwd_args)
+    "N, C, spatial, dtype", workload_params(load_workloads(BatchNormBwdOp), _bwd_args)
 )
 def test_batch_norm_bwd_bench(N, C, spatial, dtype):
     inputs = _make_bwd_inputs(N, C, spatial, dtype)
@@ -188,9 +169,7 @@ def test_batch_norm_bwd_bench(N, C, spatial, dtype):
     op = BatchNormBwdOp()
 
     test = BatchNormBwdWorkload(N, C, spatial, dtype)
-    bm = ManifestBenchmark(_BWD_OP_NAME, op, test)
-
-    spatial = str(spatial)  # stringify tuple so it survives BenchmarkReport.record filtering
+    bm = ManifestBenchmark(op, test)
 
     # A reduction this long disagrees with the reference's order past float32's tolerance.
     assert_matches_reference(_aten_bn_bwd, _torch_bn_bwd, *inputs, rtol=1e-3, atol=1e-3)
@@ -202,6 +181,4 @@ def test_batch_norm_bwd_bench(N, C, spatial, dtype):
             "torch-native-batch-norm": _aten_bn_bwd,
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )

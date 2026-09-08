@@ -5,6 +5,7 @@ import torch
 
 from tileops.kernels.kernel_base import Kernel
 from tileops.kernels.mhc import MHCPostKernel, MHCPreKernel
+from tileops.perf.profile import tensor_core_roof
 
 from ..op_base import Op
 
@@ -12,7 +13,14 @@ __all__ = ["MHCPostFwdOp", "MHCPreFwdOp"]
 
 
 class MHCPreFwdOp(Op):
-    """Layout: BSHD"""
+    """The pre-layer half of Manifold-Constrained Hyper-Connections (mHC).
+
+    Reduces the width-expanded stream to the single tensor a layer consumes, and
+    returns the residual that MHCPostFwdOp mixes the layer output back into. The
+    expansion width is read from the shape of ``phi`` rather than passed in.
+
+    Layout: BSHD
+    """
 
     def __init__(self, kernel_map: Optional[Dict[str, Kernel]] = None, tune: bool = False) -> None:
         """Build the op. Shapes and dtype are taken from the first call.
@@ -121,9 +129,19 @@ class MHCPreFwdOp(Op):
             phi, x, b, alpha_pre, alpha_post, alpha_res, sinkhorn_repeat, sinkhorn_eps
         )
 
+    def compute_roof(self) -> str:
+        """FLOPs are matmul contractions; priced on tensor cores."""
+        return tensor_core_roof(self.dtype)
+
 
 class MHCPostFwdOp(Op):
-    """Layout: BSHD"""
+    """The post-layer half of Manifold-Constrained Hyper-Connections (mHC).
+
+    Mixes a layer's output into the residual MHCPreFwdOp set aside, restoring the
+    width-expanded stream.
+
+    Layout: BSHD
+    """
 
     def __init__(self, kernel_map: Optional[Dict[str, Kernel]] = None, tune: bool = False) -> None:
         """Build the op. Shapes and dtype are taken from the first call.

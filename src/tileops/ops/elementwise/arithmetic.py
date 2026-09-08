@@ -129,6 +129,23 @@ class PowFwdOp(BinaryOp):
     Conforms to ``torch.pow(input, exponent)``: the second operand carries
     the manifest-declared name ``exponent`` rather than the generic
     ``other`` so the L1 signature check matches the manifest.
+
+    Accuracy differs from ``torch.pow``: the power is computed as
+    ``exp2(exponent * log2|input|)``, whose error scales with
+    ``|exponent * log2(input)|`` rather than staying flat. Measured against a
+    float64 reference, in units of a float32 ulp:
+
+    | ``input`` | ``exponent`` | here | ``torch.pow`` |
+    | --- | --- | --- | --- |
+    | 0.9 to 1.1 | -1 to 1 | 1.2 | 0.5 |
+    | 0.5 to 2 | -2 to 2 | 1.8 | 0.6 |
+    | 0.25 to 4 | -3 to 3 | 3.4 | 0.6 |
+    | 0.01 to 100 | -3 to 3 | 10.6 | 0.6 |
+    | 1e-6 to 1e6 | -2 to 2 | 22.5 | 0.6 |
+
+    The bound is the table above, not a constant. Callers raising a base far
+    from one to a large exponent, or comparing results for equality, need to
+    account for it.
     """
 
     _op_name = "pow"
@@ -192,14 +209,22 @@ class LerpFwdOp(BinaryOp):
 
 
 class MaximumFwdOp(BinaryOp):
-    """Element-wise maximum with broadcast: y = max(a, b)."""
+    """Element-wise maximum with broadcast: y = max(a, b).
+
+    A NaN operand gives a NaN result, canonical rather than the operand's own
+    payload and sign bit; `torch.maximum` returns the operand's bit pattern.
+    """
 
     _op_name = "maximum"
     kernel_cls = MaximumFwdKernel
 
 
 class MinimumFwdOp(BinaryOp):
-    """Element-wise minimum with broadcast: y = min(a, b)."""
+    """Element-wise minimum with broadcast: y = min(a, b).
+
+    A NaN operand gives a NaN result, canonical rather than the operand's own
+    payload and sign bit; `torch.minimum` returns the operand's bit pattern.
+    """
 
     _op_name = "minimum"
     kernel_cls = MinimumFwdKernel

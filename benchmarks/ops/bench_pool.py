@@ -45,8 +45,8 @@ from workloads.pool import (
 # ---------------------------------------------------------------------------
 # Baselines. cuDNN is reached through the v9 backend's Resample node in ctypes, not a binding:
 # nvidia-cudnn-frontend 1.27 exposes 141 graph ops and none of them is resample, and the
-# legacy cudnnPoolingForward rejects bfloat16. Measured on an H200, the legacy entry point
-# reaches the same kernel as the graph API (0.0867 vs 0.0865 ms device-busy).
+# legacy cudnnPoolingForward rejects bfloat16. The legacy entry point reaches the same
+# kernel as the graph API, so neither is faster than the other.
 # ---------------------------------------------------------------------------
 
 # v9 backend data types (cudnn_graph.h; note HALF=2/BF16=9, unlike legacy API).
@@ -333,8 +333,8 @@ def cudnn_pool_fn(
         resample = c.create(_DESC_RESAMPLE)
         c.set(resample, _ATTR_RESAMPLE_MODE, _TYPE_RESAMPLE_MODE, [mode], "mode")
         c.set(resample, _ATTR_RESAMPLE_COMP_TYPE, _TYPE_DATA_TYPE, [_CUDNN_DATA_FLOAT], "comp")
-        # Propagating costs ~19% of the kernel on an H200 max-pool, and torch propagates:
-        # the cheaper mode returns a number where torch returns NaN.
+        # Propagating costs a fifth of the kernel, and torch propagates: the cheaper
+        # mode returns a number where torch returns NaN.
         c.set(resample, _ATTR_RESAMPLE_NAN, _TYPE_NAN, [_PROPAGATE_NAN], "nan")
         c.set(resample, _ATTR_RESAMPLE_PADDING_MODE, _TYPE_PADDING_MODE, [pad_mode], "padmode")
         c.set(resample, _ATTR_RESAMPLE_SPATIAL_DIMS, _TYPE_INT64, [ndim], "spatial")
@@ -599,20 +599,6 @@ def pool_baseline(op_name: str, test, *inputs) -> tuple:
     return choice, fn
 
 
-_ADAPTIVE_AVG_POOL2D_OP_NAME = "AdaptiveAvgPool2dFwdOp"
-_ADAPTIVE_MAX_POOL2D_OP_NAME = "AdaptiveMaxPool2dFwdOp"
-_ADAPTIVE_MAX_POOL2D_INDICES_OP_NAME = "AdaptiveMaxPool2dIndicesFwdOp"
-_AVG_POOL1D_OP_NAME = "AvgPool1dFwdOp"
-_AVG_POOL2D_OP_NAME = "AvgPool2dFwdOp"
-_AVG_POOL3D_OP_NAME = "AvgPool3dFwdOp"
-_MAX_POOL1D_OP_NAME = "MaxPool1dFwdOp"
-_MAX_POOL1D_INDICES_OP_NAME = "MaxPool1dIndicesFwdOp"
-_MAX_POOL2D_OP_NAME = "MaxPool2dFwdOp"
-_MAX_POOL2D_INDICES_OP_NAME = "MaxPool2dIndicesFwdOp"
-_MAX_POOL3D_OP_NAME = "MaxPool3dFwdOp"
-_MAX_POOL3D_INDICES_OP_NAME = "MaxPool3dIndicesFwdOp"
-
-
 def _avg_pool1d_args(workload: dict, dtype: torch.dtype) -> tuple:
     n, c_in, l_in = workload["input_shape"]
     kernel_size = workload["kernel_size"]
@@ -713,7 +699,7 @@ class MaxPool3dBenchmarkWorkload(MaxPool3dBenchCase):
 
 @pytest.mark.parametrize(
     "n, c_in, l_in, kernel_size, stride, padding, ceil_mode, count_include_pad, dtype, tune",
-    workload_params(load_workloads(_AVG_POOL1D_OP_NAME), _avg_pool1d_args),
+    workload_params(load_workloads(AvgPool1dFwdOp), _avg_pool1d_args),
 )
 def test_avg_pool1d_bench(
     n: int,
@@ -740,7 +726,7 @@ def test_avg_pool1d_bench(
         count_include_pad=count_include_pad,
         tune=tune,
     )
-    bm = ManifestBenchmark(_AVG_POOL1D_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
 
     _tag, _baseline_fn = pool_baseline(type(op).__name__, test, *inputs)
     # torch stays alongside the library baseline: it is what the nightly's ratio alert and
@@ -753,8 +739,6 @@ def test_avg_pool1d_bench(
             "torch-compile": compiled_reference(test),
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )
 
 
@@ -786,7 +770,7 @@ def _avg_pool2d_args(workload: dict, dtype: torch.dtype) -> tuple:
 
 @pytest.mark.parametrize(
     "n, c_in, h_in, w_in, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override, dtype, tune",
-    workload_params(load_workloads(_AVG_POOL2D_OP_NAME), _avg_pool2d_args),
+    workload_params(load_workloads(AvgPool2dFwdOp), _avg_pool2d_args),
 )
 def test_avg_pool2d_bench(
     n: int,
@@ -826,7 +810,7 @@ def test_avg_pool2d_bench(
         divisor_override=divisor_override,
         tune=tune,
     )
-    bm = ManifestBenchmark(_AVG_POOL2D_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
 
     _tag, _baseline_fn = pool_baseline(type(op).__name__, test, *inputs)
     bm.compare(
@@ -837,8 +821,6 @@ def test_avg_pool2d_bench(
             "torch-compile": compiled_reference(test),
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )
 
 
@@ -871,7 +853,7 @@ def _avg_pool3d_args(workload: dict, dtype: torch.dtype) -> tuple:
 
 @pytest.mark.parametrize(
     "n, c_in, d_in, h_in, w_in, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override, dtype, tune",
-    workload_params(load_workloads(_AVG_POOL3D_OP_NAME), _avg_pool3d_args),
+    workload_params(load_workloads(AvgPool3dFwdOp), _avg_pool3d_args),
 )
 def test_avg_pool3d_bench(
     n: int,
@@ -913,7 +895,7 @@ def test_avg_pool3d_bench(
         divisor_override=divisor_override,
         tune=tune,
     )
-    bm = ManifestBenchmark(_AVG_POOL3D_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
 
     _tag, _baseline_fn = pool_baseline(type(op).__name__, test, *inputs)
     bm.compare(
@@ -924,8 +906,6 @@ def test_avg_pool3d_bench(
             "torch-compile": compiled_reference(test),
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )
 
 
@@ -954,11 +934,11 @@ def _max_pool2d_args(workload: dict, dtype: torch.dtype) -> tuple:
 
 
 def _max_pool2d_bench_params() -> list:
-    return workload_params(load_workloads(_MAX_POOL2D_OP_NAME), _max_pool2d_args)
+    return workload_params(load_workloads(MaxPool2dFwdOp), _max_pool2d_args)
 
 
 def _max_pool2d_indices_bench_params() -> list:
-    return workload_params(load_workloads(_MAX_POOL2D_INDICES_OP_NAME), _max_pool2d_args)
+    return workload_params(load_workloads(MaxPool2dIndicesFwdOp), _max_pool2d_args)
 
 
 @pytest.mark.parametrize(
@@ -1000,7 +980,7 @@ def test_max_pool2d_bench(
         ceil_mode=ceil_mode,
         tune=tune,
     )
-    bm = ManifestBenchmark(_MAX_POOL2D_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
 
     _tag, _baseline_fn = pool_baseline(type(op).__name__, test, *inputs)
     bm.compare(
@@ -1011,8 +991,6 @@ def test_max_pool2d_bench(
             "torch-compile": compiled_reference(test),
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )
 
 
@@ -1056,7 +1034,7 @@ def test_max_pool2d_indices_bench(
         ceil_mode=ceil_mode,
         tune=tune,
     )
-    bm = ManifestBenchmark(_MAX_POOL2D_INDICES_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
 
     _tag, _baseline_fn = pool_baseline(type(op).__name__, test, *inputs)
     bm.compare(
@@ -1067,8 +1045,6 @@ def test_max_pool2d_indices_bench(
             "torch-compile": compiled_reference(test),
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )
 
 
@@ -1099,11 +1075,11 @@ def _max_pool1d_args(workload: dict, dtype: torch.dtype) -> tuple:
 
 
 def _max_pool1d_bench_params() -> list:
-    return workload_params(load_workloads(_MAX_POOL1D_OP_NAME), _max_pool1d_args)
+    return workload_params(load_workloads(MaxPool1dFwdOp), _max_pool1d_args)
 
 
 def _max_pool1d_indices_bench_params() -> list:
-    return workload_params(load_workloads(_MAX_POOL1D_INDICES_OP_NAME), _max_pool1d_args)
+    return workload_params(load_workloads(MaxPool1dIndicesFwdOp), _max_pool1d_args)
 
 
 @pytest.mark.parametrize(
@@ -1143,7 +1119,7 @@ def test_max_pool1d_bench(
         ceil_mode=ceil_mode,
         tune=tune,
     )
-    bm = ManifestBenchmark(_MAX_POOL1D_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
 
     _tag, _baseline_fn = pool_baseline(type(op).__name__, test, *inputs)
     bm.compare(
@@ -1154,8 +1130,6 @@ def test_max_pool1d_bench(
             "torch-compile": compiled_reference(test),
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )
 
 
@@ -1197,7 +1171,7 @@ def test_max_pool1d_indices_bench(
         ceil_mode=ceil_mode,
         tune=tune,
     )
-    bm = ManifestBenchmark(_MAX_POOL1D_INDICES_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
 
     _tag, _baseline_fn = pool_baseline(type(op).__name__, test, *inputs)
     bm.compare(
@@ -1208,8 +1182,6 @@ def test_max_pool1d_indices_bench(
             "torch-compile": compiled_reference(test),
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )
 
 
@@ -1242,11 +1214,11 @@ def _max_pool3d_args(workload: dict, dtype: torch.dtype) -> tuple:
 
 
 def _max_pool3d_bench_params() -> list:
-    return workload_params(load_workloads(_MAX_POOL3D_OP_NAME), _max_pool3d_args)
+    return workload_params(load_workloads(MaxPool3dFwdOp), _max_pool3d_args)
 
 
 def _max_pool3d_indices_bench_params() -> list:
-    return workload_params(load_workloads(_MAX_POOL3D_INDICES_OP_NAME), _max_pool3d_args)
+    return workload_params(load_workloads(MaxPool3dIndicesFwdOp), _max_pool3d_args)
 
 
 @pytest.mark.parametrize(
@@ -1290,7 +1262,7 @@ def test_max_pool3d_bench(
         ceil_mode=ceil_mode,
         tune=tune,
     )
-    bm = ManifestBenchmark(_MAX_POOL3D_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
 
     _tag, _baseline_fn = pool_baseline(type(op).__name__, test, *inputs)
     bm.compare(
@@ -1301,8 +1273,6 @@ def test_max_pool3d_bench(
             "torch-compile": compiled_reference(test),
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )
 
 
@@ -1348,7 +1318,7 @@ def test_max_pool3d_indices_bench(
         ceil_mode=ceil_mode,
         tune=tune,
     )
-    bm = ManifestBenchmark(_MAX_POOL3D_INDICES_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
 
     _tag, _baseline_fn = pool_baseline(type(op).__name__, test, *inputs)
     bm.compare(
@@ -1359,8 +1329,6 @@ def test_max_pool3d_indices_bench(
             "torch-compile": compiled_reference(test),
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )
 
 
@@ -1398,7 +1366,7 @@ def _adaptive_pool2d_args(workload: dict, dtype: torch.dtype) -> tuple:
 
 @pytest.mark.parametrize(
     "n, c_in, h_in, w_in, output_size, dtype, tune",
-    workload_params(load_workloads(_ADAPTIVE_AVG_POOL2D_OP_NAME), _adaptive_pool2d_args),
+    workload_params(load_workloads(AdaptiveAvgPool2dFwdOp), _adaptive_pool2d_args),
 )
 def test_adaptive_avg_pool2d_bench(
     n: int,
@@ -1413,7 +1381,7 @@ def test_adaptive_avg_pool2d_bench(
     inputs = test.gen_inputs()
 
     op = AdaptiveAvgPool2dFwdOp(output_size=output_size, tune=tune)
-    bm = ManifestBenchmark(_ADAPTIVE_AVG_POOL2D_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
 
     _tag, _baseline_fn = pool_baseline(type(op).__name__, test, *inputs)
     bm.compare(
@@ -1424,14 +1392,12 @@ def test_adaptive_avg_pool2d_bench(
             "torch-compile": compiled_reference(test),
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )
 
 
 @pytest.mark.parametrize(
     "n, c_in, h_in, w_in, output_size, dtype, tune",
-    workload_params(load_workloads(_ADAPTIVE_MAX_POOL2D_OP_NAME), _adaptive_pool2d_args),
+    workload_params(load_workloads(AdaptiveMaxPool2dFwdOp), _adaptive_pool2d_args),
 )
 def test_adaptive_max_pool2d_bench(
     n: int,
@@ -1446,7 +1412,7 @@ def test_adaptive_max_pool2d_bench(
     inputs = test.gen_inputs()
 
     op = AdaptiveMaxPool2dFwdOp(output_size=output_size, tune=tune)
-    bm = ManifestBenchmark(_ADAPTIVE_MAX_POOL2D_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
 
     _tag, _baseline_fn = pool_baseline(type(op).__name__, test, *inputs)
     bm.compare(
@@ -1457,14 +1423,12 @@ def test_adaptive_max_pool2d_bench(
             "torch-compile": compiled_reference(test),
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )
 
 
 @pytest.mark.parametrize(
     "n, c_in, h_in, w_in, output_size, dtype, tune",
-    workload_params(load_workloads(_ADAPTIVE_MAX_POOL2D_INDICES_OP_NAME), _adaptive_pool2d_args),
+    workload_params(load_workloads(AdaptiveMaxPool2dIndicesFwdOp), _adaptive_pool2d_args),
 )
 def test_adaptive_max_pool2d_indices_bench(
     n: int,
@@ -1481,7 +1445,7 @@ def test_adaptive_max_pool2d_indices_bench(
     inputs = test.gen_inputs()
 
     op = AdaptiveMaxPool2dIndicesFwdOp(output_size=output_size, tune=tune)
-    bm = ManifestBenchmark(_ADAPTIVE_MAX_POOL2D_INDICES_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
 
     _tag, _baseline_fn = pool_baseline(type(op).__name__, test, *inputs)
     bm.compare(
@@ -1492,6 +1456,4 @@ def test_adaptive_max_pool2d_indices_bench(
             "torch-compile": compiled_reference(test),
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )

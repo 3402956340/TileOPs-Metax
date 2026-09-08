@@ -2,6 +2,11 @@ import functools
 
 import torch
 
+# Lanes in a CUDA warp. Identical on every supported architecture (SM80-SM90)
+# and baked into TIR at build time (loop bounds, shuffle widths), so it is a
+# constant rather than a per-device query like the properties below.
+WARP_LANES: int = 32
+
 str2dtype = {
     "float16": torch.float16,
     "bfloat16": torch.bfloat16,
@@ -25,11 +30,6 @@ def _device_name(index: int) -> str:
 def _sm_version(index: int) -> int:
     major, minor = torch.cuda.get_device_capability(index)
     return major * 10 + minor
-
-
-@functools.lru_cache(maxsize=16)
-def _sm_count(index: int) -> int:
-    return torch.cuda.get_device_properties(index).multi_processor_count
 
 
 def is_h200(index: "int | None" = None) -> bool:
@@ -59,16 +59,20 @@ def is_maca() -> bool:
 
 
 def get_sm_count(index: "int | None" = None) -> int:
-    """Multiprocessors on the device; defaults to current.
+    """Streaming-multiprocessor count of the device; defaults to current.
 
-    Persistent kernels size their grid by this, so it is read once per kernel
-    construction rather than kept as a constant per kernel.
+    Uncached: torch already caches device properties in C++, and the only
+    callers read this once per kernel construction. Raises without a device,
+    like :func:`get_sm_version`: kernel selection reads this number, and a
+    stand-in for it decides a dispatch the caller cannot tell from a measured
+    one.
     """
-    return _sm_count(torch.cuda.current_device() if index is None else index)
+    device = torch.cuda.current_device() if index is None else index
+    return torch.cuda.get_device_properties(device).multi_processor_count
 
 
 def forget_device_properties() -> None:
-    """Drop the cached architecture, multiprocessor count and name of every device.
+    """Drop the cached architecture and name of every device.
 
     A device's properties do not change, so the cache is normally never
     invalidated. What does change is whether the query itself can be answered —
@@ -77,4 +81,34 @@ def forget_device_properties() -> None:
     """
     _device_name.cache_clear()
     _sm_version.cache_clear()
-    _sm_count.cache_clear()
+
+
+# Spin cycles queued before a device_busy_of measurement: tens of milliseconds
+# on any supported clock, ample to enqueue every timed call first.
+_BUSY_TIMING_SPIN_CYCLES = 50_000_000
+
+
+def device_busy_of(call, device: "torch.device", warmup: int = 5, rep: int = 20) -> float:
+    """Mean device time of *call* in milliseconds with host gaps excluded.
+
+    Judges paths that launch different kernel counts by their GPU work alone;
+    wall latency would charge a multi-launch path the host gaps between its
+    launches. A spin kernel holds the device while every timed call is
+    enqueued, so the queue then drains back to back and the event pair brackets
+    execution only. Deliberately not a profiler: the benchmark's own collector
+    owns the process's CUPTI subscription, and a second subscriber would break
+    its kernel attribution for the rest of the process.
+    """
+    with torch.cuda.device(device):
+        for _ in range(warmup):
+            call()
+        torch.cuda.synchronize()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        torch.cuda._sleep(_BUSY_TIMING_SPIN_CYCLES)
+        start.record()
+        for _ in range(rep):
+            call()
+        end.record()
+        torch.cuda.synchronize()
+        return start.elapsed_time(end) / rep

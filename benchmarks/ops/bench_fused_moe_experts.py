@@ -61,29 +61,16 @@ from tileops.manifest import load_workloads
 from tileops.ops.moe import FusedMoEExpertsNopadPersistent3WGFwdOp
 from workloads.moe import MoeExpertsWorkload
 
-_OP_NAME = "FusedMoEExpertsNopadPersistent3WGFwdOp"  # manifest entry name
-
-
 # Workload
 
 
-# Benchmark class
-
-
-# Manifest-driven parametrize
-
-
-# Benchmark test
-
-
 @pytest.mark.parametrize(
-    "num_tokens, num_experts, num_experts_local, top_k, hidden_size, ffn_size, dtype",
+    "num_tokens, num_experts, top_k, hidden_size, ffn_size, dtype",
     workload_params(
-        load_workloads(_OP_NAME),
+        load_workloads(FusedMoEExpertsNopadPersistent3WGFwdOp),
         fields(
             "num_tokens",
             "num_experts",
-            "num_experts_local",
             "top_k",
             "hidden_size",
             "ffn_size",
@@ -94,24 +81,13 @@ _OP_NAME = "FusedMoEExpertsNopadPersistent3WGFwdOp"  # manifest entry name
 def test_moe_experts_nopad_bench(
     num_tokens: int,
     num_experts: int,
-    num_experts_local: int,
     top_k: int,
     hidden_size: int,
     ffn_size: int,
     dtype: torch.dtype,
 ) -> None:
-    # Routing always draws from the global expert table. Under expert parallelism
-    # the weights are this rank's slice of it and expert_map names that slice.
     test = MoeExpertsWorkload(num_tokens, num_experts, top_k, hidden_size, ffn_size, dtype)
     hidden, w1, w2, topk_weights, topk_ids = test.gen_inputs()
-
-    expert_map = None
-    if num_experts_local < num_experts:
-        w1, w2 = w1[:num_experts_local].contiguous(), w2[:num_experts_local].contiguous()
-        expert_map = torch.full((num_experts,), -1, dtype=torch.int32, device=hidden.device)
-        expert_map[:num_experts_local] = torch.arange(
-            num_experts_local, dtype=torch.int32, device=hidden.device
-        )
 
     output = torch.empty(num_tokens, hidden_size, dtype=dtype, device="cuda")
     ws1 = torch.empty(0, dtype=dtype, device="cuda")
@@ -121,12 +97,11 @@ def test_moe_experts_nopad_bench(
     nopad = FusedMoEExpertsNopadPersistent3WGFwdOp(
         num_tokens=num_tokens,
         num_experts=num_experts,
-        num_experts_local=num_experts_local,
         top_k=top_k,
         hidden_size=hidden_size,
         ffn_size=ffn_size,
     )
-    bm = ManifestBenchmark(_OP_NAME, nopad, test)
+    bm = ManifestBenchmark(nopad, test)
 
     def _nopad_fn(hidden, w1, w2, topk_weights, topk_ids):
         nopad.forward(
@@ -136,10 +111,8 @@ def test_moe_experts_nopad_bench(
             w2,
             topk_weights,
             topk_ids,
-            expert_map=expert_map,
             workspace1=ws1,
             workspace2=ws2,
-            num_experts=num_experts,
         )
         return output
 
@@ -147,26 +120,6 @@ def test_moe_experts_nopad_bench(
     torch.cuda.synchronize()
 
     functors = {"tileops-nopad-3wg": _nopad_fn}
-
-    if expert_map is not None:
-        # FIXME(staged-rollout): this row records no baseline.
-        #
-        # Broken invariant: every benchmark records >=1 non-tileops baseline.
-        # Why: under expert parallelism the weights are this rank's slice of the
-        #   expert table, and vLLM's fused_experts takes the full table, so the
-        #   column would time a different amount of work.
-        # Cleanup: a baseline that runs the experts this rank owns.
-        bm.compare(
-            functors,
-            hidden,
-            w1,
-            w2,
-            topk_weights,
-            topk_ids,
-            record_as=nopad,
-            params=locals(),
-        )
-        return
 
     # -- vLLM Triton baseline -------------------------------------------------
     if _VLLM_TRITON_AVAILABLE:
@@ -220,4 +173,4 @@ def test_moe_experts_nopad_bench(
 
         functors["torch-ref"] = _torch_fn
 
-    bm.compare(functors, hidden, w1, w2, topk_weights, topk_ids, record_as=nopad, params=locals())
+    bm.compare(functors, hidden, w1, w2, topk_weights, topk_ids)

@@ -132,10 +132,6 @@ def mamba2_fwd_ref(
 
 # FLOPS / memory calculators
 
-# Benchmark test
-
-_OP_NAME = "Mamba2FwdOp"
-
 
 def _mamba2_args(workload: dict) -> tuple:
     """Constructor arguments for one manifest workload row."""
@@ -158,7 +154,7 @@ def _mamba2_args(workload: dict) -> tuple:
 @pytest.mark.parametrize(
     "batch, seqlen, n_heads, d_head, d_state, n_groups, chunk_size, dt_softplus,"
     " has_dt_bias, has_initial_states, dtype, tune",
-    workload_params(load_workloads("Mamba2FwdOp"), then_dtype(_mamba2_args, tune=False)),
+    workload_params(load_workloads(Mamba2FwdOp), then_dtype(_mamba2_args, tune=False)),
 )
 def test_mamba2_fwd_bench(
     batch,
@@ -203,7 +199,7 @@ def test_mamba2_fwd_bench(
         dt_softplus=dt_softplus,
         tune=tune,
     )
-    bm = ManifestBenchmark(_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
 
     # Pass inputs directly so bench_kernel clones them each iteration,
     # giving accurate per-clone addressing and fair kernel-only timing.
@@ -247,4 +243,4 @@ def test_mamba2_fwd_bench(
     functors["torch-ref"] = (_torch_wrapper, reference_args)
     functors[TORCH_COMPILE_TAG] = (compiled_reference(_torch_wrapper), reference_args)
 
-    bm.compare(functors, x, dt, A, B, C, dt_bias, initial_states, record_as=op, params=locals())
+    bm.compare(functors, x, dt, A, B, C, dt_bias, initial_states)

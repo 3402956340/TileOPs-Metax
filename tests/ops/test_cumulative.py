@@ -11,8 +11,6 @@ import torch
 from tests.test_base import FixtureBase, TestBase
 from workloads.reduction import CumulativeWorkload
 
-# Fixtures
-
 
 class CumulativeBasicFixture(FixtureBase):
     PARAMS = [
@@ -83,9 +81,6 @@ class Cumulative1DFixture(FixtureBase):
     ]
 
 
-# TestBase helpers
-
-
 class CumulativeTest(CumulativeWorkload, TestBase):
     """Parameterized test helper for cumulative ops."""
 
@@ -112,9 +107,6 @@ def _cumprod_tol(dtype: torch.dtype) -> dict:
     if dtype == torch.float32:
         return {"atol": 1e-3, "rtol": 1e-3}
     return {"atol": 5e-2, "rtol": 5e-2}
-
-
-# CumsumFwdOp tests
 
 
 @CumulativeBasicFixture
@@ -189,9 +181,6 @@ def test_cumsum_dynamic_shape_kernel_cache() -> None:
     assert len(list(op.iter_kernels())) == 1
     op(x2)
     assert len(list(op.iter_kernels())) == 2
-
-
-# CumprodFwdOp tests
 
 
 @CumulativeBasicFixture
@@ -295,18 +284,23 @@ def test_cumprod_dim_axis1(batch: int, hidden: int, seq: int, dtype: torch.dtype
 
 @pytest.mark.smoke
 @pytest.mark.parametrize(
-    "M, N, dtype, parallel",
+    "M, N, dtype, backend",
     [
-        (64, 16384, torch.float32, True),  # block_n=128
-        (64, 32768, torch.bfloat16, True),  # block_n=256
-        (32, 16384, torch.float16, True),  # fp16 intermediate
-        (64, 8200, torch.float32, True),  # N % block_n != 0: masked tail
-        (64, 8192, torch.bfloat16, False),  # N boundary
-        (128, 16384, torch.bfloat16, False),  # M boundary
+        (64, 16384, torch.float32, "row_scan"),
+        (64, 32768, torch.bfloat16, "row_scan"),
+        (64, 8200, torch.float32, "parallel_scan"),  # a padded width the row scan declines
+        (64, 8200, torch.bfloat16, "parallel_scan"),  # same, at the other element width
+        # 65 elements per thread is not a whole number of vector accesses
+        (64, 16640, torch.bfloat16, "parallel_scan"),
     ],
 )
-def test_cumsum_backend_dispatch(M: int, N: int, dtype: torch.dtype, parallel: bool) -> None:
-    """Each shape takes the expected backend and matches torch.cumsum."""
+def test_cumsum_backend_dispatch(M: int, N: int, dtype: torch.dtype, backend: str) -> None:
+    """Each shape takes the expected backend and matches torch.cumsum.
+
+    The row scan takes every width it can stage exactly at a chunk whose bytes are a
+    whole number of vector accesses, which is where it measures fastest; the parallel
+    scan is left the widths the alignment would pad and the chunks it would misalign.
+    """
     from tileops.ops.reduction.cumulative import CumsumFwdOp
 
     x = torch.randn(M, N, dtype=dtype, device="cuda")
@@ -321,9 +315,35 @@ def test_cumsum_backend_dispatch(M: int, N: int, dtype: torch.dtype, parallel: b
     # The kernel the call built, not one refetched by a key: the key is a read-back of
     # the arguments and says nothing about which backend was chosen.
     (kernel,) = op.built_kernels("cumulative_fwd").values()
-    assert kernel.use_parallel == parallel, f"({M}, {N}): unexpected backend"
-    if parallel:
+    assert kernel.strategy == backend, f"({M}, {N}): took {kernel.strategy}"
+    if kernel.strategy == "parallel_scan":
         assert kernel.config["block_n"] == (256 if N > 16384 else 128)
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    "name, marks",
+    [
+        ("nan", [(100, float("nan"))]),
+        ("both_infinities", [(100, float("inf")), (200, -float("inf"))]),
+        ("signed_zero", [(100, -0.0), (200, 0.0)]),
+    ],
+)
+def test_scan_nonfinite_and_signed_zero_match_torch(name: str, marks: list) -> None:
+    """A scan carries non-finite values and signed zero the way torch does.
+
+    The whole-row backend combines per-thread chunk totals rather than accumulating left
+    to right, so a NaN or an inf has to still reach every later element.
+    """
+    from tileops.ops.reduction.cumulative import CumprodFwdOp, CumsumFwdOp
+
+    n = 4096
+    x = torch.ones(2, n, dtype=torch.float32, device="cuda")
+    for index, value in marks:
+        x[:, index] = value
+
+    for op, ref in ((CumsumFwdOp(dim=-1), torch.cumsum), (CumprodFwdOp(dim=-1), torch.cumprod)):
+        torch.testing.assert_close(op(x), ref(x, dim=-1), rtol=1e-5, atol=1e-5, equal_nan=True)
 
 
 @pytest.mark.smoke

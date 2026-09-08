@@ -17,13 +17,12 @@ from tileops.manifest import load_workloads
 from tileops.ops.moe import MoeGroupedGemmNopadFwdOp
 from workloads.moe import MoeGroupedGemmNopadWorkload
 
-_OP_NAME = "MoeGroupedGemmNopadFwdOp"
-
 
 @pytest.mark.parametrize(
     "numel, num_experts, n, k, dtype",
     workload_params(
-        load_workloads(_OP_NAME), fields("numel", "num_experts", "n", "k", dtype_last=True)
+        load_workloads(MoeGroupedGemmNopadFwdOp),
+        fields("numel", "num_experts", "n", "k", dtype_last=True),
     ),
 )
 def test_moe_grouped_gemm_nopad_bench(
@@ -37,9 +36,8 @@ def test_moe_grouped_gemm_nopad_bench(
     a, b, true_sizes, true_offsets = workload.gen_inputs()
 
     op = MoeGroupedGemmNopadFwdOp(numel, num_experts, n, k)
-    bm = ManifestBenchmark(_OP_NAME, op, workload)
+    bm = ManifestBenchmark(op, workload)
 
-    # Warmup: trigger JIT compilation before timed profiling.
     op(a, b, true_sizes, true_offsets)
     torch.cuda.synchronize()
 
@@ -70,6 +68,4 @@ def test_moe_grouped_gemm_nopad_bench(
         b,
         true_sizes,
         true_offsets,
-        record_as=op,
-        params=locals(),
     )

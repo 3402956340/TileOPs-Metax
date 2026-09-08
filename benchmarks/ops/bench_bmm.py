@@ -12,10 +12,6 @@ from tileops.manifest import load_workloads
 from tileops.ops import BmmFp8KNFwdOp, BmmFp8NKFwdOp, BmmFwdOp
 from workloads.bmm import BmmFp8Workload, BmmWorkload
 
-_OP_NAME = "BmmFwdOp"
-_FP8_KN_OP_NAME = "BmmFp8KNFwdOp"
-_FP8_NK_OP_NAME = "BmmFp8NKFwdOp"
-
 
 class BmmFp8BenchmarkWorkload(BmmFp8Workload):
     def torch_fp32_bmm_ref(self, *inputs: torch.Tensor) -> torch.Tensor:
@@ -60,14 +56,14 @@ def _flashinfer_bmm_fp8_per_tensor_ref(
 
 @pytest.mark.parametrize(
     "batch, m, n, k, dtype",
-    workload_params(load_workloads(_OP_NAME), fields("b", "m", "n", "k", dtype_last=True)),
+    workload_params(load_workloads(BmmFwdOp), fields("b", "m", "n", "k", dtype_last=True)),
 )
 def test_bmm_bench(batch: int, m: int, n: int, k: int, dtype: torch.dtype) -> None:
     workload = BmmWorkload(batch, m, n, k, dtype)
     a, b = workload.gen_inputs()
 
     op = BmmFwdOp(tune=True)
-    bm = ManifestBenchmark(_OP_NAME, op, workload)
+    bm = ManifestBenchmark(op, workload)
 
     # eval_roofline() is read lazily after profiling, by which point
     # forward() has bound the dims.
@@ -83,14 +79,12 @@ def test_bmm_bench(batch: int, m: int, n: int, k: int, dtype: torch.dtype) -> No
         },
         a,
         b,
-        record_as=op,
-        params=locals(),
     )
 
 
 @pytest.mark.parametrize(
     "batch, m, n, k, dtype",
-    workload_params(load_workloads(_FP8_KN_OP_NAME), fields("b", "m", "n", "k", dtype_last=True)),
+    workload_params(load_workloads(BmmFp8KNFwdOp), fields("b", "m", "n", "k", dtype_last=True)),
 )
 def test_bmm_fp8_kn_bench(
     batch: int,
@@ -105,7 +99,7 @@ def test_bmm_fp8_kn_bench(
     a, b_kn, scale_a, scale_b = workload.gen_inputs()
 
     op = BmmFp8KNFwdOp(out_dtype=out_dtype, tune=True)
-    bm = ManifestBenchmark(_FP8_KN_OP_NAME, op, workload)
+    bm = ManifestBenchmark(op, workload)
     functors = {
         "tileops": (op, (a, b_kn, scale_a, scale_b)),
         "torch-fp32-ref": (workload.torch_fp32_bmm_ref, (a, b_kn, scale_a, scale_b)),
@@ -115,7 +109,7 @@ def test_bmm_fp8_kn_bench(
         return _flashinfer_bmm_fp8_per_tensor_ref(workload, a_, b_, sa_, sb_)
 
     # FlashInfer 0.6.6+ is required for the FP8 BMM benchmark.
-    flashinfer = pytest.importorskip("flashinfer", minversion="0.6.6")
+    pytest.importorskip("flashinfer", minversion="0.6.6")
     # b_kn is already [B, K, N], the order flashinfer's bmm_fp8 reads.
     try:
         flashinfer_fn(a, b_kn, scale_a, scale_b)
@@ -124,12 +118,12 @@ def test_bmm_fp8_kn_bench(
     else:
         functors["flashinfer-bmm-fp8"] = (flashinfer_fn, (a, b_kn, scale_a, scale_b))
 
-    bm.compare(functors, record_as=op, params=locals())
+    bm.compare(functors)
 
 
 @pytest.mark.parametrize(
     "batch, m, n, k, dtype",
-    workload_params(load_workloads(_FP8_NK_OP_NAME), fields("b", "m", "n", "k", dtype_last=True)),
+    workload_params(load_workloads(BmmFp8NKFwdOp), fields("b", "m", "n", "k", dtype_last=True)),
 )
 def test_bmm_fp8_nk_bench(
     batch: int,
@@ -146,7 +140,7 @@ def test_bmm_fp8_nk_bench(
 
     # Fast path: feed [B, N, K] (K-innermost) using BmmFp8NKFwdOp.
     op = BmmFp8NKFwdOp(out_dtype=out_dtype, tune=True)
-    bm = ManifestBenchmark(_FP8_NK_OP_NAME, op, workload)
+    bm = ManifestBenchmark(op, workload)
     functors = {
         "tileops": (op, (a, b_nk, scale_a, scale_b)),
         "torch-fp32-ref": (workload.torch_fp32_bmm_ref, (a, b_kn, scale_a, scale_b)),
@@ -165,4 +159,4 @@ def test_bmm_fp8_nk_bench(
     else:
         functors["flashinfer-bmm-fp8"] = (flashinfer_fn, (a, b_kmajor, scale_a, scale_b))
 
-    bm.compare(functors, record_as=op, params=locals())
+    bm.compare(functors)

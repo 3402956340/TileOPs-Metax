@@ -5,6 +5,7 @@ import tilelang
 import tilelang.language as T
 import torch
 
+from tileops.kernels.constants import FP8_E4M3_MAX
 from tileops.kernels.kernel_base import Kernel
 from tileops.utils import is_maca
 
@@ -52,9 +53,6 @@ def _make_apply_softcap_no_mask_guard(score_scale, softcap, accum_dtype, block_r
             )
 
     return apply_softcap
-
-
-# GQA
 
 
 @functools.lru_cache(maxsize=32)
@@ -524,7 +522,7 @@ class GQAPrefillFwdKernel(PackedPrefillKernel):
     """
 
     supported_archs: list[int] = [80, 89, 90]
-    #: The implementation behind the specialised ones for this key.
+    # The implementation behind the specialised ones for this key.
     general: bool = True
 
     @classmethod
@@ -1053,8 +1051,8 @@ def _gqa_prefill_paged_with_fp8_kv_cache_fwd_kernel(
         )
         rescale = make_rescale(block_m, dim)
         page_size_log2 = page_size.bit_length() - 1
-        fp8_min = -448.0
-        fp8_max = 448.0
+        fp8_min = -FP8_E4M3_MAX
+        fp8_max = FP8_E4M3_MAX
 
         @T.macro
         def quantize_fp8(value, scale_value):
@@ -1526,13 +1524,15 @@ def _gqa_prefill_paged_with_kv_cache_rope_append_kernel(
                             paired_d = T.if_then_else(
                                 d < half, d + half, T.if_then_else(d < rotary_dim, d - half, d)
                             )
-                            c = cos_table[logical_pos, freq_idx]
-                            s = sin_table[logical_pos, freq_idx]
+                            c = T.Cast("float32", cos_table[logical_pos, freq_idx])
+                            s = T.Cast("float32", sin_table[logical_pos, freq_idx])
                             val = k_new[q_start + new_pos, by, d]
-                            paired_val = k_new[q_start + new_pos, by, paired_d]
+                            paired_val = T.Cast("float32", k_new[q_start + new_pos, by, paired_d])
                             rotated = T.if_then_else(d < half, -paired_val, paired_val)
                             k_pages[physical_start + i, by, d] = T.if_then_else(
-                                d < rotary_dim, val * c + rotated * s, val
+                                d < rotary_dim,
+                                T.Cast(dtype, T.Cast("float32", val) * c + rotated * s),
+                                val,
                             )
                             v_pages[physical_start + i, by, d] = v_new[q_start + new_pos, by, d]
                     else:
@@ -1546,13 +1546,15 @@ def _gqa_prefill_paged_with_kv_cache_rope_append_kernel(
                             paired_d = T.if_then_else(
                                 d < half, d + half, T.if_then_else(d < rotary_dim, d - half, d)
                             )
-                            c = cos_table[logical_pos, freq_idx]
-                            s = sin_table[logical_pos, freq_idx]
+                            c = T.Cast("float32", cos_table[logical_pos, freq_idx])
+                            s = T.Cast("float32", sin_table[logical_pos, freq_idx])
                             val = k_new[q_start + new_pos, by, d]
-                            paired_val = k_new[q_start + new_pos, by, paired_d]
+                            paired_val = T.Cast("float32", k_new[q_start + new_pos, by, paired_d])
                             rotated = T.if_then_else(d < half, -paired_val, paired_val)
                             k_pages[physical_pos, by, d] = T.if_then_else(
-                                d < rotary_dim, val * c + rotated * s, val
+                                d < rotary_dim,
+                                T.Cast(dtype, T.Cast("float32", val) * c + rotated * s),
+                                val,
                             )
                             v_pages[physical_pos, by, d] = v_new[q_start + new_pos, by, d]
                 else:
@@ -1568,13 +1570,15 @@ def _gqa_prefill_paged_with_kv_cache_rope_append_kernel(
                             paired_d = T.if_then_else(
                                 d < half, d + half, T.if_then_else(d < rotary_dim, d - half, d)
                             )
-                            c = cos_table[logical_pos, freq_idx]
-                            s = sin_table[logical_pos, freq_idx]
+                            c = T.Cast("float32", cos_table[logical_pos, freq_idx])
+                            s = T.Cast("float32", sin_table[logical_pos, freq_idx])
                             val = k_new[q_start + new_pos, by, d]
-                            paired_val = k_new[q_start + new_pos, by, paired_d]
+                            paired_val = T.Cast("float32", k_new[q_start + new_pos, by, paired_d])
                             rotated = T.if_then_else(d < half, -paired_val, paired_val)
                             k_pages[physical_pos, by, d] = T.if_then_else(
-                                d < rotary_dim, val * c + rotated * s, val
+                                d < rotary_dim,
+                                T.Cast(dtype, T.Cast("float32", val) * c + rotated * s),
+                                val,
                             )
                             v_pages[physical_pos, by, d] = v_new[q_start + new_pos, by, d]
 
@@ -1761,12 +1765,16 @@ def _gqa_prefill_paged_with_kv_cache_rope_fwd_kernel(
                         d < half, d + half, T.if_then_else(d < rotary_dim, d - half, d)
                     )
                     if new_pos < q_len:
-                        c = cos_table[abs_pos, freq_idx]
-                        s = sin_table[abs_pos, freq_idx]
+                        c = T.Cast("float32", cos_table[abs_pos, freq_idx])
+                        s = T.Cast("float32", sin_table[abs_pos, freq_idx])
                         val = q[q_start + new_pos, by, d]
-                        paired_val = q[q_start + new_pos, by, paired_d]
+                        paired_val = T.Cast("float32", q[q_start + new_pos, by, paired_d])
                         rotated = T.if_then_else(d < half, -paired_val, paired_val)
-                        q_shared[i, d] = T.if_then_else(d < rotary_dim, val * c + rotated * s, val)
+                        q_shared[i, d] = T.if_then_else(
+                            d < rotary_dim,
+                            T.Cast(dtype, T.Cast("float32", val) * c + rotated * s),
+                            val,
+                        )
                     else:
                         q_shared[i, d] = T.cast(0, dtype)
 
@@ -1822,13 +1830,17 @@ def _gqa_prefill_paged_with_kv_cache_rope_fwd_kernel(
                             paired_d = T.if_then_else(
                                 d < half, d + half, T.if_then_else(d < rotary_dim, d - half, d)
                             )
-                            c = cos_table[logical_pos, freq_idx]
-                            s = sin_table[logical_pos, freq_idx]
+                            c = T.Cast("float32", cos_table[logical_pos, freq_idx])
+                            s = T.Cast("float32", sin_table[logical_pos, freq_idx])
                             val = k_new[q_start + new_pos, cur_kv_head, d]
-                            paired_val = k_new[q_start + new_pos, cur_kv_head, paired_d]
+                            paired_val = T.Cast(
+                                "float32", k_new[q_start + new_pos, cur_kv_head, paired_d]
+                            )
                             rotated = T.if_then_else(d < half, -paired_val, paired_val)
                             k_shared[j, d] = T.if_then_else(
-                                d < rotary_dim, val * c + rotated * s, val
+                                d < rotary_dim,
+                                T.Cast(dtype, T.Cast("float32", val) * c + rotated * s),
+                                val,
                             )
                             v_shared[j, d] = v_new[q_start + new_pos, cur_kv_head, d]
                     else:
@@ -1847,13 +1859,17 @@ def _gqa_prefill_paged_with_kv_cache_rope_fwd_kernel(
                                 paired_d = T.if_then_else(
                                     d < half, d + half, T.if_then_else(d < rotary_dim, d - half, d)
                                 )
-                                c = cos_table[kv_pos, freq_idx]
-                                s = sin_table[kv_pos, freq_idx]
+                                c = T.Cast("float32", cos_table[kv_pos, freq_idx])
+                                s = T.Cast("float32", sin_table[kv_pos, freq_idx])
                                 val = k_new[q_start + new_pos, cur_kv_head, d]
-                                paired_val = k_new[q_start + new_pos, cur_kv_head, paired_d]
+                                paired_val = T.Cast(
+                                    "float32", k_new[q_start + new_pos, cur_kv_head, paired_d]
+                                )
                                 rotated = T.if_then_else(d < half, -paired_val, paired_val)
                                 k_shared[j, d] = T.if_then_else(
-                                    d < rotary_dim, val * c + rotated * s, val
+                                    d < rotary_dim,
+                                    T.Cast(dtype, T.Cast("float32", val) * c + rotated * s),
+                                    val,
                                 )
                                 v_shared[j, d] = v_new[q_start + new_pos, cur_kv_head, d]
                             else:

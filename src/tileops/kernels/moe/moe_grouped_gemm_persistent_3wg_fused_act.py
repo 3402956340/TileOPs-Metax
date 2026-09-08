@@ -16,6 +16,7 @@ import tilelang
 import tilelang.language as T
 import torch
 
+from tileops.kernels.constants import INV_SQRT2
 from tileops.kernels.grouped_gemm import rows_per_group_regime
 from tileops.kernels.grouped_tiling import GroupTiling
 from tileops.kernels.kernel_base import Kernel
@@ -58,10 +59,7 @@ def _fused_act_expr(name):
     if name == "gelu_and_mul":
         # exact erf GELU: 0.5*g*(1+erf(g/sqrt(2)))
         return lambda gate, up: (
-            T.float32(0.5)
-            * gate
-            * (T.float32(1.0) + T.erf(gate * T.float32(0.7071067811865476)))
-            * up
+            T.float32(0.5) * gate * (T.float32(1.0) + T.erf(gate * T.float32(INV_SQRT2))) * up
         )
     raise ValueError(f"unsupported activation {name!r}")
 
@@ -71,7 +69,7 @@ class MoeGroupedGemmPersistent3WGFusedActKernel(Kernel):
 
     supported_archs: list[int] = [90]
 
-    #: Gated activations this kernel can carry in its epilogue.
+    # Gated activations this kernel can carry in its epilogue.
     SUPPORTED_ACTIVATIONS = ("gelu_and_mul", "silu_and_mul")
 
     def __init__(
@@ -133,9 +131,9 @@ class MoeGroupedGemmPersistent3WGFusedActKernel(Kernel):
         """Shapes where fusing the activation into this GEMM is the faster pipeline.
 
         The short-group schedules, where the tiling divides the shape; ``call.n`` is
-        the ffn width. Measured on H200 with bf16, fusing wins 5-35% inside this
-        region and loses 6-10% outside it, and the answer is extrapolated to the
-        other SM90 parts and dtypes that classify the same way.
+        the ffn width. Fusing wins inside this region and loses outside it, and the
+        answer is extrapolated to the other SM90 parts and dtypes that classify the
+        same way.
         """
         if call.activation not in cls.SUPPORTED_ACTIVATIONS:
             return False

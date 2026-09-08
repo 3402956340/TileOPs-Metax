@@ -13,9 +13,9 @@ from .call_spec import GemmCall
 
 GROUP_SIZE = 128
 
-#: Packed bytes each carried partial sum covers. Four keeps the accumulator
-#: fragment small enough to stay in registers at the tile sizes that saturate
-#: the weight stream.
+# Packed bytes each carried partial sum covers. Four keeps the accumulator
+# fragment small enough to stay in registers at the tile sizes that saturate
+# the weight stream.
 BYTES_PER_SLOT = 4
 
 __all__ = ["GemmW4A16DecodeKernel"]
@@ -135,8 +135,8 @@ def _gemm_w4a16_decode_kernel(n: int, k: int, dtype: str) -> Callable:
 class GemmW4A16DecodeKernel(Kernel):
     """Fuse nibble unpacking, affine dequantization, and the M=1 GEMV."""
 
-    #: ``packed_weight`` and ``weight_zero`` are uint8 payloads; the K loop is
-    #: ``k // block_k``.
+    # ``packed_weight`` and ``weight_zero`` are uint8 payloads; the K loop is
+    # ``k // block_k``.
     autotune_accepts_random_int_inputs: bool = True
 
     supported_archs: list[int] = [80, 86, 89, 90]
@@ -174,9 +174,8 @@ class GemmW4A16DecodeKernel(Kernel):
 
     @property
     def default_config(self) -> dict:
-        # Tuned on H200 over the manifest's four M=1 workloads: 32 rows of N per
-        # CTA still leaves 224 CTAs at the smallest N, and 128 threads keeps the
-        # carried accumulator in registers.
+        # 32 rows of N per CTA still leaves 224 CTAs at the manifest's smallest
+        # N, and 128 threads keeps the carried accumulator in registers.
         return {"block_n": 32, "block_k": 512, "threads": 128, "num_stages": 4}
 
     @property

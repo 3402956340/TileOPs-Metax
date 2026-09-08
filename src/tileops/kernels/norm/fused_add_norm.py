@@ -8,8 +8,12 @@ memory round-trip compared to separate add + norm.  Both kernels return dual
 outputs ``(y, x + residual)`` so downstream residual connections can reuse the
 pre-norm sum without recomputation.
 
-256-element alignment (512 bytes for fp16/bf16) required by T.copy() shared
-memory instructions.
+The row is held in a register fragment from the load through the store. Shared memory
+is left to the FusedAddRMSNorm path that keeps the pre-norm sum there to stay under the
+register limit on a grid that already fills the device.
+
+256-element alignment (512 bytes for fp16/bf16) required by the T.copy() that fills that
+shared buffer.
 """
 
 import functools
@@ -22,6 +26,7 @@ import torch.nn.functional as F
 
 from tileops.kernels.kernel_base import Kernel
 from tileops.kernels.tiling import ALIGNMENT, align_up
+from tileops.utils import WARP_LANES, get_sm_count
 
 from ._config import select_row_config, select_row_configs
 
@@ -38,6 +43,9 @@ def _fused_add_layer_norm_kernel(M, N, eps, dtype):
 
     @tilelang.jit(out_idx=[4, 5])
     def _func(block_m, threads):
+        # A tail row block runs past the end unless every index is guarded.
+        row_guard = M % block_m != 0
+
         @T.prim_func
         def main(
             x: T.Tensor[(M, N_padded), dtype],
@@ -48,8 +56,6 @@ def _fused_add_layer_norm_kernel(M, N, eps, dtype):
             residual_out: T.Tensor[(M, N_padded), dtype],
         ):
             with T.Kernel(T.ceildiv(M, block_m), threads=threads) as pid_m:
-                shared_x = T.alloc_shared((block_m, N_padded), dtype)
-                shared_r = T.alloc_shared((block_m, N_padded), dtype)
                 x_local = T.alloc_fragment((block_m, N_padded), dtype)
                 r_local = T.alloc_fragment((block_m, N_padded), dtype)
                 add_f32 = T.alloc_fragment((block_m, N_padded), "float32")
@@ -57,11 +63,26 @@ def _fused_add_layer_norm_kernel(M, N, eps, dtype):
                 mean_val = T.alloc_fragment((block_m,), "float32")
                 rstd = T.alloc_fragment((block_m,), "float32")
 
-                # Load x and residual via shared memory
-                T.copy(x[pid_m * block_m, 0], shared_x)
-                T.copy(shared_x, x_local)
-                T.copy(residual[pid_m * block_m, 0], shared_r)
-                T.copy(shared_r, r_local)
+                # Both operands are read once and reduced along the row the thread
+                # already owns, so neither has to pass through shared memory.
+                if row_guard:
+                    for i, j in T.Parallel(block_m, N_padded):
+                        x_local[i, j] = T.if_then_else(
+                            pid_m * block_m + i < M,
+                            x[pid_m * block_m + i, j],
+                            T.cast(0.0, dtype),
+                        )
+                    for i, j in T.Parallel(block_m, N_padded):
+                        r_local[i, j] = T.if_then_else(
+                            pid_m * block_m + i < M,
+                            residual[pid_m * block_m + i, j],
+                            T.cast(0.0, dtype),
+                        )
+                else:
+                    for i, j in T.Parallel(block_m, N_padded):
+                        x_local[i, j] = x[pid_m * block_m + i, j]
+                    for i, j in T.Parallel(block_m, N_padded):
+                        r_local[i, j] = residual[pid_m * block_m + i, j]
 
                 # Fused add: compute (x + residual) in fp32
                 for i, j in T.Parallel(block_m, N_padded):
@@ -91,17 +112,19 @@ def _fused_add_layer_norm_kernel(M, N, eps, dtype):
                 # --- Output y: (add - mean) * rstd * weight + bias ---
                 # Re-cast from x_local (which holds the pre-norm sum in native dtype)
                 for i, j in T.Parallel(block_m, N_padded):
-                    r_local[i, j] = (T.cast(x_local[i, j], "float32") - mean_val[i]) * rstd[
-                        i
-                    ] * T.cast(weight[j], "float32") + T.cast(bias[j], "float32")
-
-                # Write y
-                T.copy(r_local, shared_x)
-                T.copy(shared_x, y[pid_m * block_m, 0])
+                    if (not row_guard) or pid_m * block_m + i < M:
+                        y[pid_m * block_m + i, j] = T.cast(
+                            (T.cast(x_local[i, j], "float32") - mean_val[i])
+                            * rstd[i]
+                            * T.cast(weight[j], "float32")
+                            + T.cast(bias[j], "float32"),
+                            dtype,
+                        )
 
                 # Write residual_out = x + residual
-                T.copy(x_local, shared_r)
-                T.copy(shared_r, residual_out[pid_m * block_m, 0])
+                for i, j in T.Parallel(block_m, N_padded):
+                    if (not row_guard) or pid_m * block_m + i < M:
+                        residual_out[pid_m * block_m + i, j] = x_local[i, j]
 
         return main
 
@@ -115,8 +138,9 @@ class FusedAddLayerNormKernel(Kernel):
     ``x + residual``.  The residual add is fused into the first load pass
     to save one global memory round-trip.
 
-    Supports SM80+ architectures.  Uses 256-element alignment for shared
-    memory copies.
+    Supports SM80+ architectures.  Uses 256-element alignment for the shared
+    buffer the register-relief path fills; every other path holds the row in a
+    register fragment from the load through the store.
     """
 
     supported_archs: list[int] = [80, 86, 89, 90]
@@ -144,7 +168,7 @@ class FusedAddLayerNormKernel(Kernel):
 
     @property
     def default_config(self) -> dict:
-        return select_row_config(self.N_padded)
+        return select_row_config()
 
     @property
     def autotune_configs(self) -> list[dict]:
@@ -206,11 +230,18 @@ class FusedAddLayerNormKernel(Kernel):
 
 
 @functools.lru_cache(maxsize=32)
-def _fused_add_rms_norm_kernel(M, N, eps, dtype):
+def _fused_add_rms_norm_kernel(M, N, eps, dtype, sm_count):
     N_padded = align_up(N, ALIGNMENT)
 
     @tilelang.jit(out_idx=[3, 4])
     def _func(block_m, threads):
+        # Forming the sum in shared rather than a second row-wide fragment keeps
+        # bfloat16 off the register limit, but only pays when the registers it
+        # frees buy resident blocks: a single-row call measured 0.94x.
+        sum_in_shared = -(-M // block_m) >= sm_count
+        # A tail row block runs past the end unless every index is guarded.
+        row_guard = M % block_m != 0
+
         @T.prim_func
         def main(
             x: T.Tensor[(M, N_padded), dtype],
@@ -220,55 +251,206 @@ def _fused_add_rms_norm_kernel(M, N, eps, dtype):
             residual_out: T.Tensor[(M, N_padded), dtype],
         ):
             with T.Kernel(T.ceildiv(M, block_m), threads=threads) as pid_m:
-                shared_x = T.alloc_shared((block_m, N_padded), dtype)
+                if sum_in_shared:
+                    shared_x = T.alloc_shared((block_m, N_padded), dtype)
+                    shared_r = T.alloc_shared((block_m, N_padded), dtype)
                 x_local = T.alloc_fragment((block_m, N_padded), dtype)
-                r_local = T.alloc_fragment((block_m, N_padded), dtype)
                 xsq_f32 = T.alloc_fragment((block_m, N_padded), "float32")
                 sumsq = T.alloc_fragment((block_m,), "float32")
                 rrms = T.alloc_fragment((block_m,), "float32")
 
-                # Load x and residual via shared memory
-                T.copy(x[pid_m * block_m, 0], shared_x)
-                T.copy(shared_x, x_local)
-                T.copy(residual[pid_m * block_m, 0], shared_x)
-                T.copy(shared_x, r_local)
+                if sum_in_shared:
+                    T.copy(x[pid_m * block_m, 0], shared_x)
+                    T.copy(residual[pid_m * block_m, 0], shared_r)
+                    for i, j in T.Parallel(block_m, N_padded):
+                        shared_x[i, j] = T.cast(
+                            T.cast(shared_x[i, j], "float32") + T.cast(shared_r[i, j], "float32"),
+                            dtype,
+                        )
+                    T.sync_threads()
+                    T.copy(shared_x, residual_out[pid_m * block_m, 0])
+                    T.copy(shared_x, x_local)
 
-                # Fused add: x_local <- (x + residual) in native dtype
-                for i, j in T.Parallel(block_m, N_padded):
-                    x_local[i, j] = T.cast(x_local[i, j], "float32") + T.cast(
-                        r_local[i, j], "float32"
-                    )
+                    for i, j in T.Parallel(block_m, N_padded):
+                        xsq_f32[i, j] = T.cast(x_local[i, j], "float32") * T.cast(
+                            x_local[i, j], "float32"
+                        )
 
-                # Compute (x+residual)^2 in fp32
-                for i, j in T.Parallel(block_m, N_padded):
-                    xsq_f32[i, j] = T.cast(x_local[i, j], "float32") * T.cast(
-                        x_local[i, j], "float32"
-                    )
+                    T.reduce_sum(xsq_f32, sumsq, dim=1)
 
-                # Sum of squares
-                T.reduce_sum(xsq_f32, sumsq, dim=1)
+                    for i in T.Parallel(block_m):
+                        rrms[i] = T.rsqrt(sumsq[i] / float(N) + eps)
 
-                # rrms = rsqrt(mean(sq) + eps)
-                for i in T.Parallel(block_m):
-                    rrms[i] = T.rsqrt(sumsq[i] / float(N) + eps)
+                    for i, j in T.Parallel(block_m, N_padded):
+                        if (not row_guard) or pid_m * block_m + i < M:
+                            y[pid_m * block_m + i, j] = T.cast(
+                                T.cast(x_local[i, j], "float32")
+                                * rrms[i]
+                                * T.cast(weight[j], "float32"),
+                                dtype,
+                            )
+                else:
+                    r_local = T.alloc_fragment((block_m, N_padded), dtype)
 
-                # y = (x+residual) * rrms * weight
-                for i, j in T.Parallel(block_m, N_padded):
-                    r_local[i, j] = (
-                        T.cast(x_local[i, j], "float32") * rrms[i] * T.cast(weight[j], "float32")
-                    )
+                    if row_guard:
+                        for i, j in T.Parallel(block_m, N_padded):
+                            x_local[i, j] = T.if_then_else(
+                                pid_m * block_m + i < M,
+                                x[pid_m * block_m + i, j],
+                                T.cast(0.0, dtype),
+                            )
+                        for i, j in T.Parallel(block_m, N_padded):
+                            r_local[i, j] = T.if_then_else(
+                                pid_m * block_m + i < M,
+                                residual[pid_m * block_m + i, j],
+                                T.cast(0.0, dtype),
+                            )
+                    else:
+                        for i, j in T.Parallel(block_m, N_padded):
+                            x_local[i, j] = x[pid_m * block_m + i, j]
+                        for i, j in T.Parallel(block_m, N_padded):
+                            r_local[i, j] = residual[pid_m * block_m + i, j]
 
-                # Write y
-                T.copy(r_local, shared_x)
-                T.copy(shared_x, y[pid_m * block_m, 0])
+                    for i, j in T.Parallel(block_m, N_padded):
+                        x_local[i, j] = T.cast(x_local[i, j], "float32") + T.cast(
+                            r_local[i, j], "float32"
+                        )
 
-                # Write residual_out = x + residual
-                T.copy(x_local, shared_x)
-                T.copy(shared_x, residual_out[pid_m * block_m, 0])
+                    for i, j in T.Parallel(block_m, N_padded):
+                        xsq_f32[i, j] = T.cast(x_local[i, j], "float32") * T.cast(
+                            x_local[i, j], "float32"
+                        )
+
+                    T.reduce_sum(xsq_f32, sumsq, dim=1)
+
+                    for i in T.Parallel(block_m):
+                        rrms[i] = T.rsqrt(sumsq[i] / float(N) + eps)
+
+                    for i, j in T.Parallel(block_m, N_padded):
+                        if (not row_guard) or pid_m * block_m + i < M:
+                            y[pid_m * block_m + i, j] = T.cast(
+                                T.cast(x_local[i, j], "float32")
+                                * rrms[i]
+                                * T.cast(weight[j], "float32"),
+                                dtype,
+                            )
+
+                    for i, j in T.Parallel(block_m, N_padded):
+                        if (not row_guard) or pid_m * block_m + i < M:
+                            residual_out[pid_m * block_m + i, j] = x_local[i, j]
 
         return main
 
     return _func
+
+
+# Traffic a row must carry before splitting it across blocks pays the two
+# launches that costs. Measured end to end; at half of it the split is 0.94x.
+_SPLIT_MIN_ROW_TRAFFIC = 65536
+
+# Blocks a split row is cut into, and the width each is launched with.
+_SPLIT_BLOCKS = 16
+
+_SPLIT_THREADS = 128
+_SPLIT_PER_THREAD = 8
+
+
+@functools.lru_cache(maxsize=32)
+def _fused_add_rms_norm_split_kernel(N, eps, dtype):
+    """Return the two factories that normalize one row across many blocks.
+
+    A decode call is one row, so the row-per-block program launches a single
+    block and the device idles behind it. These cut the row into
+    :data:`_SPLIT_BLOCKS` pieces: the first sums the squares of its piece and
+    writes the sum out, which is an output anyway; the second merges the
+    partial sums, few enough that every block redoing it beats a launch that
+    does it once, and scales its piece.
+
+    The merge is a different order of fp32 additions from the single-block
+    reduction, so results agree to tolerance rather than bit for bit.
+    """
+    accum = "float32"
+
+    @tilelang.jit
+    def _stats(splits, threads, per):
+        chunk = N // splits
+        n_warps = max(threads // WARP_LANES, 1)
+
+        @T.prim_func
+        def main(
+            x: T.Tensor([N], dtype),
+            residual: T.Tensor([N], dtype),
+            residual_out: T.Tensor([N], dtype),
+            partial: T.Tensor([splits], accum),
+        ):
+            with T.Kernel(splits, threads=threads) as bx:
+                tx = T.get_thread_binding()
+                acc = T.alloc_local([1], accum)
+                a = T.alloc_local([per], dtype)
+                b = T.alloc_local([per], dtype)
+                total = T.alloc_local([per], dtype)
+                acc[0] = T.cast(0, accum)
+                for step in T.serial(chunk // (threads * per)):
+                    base = bx * chunk + (step * threads + tx) * per
+                    for i in T.vectorized(per):
+                        a[i] = x[base + i]
+                    for i in T.vectorized(per):
+                        b[i] = residual[base + i]
+                    for i in T.serial(per):
+                        total[i] = T.cast(T.cast(a[i], accum) + T.cast(b[i], accum), dtype)
+                        v = T.cast(total[i], accum)
+                        acc[0] += v * v
+                    for i in T.vectorized(per):
+                        residual_out[base + i] = total[i]
+                for step in T.serial(5):
+                    acc[0] += T.shfl_xor(acc[0], T.shift_left(1, step))
+                warp_totals = T.alloc_shared([n_warps], accum)
+                if tx % WARP_LANES == 0:
+                    warp_totals[tx // WARP_LANES] = acc[0]
+                T.sync_threads()
+                if tx == 0:
+                    acc[0] = T.cast(0, accum)
+                    for w in T.serial(n_warps):
+                        acc[0] += warp_totals[w]
+                    partial[bx] = acc[0]
+
+        return main
+
+    @tilelang.jit(out_idx=[3])
+    def _apply(splits, threads, per):
+        chunk = N // splits
+
+        @T.prim_func
+        def main(
+            summed: T.Tensor([N], dtype),
+            partial: T.Tensor([splits], accum),
+            weight: T.Tensor([N], dtype),
+            y: T.Tensor([N], dtype),
+        ):
+            with T.Kernel(splits, threads=threads) as bx:
+                tx = T.get_thread_binding()
+                total = T.alloc_local([1], accum)
+                total[0] = T.cast(0, accum)
+                for s in T.serial(splits):
+                    total[0] += partial[s]
+                rrms = T.rsqrt(total[0] / T.cast(N, accum) + T.cast(eps, accum))
+                v = T.alloc_local([per], dtype)
+                o = T.alloc_local([per], dtype)
+                for step in T.serial(chunk // (threads * per)):
+                    base = bx * chunk + (step * threads + tx) * per
+                    for i in T.vectorized(per):
+                        v[i] = summed[base + i]
+                    for i in T.serial(per):
+                        o[i] = T.cast(
+                            T.cast(v[i], accum) * rrms * T.cast(weight[base + i], accum),
+                            dtype,
+                        )
+                    for i in T.vectorized(per):
+                        y[base + i] = o[i]
+
+        return main
+
+    return _stats, _apply
 
 
 class FusedAddRMSNormKernel(Kernel):
@@ -278,8 +460,9 @@ class FusedAddRMSNormKernel(Kernel):
     ``x + residual``.  The residual add is fused into the first load pass
     to save one global memory round-trip.
 
-    Supports SM80+ architectures.  Uses 256-element alignment for shared
-    memory copies.
+    Supports SM80+ architectures.  Uses 256-element alignment for the shared
+    buffer the register-relief path fills; every other path holds the row in a
+    register fragment from the load through the store.
     """
 
     supported_archs: list[int] = [80, 86, 89, 90]
@@ -305,9 +488,27 @@ class FusedAddRMSNormKernel(Kernel):
         self._tune_pending = tune  # tuning needs a program, so it waits for the first call
         self.init_config(config, tune=False)
 
+    # Passes a row makes over memory: x and residual in, sum and result out.
+    _ROW_PASSES = 4
+
+    def _splits_for(self, rows: int) -> int:
+        """Blocks to cut a row into, or 0 to keep one block to a row.
+
+        The programs below are written for a single row, so this serves the
+        decode shape and nothing else. A call with more rows than that has a
+        grid to fill already.
+        """
+        if rows != 1:
+            return 0
+        if self.N * self._ROW_PASSES < _SPLIT_MIN_ROW_TRAFFIC:
+            return 0
+        if self.N % (_SPLIT_BLOCKS * _SPLIT_THREADS * _SPLIT_PER_THREAD):
+            return 0
+        return _SPLIT_BLOCKS
+
     @property
     def default_config(self) -> dict:
-        return select_row_config(self.N_padded)
+        return select_row_config()
 
     @property
     def autotune_configs(self) -> list[dict]:
@@ -342,8 +543,27 @@ class FusedAddRMSNormKernel(Kernel):
         residual = residual.reshape(-1, self.N)
         weight = weight.reshape(self.N)
 
+        splits = self._splits_for(rows.shape[0])
+        if splits:
+            stats, apply_ = _fused_add_rms_norm_split_kernel(self.N, self.eps, self.dtype_str)
+            flat_x = rows.reshape(-1)
+            residual_out = torch.empty_like(flat_x)
+            partial = torch.empty(splits, device=flat_x.device, dtype=torch.float32)
+            stats(splits, _SPLIT_THREADS, _SPLIT_PER_THREAD)(
+                flat_x, residual.reshape(-1), residual_out, partial
+            )
+            y = apply_(splits, _SPLIT_THREADS, _SPLIT_PER_THREAD)(residual_out, partial, weight)
+            return [y.reshape(original_shape), residual_out.reshape(original_shape)]
+
         # Exposed as ``self.kernel`` because that is what autotune and profiling read.
-        self.kernel = _fused_add_rms_norm_kernel(rows.shape[0], self.N, self.eps, self.dtype_str)
+        self.kernel = _fused_add_rms_norm_kernel(
+            rows.shape[0],
+            self.N,
+            self.eps,
+            self.dtype_str,
+            # The device the input is on, not whichever is current.
+            get_sm_count(rows.device.index),
+        )
         if self._tune_pending:
             self._tune_pending = False
             self.autotune()

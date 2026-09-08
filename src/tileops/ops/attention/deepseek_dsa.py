@@ -4,6 +4,7 @@ import torch
 
 from tileops.kernels.attention import SparseMlaKernel, SparseMlaMACAKernel
 from tileops.kernels.kernel_base import Kernel
+from tileops.perf.profile import tensor_core_roof
 from tileops.utils import is_hopper, is_maca
 
 from ..op_base import Op
@@ -160,3 +161,7 @@ class DeepSeekSparseAttentionDecodeWithKVCacheFwdOp(Op):
         self._validate_dtypes(q, kv, indices)
         self.dtype = q.dtype
         return self._get_kernel((q, kv, indices), q.dtype)(q, kv, indices)
+
+    def compute_roof(self) -> str:
+        """FLOPs are matmul contractions; priced on tensor cores."""
+        return tensor_core_roof(self.dtype)
