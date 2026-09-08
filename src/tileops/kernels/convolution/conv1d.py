@@ -8,9 +8,9 @@ import tilelang.language as T
 import torch
 
 from tileops.kernels.kernel_base import Kernel
-from tileops.utils import get_sm_version
 
-from ._common import _launch, conv_autotune_configs
+from ._common import CONV_SWIZZLE_PANEL, _launch, conv_autotune_configs, conv_num_stages
+from .call_spec import Conv1dCall, conv1d_dense_region, conv1d_group_region, conv1d_pointwise_region
 
 __all__ = [
     "Conv1dKernel",
@@ -64,7 +64,7 @@ def _conv1d_kernel(
                 out_local = T.alloc_fragment((block_m, block_n), accum_dtype)
                 out_shared = T.alloc_shared((block_m, block_n), dtype)
 
-                T.use_swizzle(10, enable=enable_rasterization)
+                T.use_swizzle(CONV_SWIZZLE_PANEL, enable=enable_rasterization)
                 T.clear(out_local)
 
                 tile_ol_start = bx * block_n
@@ -83,7 +83,7 @@ def _conv1d_kernel(
                         ol = bx * block_n + j
                         # k runs over (kernel_l, c_in): one k tile then covers a single
                         # tap across every input channel, which is one rectangle of x.
-                        # Laying it out the other way costs 50% on c_in=128, kernel 10.
+                        # The other order splits each tap across k tiles.
                         kw = k_idx // c_in
                         ci = k_idx % c_in
                         il = ol * stride_l + kw * dilation_l - pad_left
@@ -178,7 +178,7 @@ def _conv1d_direct_kernel(
                 threads=threads,
             ) as (bx, by, bz):
                 out_local = T.alloc_fragment((block_m, block_n), accum_dtype)
-                T.use_swizzle(10, enable=enable_rasterization)
+                T.use_swizzle(CONV_SWIZZLE_PANEL, enable=enable_rasterization)
                 T.clear(out_local)
 
                 for kw in T.serial(kernel_l):
@@ -277,7 +277,7 @@ def _conv1d_group_kernel(
                 out_local = T.alloc_fragment((block_m, block_n), accum_dtype)
                 out_shared = T.alloc_shared((block_m, block_n), dtype)
 
-                T.use_swizzle(10, enable=enable_rasterization)
+                T.use_swizzle(CONV_SWIZZLE_PANEL, enable=enable_rasterization)
                 T.clear(out_local)
 
                 batch_id = bz // groups
@@ -402,7 +402,7 @@ def _conv1d_pointwise_kernel(
                 out_local = T.alloc_fragment((block_m, block_n), accum_dtype)
                 out_shared = T.alloc_shared((block_m, block_n), dtype)
 
-                T.use_swizzle(10, enable=enable_rasterization)
+                T.use_swizzle(CONV_SWIZZLE_PANEL, enable=enable_rasterization)
                 T.clear(out_local)
 
                 tile_l_end = bx * block_n + block_n - 1
@@ -471,6 +471,10 @@ def _conv1d_pointwise_kernel(
 class Conv1dPointwiseKernel(Kernel):
     supported_archs: list[int] = [80, 86, 89, 90]
 
+    @classmethod
+    def applies(cls, call: Conv1dCall) -> bool:
+        return conv1d_pointwise_region(call)
+
     def __init__(
         self,
         n: int,
@@ -503,16 +507,6 @@ class Conv1dPointwiseKernel(Kernel):
 
     @property
     def default_config(self) -> dict:
-        sm_version = get_sm_version()
-        if sm_version in {90}:
-            return {
-                "block_m": 64,
-                "block_n": 128,
-                "block_k": 128,
-                "num_stages": 3,
-                "threads": 128,
-                "enable_rasterization": True,
-            }
         return {
             "block_m": 64,
             "block_n": 128,
@@ -537,7 +531,12 @@ class Conv1dPointwiseKernel(Kernel):
 
 
 class Conv1dKernel(Kernel):
+    general = True
     supported_archs: list[int] = [80, 86, 89, 90]
+
+    @classmethod
+    def applies(cls, call: Conv1dCall) -> bool:
+        return conv1d_dense_region(call)
 
     def __init__(
         self,
@@ -589,16 +588,6 @@ class Conv1dKernel(Kernel):
 
     @property
     def default_config(self) -> dict:
-        sm_version = get_sm_version()
-        if sm_version in {90}:
-            return {
-                "block_m": 64,
-                "block_n": 128,
-                "block_k": 128,
-                "num_stages": 3,
-                "threads": 128,
-                "enable_rasterization": True,
-            }
         return {
             "block_m": 64,
             "block_n": 128,
@@ -610,7 +599,7 @@ class Conv1dKernel(Kernel):
 
     @property
     def autotune_configs(self) -> list[dict]:
-        return conv_autotune_configs(self.dtype)
+        return conv_autotune_configs(self.dtype, block_n=[64, 128])
 
     def _get_weight_flat(self, weight: torch.Tensor) -> torch.Tensor:
         """Return the weight laid out as the prim_func's ``(c_out, k_total)``.
@@ -644,6 +633,10 @@ class Conv1dKernel(Kernel):
 
 class GroupConv1dKernel(Kernel):
     supported_archs: list[int] = [80, 86, 89, 90]
+
+    @classmethod
+    def applies(cls, call: Conv1dCall) -> bool:
+        return conv1d_group_region(call)
 
     def __init__(
         self,
@@ -755,16 +748,6 @@ class GroupConv1dKernel(Kernel):
             (choice for choice in self._block_m_choices if choice >= self.c_out_g),
             max(self._block_m_choices),
         )
-        sm_version = get_sm_version()
-        if sm_version in {90}:
-            return {
-                "block_m": block_m,
-                "block_n": 128,
-                "block_k": 128,
-                "num_stages": 3,
-                "threads": 128,
-                "enable_rasterization": True,
-            }
         return {
             "block_m": block_m,
             "block_n": 128,

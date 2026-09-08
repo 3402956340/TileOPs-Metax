@@ -14,7 +14,7 @@ import torch
 
 from tileops.kernels.kernel_base import Kernel
 
-from .gated_deltanet_fwd import _LOG2E, _chunk_local_cumsum
+from .gated_deltanet_fwd_maca import _LOG2E, _chunk_local_cumsum
 
 __all__ = [
     "GatedDeltaNetPrefillFwdMACAKernel",

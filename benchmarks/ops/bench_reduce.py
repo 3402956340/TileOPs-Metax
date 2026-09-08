@@ -45,17 +45,6 @@ from workloads.reduction import (
     VarWorkload,
 )
 
-# Op name constants
-
-_SUM_OP = "SumFwdOp"
-_MEAN_OP = "MeanFwdOp"
-_AMAX_OP = "AmaxFwdOp"
-_AMIN_OP = "AminFwdOp"
-_PROD_OP = "ProdFwdOp"
-_STD_OP = "StdFwdOp"
-_VAR_OP = "VarFwdOp"
-_VAR_MEAN_OP = "VarMeanFwdOp"
-
 
 def _functors(op, baseline_fn, inputs, dtype: torch.dtype, flaggems_fn=None) -> dict:
     """The op, flag_gems where it has a kernel, and torch eager and compiled."""
@@ -68,12 +57,9 @@ def _functors(op, baseline_fn, inputs, dtype: torch.dtype, flaggems_fn=None) -> 
     return functors
 
 
-# Sum benchmarks
-
-
 @pytest.mark.parametrize(
     "shape, dtype, op_params",
-    workloads_to_params(_SUM_OP, include_extra=True),
+    workloads_to_params(SumFwdOp, include_extra=True),
 )
 def test_sum_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
     test = SumWorkload(shape, dtype)
@@ -81,7 +67,7 @@ def test_sum_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
 
     op_params.setdefault("dim", -1)  # baseline below reduces dim=-1
     op = SumFwdOp(**op_params)
-    bm = ManifestBenchmark(_SUM_OP, op, test)
+    bm = ManifestBenchmark(op, test)
     dim = op_params.get("dim", -1)
     keepdim = op_params.get("keepdim", False)
 
@@ -94,24 +80,16 @@ def test_sum_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
         return flaggems_sum(x, flaggems_dims(dim), keepdim)
 
     try:
-        bm.compare(
-            _functors(op, baseline_fn, inputs, dtype, flaggems_fn),
-            *inputs,
-            record_as=op,
-            params=locals(),
-        )
+        bm.compare(_functors(op, baseline_fn, inputs, dtype, flaggems_fn), *inputs)
     except ValueError as exc:
         if "No configurations to tune" in str(exc):
             pytest.skip(f"Kernel does not support this shape: {exc}")
         raise
 
 
-# Mean benchmarks
-
-
 @pytest.mark.parametrize(
     "shape, dtype, op_params",
-    workloads_to_params(_MEAN_OP, include_extra=True),
+    workloads_to_params(MeanFwdOp, include_extra=True),
 )
 def test_mean_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
     test = MeanWorkload(shape, dtype)
@@ -119,7 +97,7 @@ def test_mean_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
 
     op_params.setdefault("dim", -1)  # baseline below mirrors the op's dim
     op = MeanFwdOp(**op_params)
-    bm = ManifestBenchmark(_MEAN_OP, op, test)
+    bm = ManifestBenchmark(op, test)
     dim = op_params["dim"]
     keepdim = op_params.get("keepdim", False)
 
@@ -132,24 +110,16 @@ def test_mean_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
         return flaggems_mean(x, flaggems_dims(dim), keepdim)
 
     try:
-        bm.compare(
-            _functors(op, baseline_fn, inputs, dtype, flaggems_fn),
-            *inputs,
-            record_as=op,
-            params=locals(),
-        )
+        bm.compare(_functors(op, baseline_fn, inputs, dtype, flaggems_fn), *inputs)
     except ValueError as exc:
         if "No configurations to tune" in str(exc):
             pytest.skip(f"Kernel does not support this shape: {exc}")
         raise
 
 
-# Amax benchmarks
-
-
 @pytest.mark.parametrize(
     "shape, dtype, op_params",
-    workloads_to_params(_AMAX_OP, include_extra=True),
+    workloads_to_params(AmaxFwdOp, include_extra=True),
 )
 def test_amax_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
     test = AmaxWorkload(shape, dtype)
@@ -157,7 +127,7 @@ def test_amax_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
 
     op_params.setdefault("dim", -1)
     op = AmaxFwdOp(**op_params)
-    bm = ManifestBenchmark(_AMAX_OP, op, test)
+    bm = ManifestBenchmark(op, test)
     dim = op_params["dim"]
     keepdim = op_params.get("keepdim", False)
 
@@ -170,24 +140,16 @@ def test_amax_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
         return flaggems_amax(x, flaggems_dims(dim), keepdim)
 
     try:
-        bm.compare(
-            _functors(op, baseline_fn, inputs, dtype, flaggems_fn),
-            *inputs,
-            record_as=op,
-            params=locals(),
-        )
+        bm.compare(_functors(op, baseline_fn, inputs, dtype, flaggems_fn), *inputs)
     except ValueError as exc:
         if "No configurations to tune" in str(exc):
             pytest.skip(f"Kernel does not support this shape: {exc}")
         raise
 
 
-# Amin benchmarks
-
-
 @pytest.mark.parametrize(
     "shape, dtype, op_params",
-    workloads_to_params(_AMIN_OP, include_extra=True),
+    workloads_to_params(AminFwdOp, include_extra=True),
 )
 def test_amin_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
     test = AminWorkload(shape, dtype)
@@ -195,7 +157,7 @@ def test_amin_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
 
     op_params.setdefault("dim", -1)
     op = AminFwdOp(**op_params)
-    bm = ManifestBenchmark(_AMIN_OP, op, test)
+    bm = ManifestBenchmark(op, test)
     dim = op_params["dim"]
     keepdim = op_params.get("keepdim", False)
 
@@ -203,28 +165,20 @@ def test_amin_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
         return x.amin(dim=dim, keepdim=keepdim)
 
     try:
-        bm.compare(
-            _functors(op, baseline_fn, inputs, dtype),
-            *inputs,
-            record_as=op,
-            params=locals(),
-        )
+        bm.compare(_functors(op, baseline_fn, inputs, dtype), *inputs)
     except ValueError as exc:
         if "No configurations to tune" in str(exc):
             pytest.skip(f"Kernel does not support this shape: {exc}")
         raise
 
 
-# Prod benchmarks
-
-
-@pytest.mark.parametrize("shape, dtype", workloads_to_params(_PROD_OP))
+@pytest.mark.parametrize("shape, dtype", workloads_to_params(ProdFwdOp))
 def test_prod_bench(shape: tuple, dtype: torch.dtype) -> None:
     test = ProdWorkload(shape, dtype)
     inputs = test.gen_inputs()
 
     op = ProdFwdOp()
-    bm = ManifestBenchmark(_PROD_OP, op, test)
+    bm = ManifestBenchmark(op, test)
 
     def baseline_fn(x):
         return x.float().prod(dim=-1).to(x.dtype)
@@ -235,24 +189,16 @@ def test_prod_bench(shape: tuple, dtype: torch.dtype) -> None:
         return flaggems_prod(x, -1)
 
     try:
-        bm.compare(
-            _functors(op, baseline_fn, inputs, dtype, flaggems_fn),
-            *inputs,
-            record_as=op,
-            params=locals(),
-        )
+        bm.compare(_functors(op, baseline_fn, inputs, dtype, flaggems_fn), *inputs)
     except ValueError as exc:
         if "No configurations to tune" in str(exc):
             pytest.skip(f"Kernel does not support this shape: {exc}")
         raise
 
 
-# Std benchmarks
-
-
 @pytest.mark.parametrize(
     "shape, dtype, op_params",
-    workloads_to_params(_STD_OP, include_extra=True),
+    workloads_to_params(StdFwdOp, include_extra=True),
 )
 def test_std_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
     test = StdWorkload(shape, dtype)
@@ -260,7 +206,7 @@ def test_std_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
 
     op_params.setdefault("dim", -1)
     op = StdFwdOp(correction=1, **op_params)
-    bm = ManifestBenchmark(_STD_OP, op, test)
+    bm = ManifestBenchmark(op, test)
     dim = op_params["dim"]
     keepdim = op_params.get("keepdim", False)
 
@@ -273,24 +219,16 @@ def test_std_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
         return flaggems_std(x, flaggems_dims(dim), correction=1, keepdim=keepdim)
 
     try:
-        bm.compare(
-            _functors(op, baseline_fn, inputs, dtype, flaggems_fn),
-            *inputs,
-            record_as=op,
-            params=locals(),
-        )
+        bm.compare(_functors(op, baseline_fn, inputs, dtype, flaggems_fn), *inputs)
     except ValueError as exc:
         if "No configurations to tune" in str(exc):
             pytest.skip(f"Kernel does not support this shape: {exc}")
         raise
 
 
-# Var benchmarks
-
-
 @pytest.mark.parametrize(
     "shape, dtype, op_params",
-    workloads_to_params(_VAR_OP, include_extra=True),
+    workloads_to_params(VarFwdOp, include_extra=True),
 )
 def test_var_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
     test = VarWorkload(shape, dtype)
@@ -298,7 +236,7 @@ def test_var_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
 
     op_params.setdefault("dim", -1)
     op = VarFwdOp(correction=1, **op_params)
-    bm = ManifestBenchmark(_VAR_OP, op, test)
+    bm = ManifestBenchmark(op, test)
     dim = op_params["dim"]
     keepdim = op_params.get("keepdim", False)
 
@@ -311,24 +249,16 @@ def test_var_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
         return flaggems_var(x, flaggems_dims(dim), correction=1, keepdim=keepdim)
 
     try:
-        bm.compare(
-            _functors(op, baseline_fn, inputs, dtype, flaggems_fn),
-            *inputs,
-            record_as=op,
-            params=locals(),
-        )
+        bm.compare(_functors(op, baseline_fn, inputs, dtype, flaggems_fn), *inputs)
     except ValueError as exc:
         if "No configurations to tune" in str(exc):
             pytest.skip(f"Kernel does not support this shape: {exc}")
         raise
 
 
-# VarMean benchmarks
-
-
 @pytest.mark.parametrize(
     "shape, dtype, op_params",
-    workloads_to_params(_VAR_MEAN_OP, include_extra=True),
+    workloads_to_params(VarMeanFwdOp, include_extra=True),
 )
 def test_var_mean_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> None:
     test = VarMeanWorkload(shape, dtype)
@@ -336,7 +266,7 @@ def test_var_mean_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> No
 
     op_params.setdefault("dim", -1)
     op = VarMeanFwdOp(correction=1, **op_params)
-    bm = ManifestBenchmark(_VAR_MEAN_OP, op, test)
+    bm = ManifestBenchmark(op, test)
     dim = op_params["dim"]
     keepdim = op_params.get("keepdim", False)
 
@@ -351,12 +281,7 @@ def test_var_mean_bench(shape: tuple, dtype: torch.dtype, op_params: dict) -> No
         return flaggems_var_mean(x, flaggems_dims(dim), correction=1, keepdim=keepdim)
 
     try:
-        bm.compare(
-            _functors(op, baseline_fn, inputs, dtype, flaggems_fn),
-            *inputs,
-            record_as=op,
-            params=locals(),
-        )
+        bm.compare(_functors(op, baseline_fn, inputs, dtype, flaggems_fn), *inputs)
     except ValueError as exc:
         if "No configurations to tune" in str(exc):
             pytest.skip(f"Kernel does not support this shape: {exc}")

@@ -7,10 +7,13 @@ Run:
     conda run -n tileops python -m pytest tests/ops/test_batch_norm.py -vvs
 """
 
+import re
+
 import pytest
 import torch
 
 from tests.test_base import FixtureBase, TestBase
+from tileops.kernels.norm import BatchNormFwdTrainKernel
 from tileops.ops.norm.batch_norm import BatchNormBwdOp, BatchNormFwdOp
 from workloads.normalization import (
     BatchNormBwdWorkload,
@@ -27,9 +30,6 @@ class BatchNormFwdTest(BatchNormFwdWorkload, TestBase):
     pass
 
 
-# Fixtures
-
-
 class BatchNormFwdFixture(FixtureBase):
     """(N, C, *spatial, dtype, training)"""
 
@@ -44,7 +44,8 @@ class BatchNormFwdFixture(FixtureBase):
                 pytest.param(32, 256, (), torch.bfloat16, True, marks=pytest.mark.full),
                 # BatchNorm1d – (N, C, L)
                 pytest.param(16, 64, (512,), torch.float16, True, marks=pytest.mark.full),
-                # Non-persistent path (L > 8192): smallest representative case L=16384.
+                # L > 8192, so the tiled kernel this shape falls back to reads global
+                # memory twice rather than holding the tile in shared memory.
                 pytest.param(4, 64, (64, 64), torch.float16, True, marks=pytest.mark.full),
                 # BatchNorm2d – (N, C, H, W)
                 pytest.param(8, 64, (1024, 1024), torch.float16, True, marks=pytest.mark.full),
@@ -55,6 +56,9 @@ class BatchNormFwdFixture(FixtureBase):
                 pytest.param(8, 64, (30, 30), torch.bfloat16, True, marks=pytest.mark.full),
                 # High channel count oversubscribes the SMs, exposing the running-stat update race.
                 pytest.param(16, 1024, (512,), torch.float16, True, marks=pytest.mark.full),
+                # The streamed path, which no other case reaches: a channel too long to
+                # hold in registers (L = 131072) and too many channels to split (C >= 1024).
+                pytest.param(2048, 1024, (64,), torch.float16, True, marks=pytest.mark.full),
             ],
         ),
     ]
@@ -79,12 +83,6 @@ class BatchNormBwdFixture(FixtureBase):
             ],
         ),
     ]
-
-
-# Test helpers
-
-
-# Test functions
 
 
 @BatchNormFwdFixture
@@ -195,3 +193,39 @@ def test_training_updates_a_non_contiguous_running_stat() -> None:
     expected_mean = op.momentum * x.float().transpose(0, 1).reshape(C, -1).mean(dim=1)
     torch.testing.assert_close(rm, expected_mean, atol=1e-3, rtol=1e-3)
     assert not torch.equal(rv, torch.ones_like(rv)), "running_var was not written either"
+
+
+@pytest.mark.smoke
+def test_training_rejects_one_value_per_channel() -> None:
+    """Bessel's correction divides by L - 1; torch refuses the same call."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required for forward call")
+
+    C = 4
+    x = torch.randn(1, C, 1, 1, device="cuda", dtype=torch.float32)
+    weight = torch.ones(C, device="cuda", dtype=torch.float32)
+    bias = torch.zeros(C, device="cuda", dtype=torch.float32)
+    rm = torch.zeros(C, device="cuda", dtype=torch.float32)
+    rv = torch.ones(C, device="cuda", dtype=torch.float32)
+
+    torch_message = ""
+    try:
+        torch.nn.functional.batch_norm(x, rm, rv, weight, bias, training=True)
+    except ValueError as exc:
+        torch_message = str(exc)
+    assert torch_message, "torch accepted L=1 in training; the guard's premise is gone"
+
+    with pytest.raises(ValueError, match=re.escape(torch_message)):
+        BatchNormFwdOp(training=True)(x, rm, rv, weight, bias)
+
+    # The kernel refuses on its own: it is exported, so a caller can reach it directly.
+    with pytest.raises(ValueError, match="more than one value per channel"):
+        BatchNormFwdTrainKernel(C, 1, torch.float32, S=1)
+
+    # Inference applies no correction; torch normalizes the same shape.
+    infer = BatchNormFwdOp(training=False)
+    y = infer(x, rm, rv, weight, bias)
+    expected = torch.nn.functional.batch_norm(
+        x, rm, rv, weight, bias, training=False, eps=infer.eps
+    )
+    torch.testing.assert_close(y, expected, atol=1e-3, rtol=1e-3)

@@ -12,8 +12,6 @@ from tests.test_base import FixtureBase, TestBase, allclose_compare
 from tileops.kernels.reduction.vector_norm import VectorNormKernel
 from workloads.reduction import L1NormWorkload
 
-# Fixtures
-
 
 class VectorNormBasicFixture(FixtureBase):
     PARAMS = [
@@ -83,9 +81,6 @@ class VectorNorm1DFixture(FixtureBase):
             ],
         ),
     ]
-
-
-# TestBase helpers — inherit gen_inputs() from workload classes
 
 
 # Map op_kind to the ord parameter for torch.linalg.vector_norm
@@ -164,9 +159,6 @@ def _make_op(
     return cls(dim=dim, keepdim=keepdim, kernel_map=kernel_map, tune=tune)
 
 
-# L1NormFwdOp tests
-
-
 @VectorNormBasicFixture
 def test_l1_norm_op(m: int, n: int, dtype: torch.dtype) -> None:
     test = VectorNormTest(m, n, dtype, "l1")
@@ -216,9 +208,6 @@ def test_l1_1d(n: int, dtype: torch.dtype) -> None:
     allclose_compare(y.view_as(ref), ref, atol=atol, rtol=rtol)
 
 
-# L2NormFwdOp tests
-
-
 @VectorNormBasicFixture
 def test_l2_norm_op(m: int, n: int, dtype: torch.dtype) -> None:
     test = VectorNormTest(m, n, dtype, "l2")
@@ -266,9 +255,6 @@ def test_l2_1d(n: int, dtype: torch.dtype) -> None:
     y = op(x)
     atol, rtol = _get_tolerances(dtype)
     allclose_compare(y.view_as(ref), ref, atol=atol, rtol=rtol)
-
-
-# InfNormFwdOp tests
 
 
 @VectorNormBasicFixture
@@ -427,8 +413,6 @@ def test_spec_dim0_keepdim(op_kind: str, dtype: torch.dtype) -> None:
     atol, rtol = _get_tolerances(dtype)
     allclose_compare(y, ref, atol=atol, rtol=rtol)
 
-
-# Dtype smoke tests
 
 _DTYPE_SMOKE_M, _DTYPE_SMOKE_N = 64, 512
 
@@ -606,3 +590,30 @@ def test_vector_norm_tiled_autotune() -> None:
     (kernel,) = op.built_kernels(op._kernel_key).values()
     assert kernel._needs_tiling
     assert kernel.config in kernel.autotune_configs
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("op_kind", ["l1", "l2", "inf"])
+def test_vector_norm_edge_axes_in_own_layout(op_kind: str) -> None:
+    """``dim=[0, 2]`` reduces without a permute: a rows pass, then a fold.
+
+    ``l2`` takes its square root only at the fold; a sqrt applied per partial
+    would compound instead of finishing.
+    """
+    dtype = torch.float16
+    x = torch.randn(4, 24, 4096, dtype=dtype, device="cuda")
+    op = _make_op(op_kind, dim=[0, 2])
+    ords = {"l1": 1, "l2": 2, "inf": torch.inf}
+    ref = torch.linalg.vector_norm(x.float(), ords[op_kind], (0, 2)).to(dtype)
+    atol, rtol = _get_tolerances(dtype)
+    allclose_compare(op(x), ref, atol=atol, rtol=rtol)
+
+
+@pytest.mark.smoke
+def test_inf_norm_edge_axes_carries_nan() -> None:
+    """A NaN survives both passes: the fold compares bit patterns, not floats."""
+    x = torch.randn(4, 24, 4096, dtype=torch.float16, device="cuda")
+    x[3, 7, 4095] = float("nan")
+    y = _make_op("inf", dim=[0, 2])(x)
+    ref = torch.linalg.vector_norm(x, torch.inf, (0, 2))
+    assert torch.equal(y.isnan(), ref.isnan())

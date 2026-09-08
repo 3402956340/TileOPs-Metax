@@ -34,7 +34,7 @@ try:
 except ImportError:
     _VLLM_AVAILABLE = False
 
-from benchmarks.benchmark_base import BenchmarkBase
+from benchmarks.benchmark_base import OpBenchmark
 from tileops.ops.moe import SharedFusedMoE
 from workloads.moe import SharedFusedMoeWorkload
 from workloads.workload_base import FixtureBase
@@ -125,10 +125,7 @@ class SharedFusedMoEBenchFixture(FixtureBase):
     ]
 
 
-# Benchmark class
-
-
-class SharedFusedMoEBenchmark(BenchmarkBase[SharedFusedMoeWorkload]):
+class SharedFusedMoEBenchmark(OpBenchmark[SharedFusedMoeWorkload]):
     def calculate_flops(self) -> Optional[float]:
         t = self.workload
         routed = (
@@ -160,9 +157,6 @@ class SharedFusedMoEBenchmark(BenchmarkBase[SharedFusedMoeWorkload]):
         return routed_w + shared_w + act
 
 
-# Benchmark test
-
-
 @SharedFusedMoEBenchFixture
 def test_shared_fused_moe_bench(
     num_tokens,
@@ -190,7 +184,6 @@ def test_shared_fused_moe_bench(
         routed_scaling_factor,
         dtype,
     )
-    bm = SharedFusedMoEBenchmark(test)
     hidden, gating, correction_bias, w_gate_up, w_down, shared_w_gate_up, shared_w_down = (
         test.gen_inputs()
     )
@@ -207,6 +200,7 @@ def test_shared_fused_moe_bench(
         routed_scaling_factor=routed_scaling_factor,
         shared_ffn_size=shared_ffn_size,
     )
+    bm = SharedFusedMoEBenchmark(op, test)
     op(
         hidden,
         gating,
@@ -278,9 +272,9 @@ def test_shared_fused_moe_bench(
             ),
         )
     else:
-        # No baseline rather than a misleading one. The per-expert Python loop this used
-        # to time is a correctness reference: it upcasts to fp32 and index_add_s one
-        # expert at a time, so "TileOPs is 30x faster" said nothing about either.
+        # No baseline rather than a misleading one: the per-expert Python loop is a
+        # correctness reference, upcasting to fp32 and index_add_ing one expert at a
+        # time, so timing against it measures neither implementation.
         warnings.warn(
             "vLLM is not installed; recording no baseline for SharedFusedMoE. "
             "Install vllm to compare against fused_topk + fused_experts.",
@@ -296,6 +290,4 @@ def test_shared_fused_moe_bench(
         correction_bias,
         shared_w_gate_up,
         shared_w_down,
-        record_as=op,
-        params=locals(),
     )

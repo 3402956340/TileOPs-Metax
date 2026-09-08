@@ -1,4 +1,5 @@
 import dataclasses
+import math
 import warnings
 from abc import ABC, abstractmethod
 from types import MappingProxyType
@@ -27,6 +28,7 @@ from tileops.backend import (
 from tileops.backend.dispatch import registered_kernel_builder, select_target
 from tileops.backend.registry import ensure_loaded
 from tileops.kernels.kernel_base import Kernel
+from tileops.manifest import load_manifest
 
 from .compile_boundary import register_instance
 
@@ -45,8 +47,8 @@ class _Unresolved:
         return "<not resolved yet>"
 
 
-#: ``Op._builder`` before the first call. Distinct from ``None``, the decided answer
-#: "run the in-tree implementation".
+# ``Op._builder`` before the first call. Distinct from ``None``, the decided answer
+# "run the in-tree implementation".
 _UNRESOLVED = _Unresolved()
 
 
@@ -58,16 +60,6 @@ class Op(ABC):
     - Correctness testing via reference implementation
     - Performance profiling
     - Autotuning interface
-
-    Examples:
-        ```python linenums="1"
-        from tileops.ops import MultiHeadAttentionFwdOp
-        op = MultiHeadAttentionFwdOp(batch=1, heads=8, seq_len=512, dim=64, is_causal=True)
-        Q, K, V = op.gen_inputs()
-        output = op(Q, K, V)
-        op.check()  # Verify correctness
-        latency = op.profile()  # Benchmark performance
-        ```
 
     Attributes:
         kernel: single kernel, for ops that hold one; ops that build per
@@ -140,12 +132,12 @@ class Op(ABC):
     def default_kernel_map(self) -> dict[str, Kernel]:
         raise NotImplementedError("Op must implement default_kernel_map")
 
-    #: Operators this op registers on the torch.compile boundary. Naming them is what lets
-    #: a test assert the traced graph holds nothing else, which is what keeps the graph the
-    #: same when another target serves the op. A tuple because a conditional in-place write
-    #: registers two. Registration happens once per class, so this is class state; an op
-    #: that declares ``torch_compile_fullgraph`` names its operators, which
-    #: ``register_compile_contract`` requires.
+    # Operators this op registers on the torch.compile boundary. Naming them is what lets
+    # a test assert the traced graph holds nothing else, which is what keeps the graph the
+    # same when another target serves the op. A tuple because a conditional in-place write
+    # registers two. Registration happens once per class, so this is class state; an op
+    # that declares ``torch_compile_fullgraph`` names its operators, which
+    # ``register_compile_contract`` requires.
     compile_op_names: ClassVar[tuple[str, ...]] = ()
 
     @abstractmethod
@@ -194,6 +186,23 @@ class Op(ABC):
             "intentionally does not provide a generic evaluator — see "
             "docs/design/roofline.md §4.4.6 (Evaluator Surface Boundary)"
         )
+
+    def compute_roof(self) -> str:
+        """GPU-profile key of the compute unit that prices this op's FLOPs.
+
+        ``eval_roofline()`` counts the work; ``compute_roof()`` names the
+        peak that bounds it (docs/design/roofline.md §1.2). The key is a
+        statement about the *optimal* implementation, declared by the op
+        author — never inferred from the running kernel, so a kernel on the
+        wrong unit is still measured against the right ceiling.
+
+        The base default covers ops whose arithmetic runs on CUDA cores in
+        fp32 (elementwise, reductions, norms, scans). An op whose FLOPs are
+        matmul contractions overrides this with ``tensor_core_roof(self.dtype)``
+        (or a backend-specific key). Valid whenever ``eval_roofline()`` is —
+        after the dtype is bound.
+        """
+        return "cuda_core.fp32"
 
     def _install_kernel_map(self, candidate_map: Optional[dict[str, Kernel]] = None) -> None:
         """Install the resolved kernel map onto ``self.kernel_map``.
@@ -343,6 +352,8 @@ class Op(ABC):
             OpNotAvailableError: A target serves this op but the call site handed over no
                 tensor at all; or there is no in-tree implementation and no target.
         """
+        self._refuse_empty_input(inputs)
+
         # Plain attribute reads and dict lookups, no ``self.__dict__``: this
         # runs inside a dynamo-traced forward on every cache hit, and dynamo
         # cannot trace a method call on an instance ``__dict__``.
@@ -471,6 +482,24 @@ class Op(ABC):
         """
         return ()
 
+    def run_config(self) -> Optional[dict]:
+        """The configuration the op's kernels were built with, or ``None``.
+
+        An op reports what it ran; a caller reaches it by calling the op, not by
+        reading the attributes of the kernels behind it. An op given a config of
+        its own answers with it; otherwise the kernels it built do, and those
+        share their dtype and op kind for one call, so the first configured one
+        answers for the call.
+        """
+        own = getattr(self, "config", None)
+        if own:
+            return own
+        for kernel in self.iter_kernels():
+            config = getattr(kernel, "config", None)
+            if config:
+                return config
+        return None
+
     def iter_kernels(self) -> Iterator[Kernel]:
         """Yield every kernel the op holds, each one once.
 
@@ -580,6 +609,49 @@ class Op(ABC):
             self._unsettle()
             raise
 
+    def _refuse_empty_input(self, inputs: "Sequence[torch.Tensor | None]") -> None:
+        """Raise for a call whose every declared output would hold no elements.
+
+        Such a call leaves the launch a zero-sized grid, which reports itself as an
+        internal assertion saying nothing about what is unsupported.
+
+        Kernel selection hosts this because both the eager and the traced path reach it.
+
+        The output decides, not the input: a zero-length axis on an input is legitimate
+        wherever the op still produces something.
+
+        Raises:
+            ValueError: The op cannot produce the empty output this call asks for.
+        """
+        if not any(t is not None and t.numel() == 0 for t in inputs):
+            return
+
+        entry = load_manifest().get(type(self).__name__)
+        if entry is None:
+            return
+        names = tuple(entry["signature"]["inputs"])
+        if len(names) != len(inputs):
+            return
+        try:
+            shapes = self._infer_output_shapes(
+                *(None if t is None else tuple(t.shape) for t in inputs)
+            )
+        except (TypeError, ValueError, KeyError):
+            return  # an op whose shape inference this order does not describe
+        declared = entry["signature"]["outputs"]
+        if any(name not in shapes for name in declared):
+            return
+        if any(math.prod(shapes[name]) for name in declared):
+            return
+
+        name, tensor = next(
+            (n, t) for n, t in zip(names, inputs, strict=True) if t is not None and t.numel() == 0
+        )
+        raise ValueError(
+            f"{type(self).__name__} does not support an empty tensor: input {name!r} has "
+            f"shape {tuple(tensor.shape)}, which holds no elements."
+        )
+
     def _unsettle(self) -> None:
         """Undo a settling whose call did not finish, dropping what it built."""
         self._builder = _UNRESOLVED
@@ -656,35 +728,4 @@ class Op(ABC):
             for i, shape in enumerate(input_shapes)
             for axis, s in enumerate(shape)
             if (i, axis) not in self._static_axes
-        )
-
-
-class UnmanifestedOp(Op):
-    """An op the manifest does not name, and what that costs it.
-
-    The three contract methods are derived from a manifest entry — generated for
-    the dtype and roofline, hand-written for the shapes. An op with no entry has
-    nothing to derive them from: no target can be asked to serve it, no benchmark
-    can report a roofline for it, and no compiled caller can be told its output
-    shape. Inheriting this states that, and lists the ops it applies to: grep the
-    class name.
-
-    Every one of them is a gap to close by writing the entry, not by staying here.
-    """
-
-    def _infer_output_shapes(self, *shapes: tuple[int, ...]) -> dict[str, tuple[int, ...]]:
-        raise NotImplementedError(
-            f"{type(self).__name__} has no manifest entry, so its output shapes are "
-            f"not declared anywhere"
-        )
-
-    def _validate_dtypes(self, *args: torch.Tensor) -> None:
-        raise NotImplementedError(
-            f"{type(self).__name__} has no manifest entry, so its dtype contract is "
-            f"not declared anywhere"
-        )
-
-    def eval_roofline(self) -> tuple[int, int]:
-        raise NotImplementedError(
-            f"{type(self).__name__} has no manifest entry, so it has no roofline model"
         )

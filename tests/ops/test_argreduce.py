@@ -25,9 +25,6 @@ def _call(op, x: torch.Tensor) -> torch.Tensor:
     return cast(torch.Tensor, op(x))
 
 
-# Fixtures
-
-
 class ArgreduceBasicFixture(FixtureBase):
     PARAMS = [
         (
@@ -143,9 +140,6 @@ class SpecArgreduceFixture(FixtureBase):
     ]
 
 
-# TestBase helpers — inherit gen_inputs() from workload classes
-
-
 class ArgreduceTest(ArgmaxWorkload, TestBase):
     """Parameterized test helper for argreduce ops."""
 
@@ -172,9 +166,6 @@ def _exact_compare(output: torch.Tensor, output_ref: torch.Tensor) -> None:
         f"  output_ref: {output_ref[:10]}...\n"
         f"  mismatches: {(output != output_ref).sum().item()} / {output.numel()}"
     )
-
-
-# ArgmaxFwdOp tests
 
 
 @ArgreduceBasicFixture
@@ -305,9 +296,6 @@ def test_argmax_spec_dim(shape: tuple, dim: int, keepdim: bool, dtype: torch.dty
     assert torch.equal(y, ref), f"spec dim={dim} argmax mismatch: {(y != ref).sum().item()}"
 
 
-# ArgminFwdOp tests
-
-
 @ArgreduceBasicFixture
 def test_argmin_op(m: int, n: int, dtype: torch.dtype) -> None:
     from tileops.ops.reduction.argreduce import ArgminFwdOp
@@ -434,6 +422,23 @@ def test_argmin_spec_dim(shape: tuple, dim: int, keepdim: bool, dtype: torch.dty
     assert y.shape == ref.shape, f"shape mismatch: {y.shape} vs {ref.shape}"
     assert y.dtype == torch.int64
     assert torch.equal(y, ref), f"spec dim={dim} argmin mismatch: {(y != ref).sum().item()}"
+
+
+# Regression: the two zeros compare equal, so the lower index wins
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize("op_name", ["argmax", "argmin"])
+def test_argreduce_signed_zero_breaks_to_lower_index(op_name: str, dtype: torch.dtype) -> None:
+    """A row of alternating -0.0 and +0.0 is one tie, which index 0 has to win."""
+    from tileops.ops.reduction.argreduce import ArgmaxFwdOp, ArgminFwdOp
+
+    x = torch.zeros(8, 4096, dtype=dtype, device="cuda")
+    x[:, ::2] = -0.0
+    op = ArgmaxFwdOp(dim=-1) if op_name == "argmax" else ArgminFwdOp(dim=-1)
+    y = _call(op, x)
+    assert torch.equal(y, torch.zeros_like(y)), f"{op_name} did not break the tie low: {y}"
 
 
 # Regression: multidim dim must be rejected for argreduce ops

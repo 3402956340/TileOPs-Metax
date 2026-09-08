@@ -26,7 +26,7 @@ from tileops.kernels.pool import (
 from tileops.kernels.pool.common import pool_output_dim
 
 from .compile_boundary import get_instance
-from .op_base import Op, UnmanifestedOp
+from .op_base import Op
 
 __all__ = [
     "AdaptiveAvgPool2dFwdOp",
@@ -41,7 +41,7 @@ __all__ = [
     "MaxPool2dIndicesFwdOp",
     "MaxPool3dFwdOp",
     "MaxPool3dIndicesFwdOp",
-    "MeanPoolingForwardOp",
+    "MeanPoolingFwdOp",
 ]
 
 # Normalizing and checking the pooling parameters is the op layer's, and runs for every
@@ -119,62 +119,238 @@ def validate_pool_params(
         raise ValueError("divisor_override must not be zero")
 
 
-class MeanPoolingForwardOp(UnmanifestedOp):
+class MeanPoolingFwdOp(Op):
+    """Chunked mean over the sequence axis of a ``[batch, seq, heads, dim]`` tensor.
+
+    Not a PyTorch pooling op, and torch has no counterpart. The sequence axis is cut into
+    chunks of ``chunk_size`` and each chunk is averaged, giving one output row per chunk.
+    Pass ``offsets`` and ``indices`` and the chunks follow the ragged sequence boundaries
+    ``offsets`` describes instead of a uniform split; ``indices`` then names the
+    ``(sequence, chunk-within-sequence)`` pair each output row belongs to, one row per
+    chunk.
+
+    A sequence's last chunk may be shorter than ``chunk_size``. It is divided by the count
+    it actually holds, so no padding is averaged in. On a uniform split that makes the op
+    equal to ``torch.nn.functional.avg_pool1d(kernel_size=chunk_size, stride=chunk_size,
+    ceil_mode=True)`` over a view with the sequence axis last. Chunk sums accumulate in
+    ``accum_dtype`` and are cast back to the input dtype at the boundary, so a ``float16``
+    input with ``accum_dtype=torch.float32`` does not lose the sum to rounding.
+
+    Example:
+        ```python linenums="1"
+        op = MeanPoolingFwdOp(chunk_size=64, accum_dtype=torch.float32)
+        chunk_means = op(x)                        # uniform split
+        chunk_means = op(x, offsets, indices)      # ragged, one row of indices per chunk
+        ```
+    """
+
     def __init__(
         self,
-        batch_size: int,
-        seq_len: int,
-        heads: int,
-        dim: int,
         chunk_size: int,
-        chunks_per_batch: int,
-        seq_num: int,
-        use_offsets: int,
         accum_dtype: torch.dtype,
         tune: bool = False,
+        *,
+        target: Target = None,
         kernel_map: Optional[Dict[str, Kernel]] = None,
     ) -> None:
         """Build the op. Shapes and dtype are taken from the first call.
 
         Args:
+            chunk_size: Manifest ``params.chunk_size``, ``int``. A warp reduction spans the
+                chunk, so it must be a multiple of 32.
+            accum_dtype: Manifest ``params.accum_dtype``, ``torch.dtype`` — what a chunk sum
+                accumulates in.
             tune: Whether to autotune, applied when a kernel is first built.
+            target: Backend target to serve this op, or ``None`` to decide from the input
+                device.
             kernel_map: Optional kernel override dict.
         """
-        params = {k: v for k, v in locals().items() if k not in ("self", "kernel_map")}
-        for key, value in params.items():
-            setattr(self, key, value)
-
-        self._kernel_params = params
+        self.chunk_size = chunk_size
+        self.accum_dtype = accum_dtype
+        self.tune = tune
+        self.target = target
+        # Keyed by (device, shape): the uniform path hands the kernel tensors it never
+        # reads, and a placeholder on the wrong device would route the launch there.
+        self._placeholders: Dict[tuple, torch.Tensor] = {}
         self.dispatch_kernel(kernel_map)
-
-    def _get_kernel(self, inputs: "tuple[torch.Tensor | None, ...]", dtype: torch.dtype) -> Kernel:
-        # Takes no ``target=``: this op has no manifest entry, so a target's builder could
-        # not be told what to build. In-tree only until it has one.
-        return self.get_or_build_kernel(
-            "mean_pooling_fwd_kernel",
-            inputs,
-            key=dtype,
-            build=lambda: self.kernel_map["mean_pooling_fwd_kernel"](
-                **self._kernel_params,
-                dtype=dtype,
-            ),
-        )
 
     @property
     def default_kernel_map(self) -> Dict[str, Kernel]:
         return {"mean_pooling_fwd_kernel": MeanPoolingFwdKernel}
 
+    def _chunks_per_batch(self, seq_len: int, indices_shape: Optional[tuple[int, ...]]) -> int:
+        """The output's chunk axis, from shapes alone — what the compile fake is given."""
+        if indices_shape is None:
+            return -(-seq_len // self.chunk_size)
+        return indices_shape[0]
+
+    def _infer_output_shapes(
+        self,
+        x_shape: tuple[int, ...],
+        offsets_shape: Optional[tuple[int, ...]] = None,
+        indices_shape: Optional[tuple[int, ...]] = None,
+    ) -> Dict[str, tuple[int, ...]]:
+        batch_size, seq_len, heads, dim = x_shape
+        chunks = self._chunks_per_batch(seq_len, indices_shape)
+        return {"output": (batch_size, chunks, heads, dim)}
+
+    def _placeholder(self, shape: tuple[int, ...], device: torch.device) -> torch.Tensor:
+        key = (device, shape)
+        if key not in self._placeholders:
+            self._placeholders[key] = torch.zeros(shape, dtype=torch.int32, device=device)
+        return self._placeholders[key]
+
+    def _get_kernel(self, inputs: "tuple[torch.Tensor | None, ...]", key: tuple) -> Kernel:
+        (
+            batch_size,
+            seq_len,
+            heads,
+            dim,
+            chunks_per_batch,
+            seq_num,
+            use_offsets,
+            dtype,
+        ) = key
+        return self.get_or_build_kernel(
+            "mean_pooling_fwd_kernel",
+            inputs,
+            key=key,
+            build=lambda: self.kernel_map["mean_pooling_fwd_kernel"](
+                batch_size=batch_size,
+                seq_len=seq_len,
+                heads=heads,
+                dim=dim,
+                chunk_size=self.chunk_size,
+                chunks_per_batch=chunks_per_batch,
+                seq_num=seq_num,
+                use_offsets=use_offsets,
+                dtype=dtype,
+                accum_dtype=self.accum_dtype,
+                tune=self.tune,
+            ),
+        )
+
     def forward(
         self,
         x: torch.Tensor,
-        offsets: torch.Tensor,
-        indices: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+        indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Run the op on ``x``, ``offsets`` and ``indices``."""
-        kernel = self._get_kernel((x, offsets, indices), x.dtype)
-        out = kernel(x, offsets, indices=indices)
+        """Average each chunk of ``x``'s sequence axis.
+
+        Args:
+            x: Input tensor, ``[batch, seq, heads, dim]``, dtype ``float16``, ``bfloat16``
+                or ``float32``. ``dim`` is at most 128 or a multiple of it: the kernel
+                tiles it by a width of at most 128, and a tile that is neither the whole
+                ``dim`` nor an exact divisor of it has no valid layout.
+            offsets: Sequence boundaries, ``[seq_num + 1]``, dtype ``int32``. Passing it
+                selects the ragged split, and it comes with ``indices``.
+            indices: One ``(sequence, chunk-within-sequence)`` pair per output chunk,
+                ``[chunks, 2]``, dtype ``int32``.
+
+        Returns:
+            ``output``, ``[batch, chunks, heads, dim]``, dtype as ``x``. ``chunks`` is
+            ``ceil(seq / chunk_size)`` for a uniform split and ``indices.shape[0]`` for a
+            ragged one.
+
+        Raises:
+            ValueError: ``x`` is not 4D; exactly one of ``offsets`` and ``indices`` was
+                passed; ``chunk_size`` does not divide into whole warps; ``indices`` does
+                not hold one row per chunk ``offsets`` implies; or an input's dtype is
+                outside what the manifest declares.
+        """
+        if x.ndim != 4:
+            raise ValueError(f"x must be [batch, seq, heads, dim]; got {tuple(x.shape)}")
+        if (offsets is None) != (indices is None):
+            raise ValueError(
+                "offsets and indices describe one ragged split, so either both are passed "
+                f"or neither is; got offsets={'a tensor' if offsets is not None else None}, "
+                f"indices={'a tensor' if indices is not None else None}"
+            )
+        if self.chunk_size <= 0 or self.chunk_size % 32:
+            raise ValueError(f"chunk_size must be a positive multiple of 32; got {self.chunk_size}")
+
+        batch_size, seq_len, heads, dim = x.shape
+        # The kernel tiles `dim` by a width of at most 128; a width that is neither the
+        # whole `dim` nor an exact divisor of it has no valid layout.
+        if dim > 128 and dim % 128:
+            raise ValueError(f"dim must be at most 128 or a multiple of 128; got {dim}")
+        ragged = offsets is not None
+        chunks = self._chunks_per_batch(seq_len, tuple(indices.shape) if ragged else None)
+
+        if ragged:
+            self._validate_ragged(offsets, indices, seq_len, chunks)
+            seq_num = offsets.shape[0] - 1
+            offsets_arg, indices_arg = offsets, indices
+        else:
+            # The kernel takes both tensors whether or not it reads them; `inputs` keeps
+            # the caller's `None`s, which is where presence is read from. `seq_num = 0`
+            # divides by zero in the autotune supply, so one whole-axis sequence it is.
+            seq_num = 1
+            offsets_arg = self._placeholder((2,), x.device)
+            indices_arg = self._placeholder((chunks, 2), x.device)
+
+        self._validate_dtypes(x, offsets=offsets, indices=indices)
+        kernel = self._get_kernel(
+            (x, offsets, indices),
+            (batch_size, seq_len, heads, dim, chunks, seq_num, int(ragged), x.dtype),
+        )
+        out = kernel(x, offsets_arg, indices=indices_arg)
+        # The roofline formula reads its variables off the instance.
+        self.batch, self.seq_len, self.heads, self.dim = batch_size, seq_len, heads, dim
+        self.chunks = chunks
+        # `None` when uniform: that is how the formula knows not to charge for them.
+        self.offsets_shape = tuple(offsets.shape) if ragged else None
+        self.indices_shape = tuple(indices.shape) if ragged else None
         self.dtype = x.dtype
         return out
+
+    def _validate_ragged(
+        self, offsets: torch.Tensor, indices: torch.Tensor, seq_len: int, chunks: int
+    ) -> None:
+        """Check `indices` against `offsets` rather than believing its row count.
+
+        The output's chunk axis has to come from a shape, because that is all the compile
+        fake is handed, so it comes from `indices`. The values are here, so this is where
+        an `indices` that disagrees with `offsets` is caught.
+        """
+        if offsets.ndim != 1 or offsets.shape[0] < 2:
+            raise ValueError(
+                f"offsets must be a 1D tensor of at least two bounds; got {tuple(offsets.shape)}"
+            )
+        if indices.ndim != 2 or indices.shape[1] != 2:
+            raise ValueError(
+                f"indices must be [chunks, 2], one (sequence, chunk) pair per chunk; got "
+                f"{tuple(indices.shape)}"
+            )
+        lengths = offsets[1:] - offsets[:-1]
+        if int(lengths.min()) < 0:
+            raise ValueError("offsets must be non-decreasing")
+        # A partition, not a window: every token belongs to exactly one sequence.
+        if int(offsets[0]) != 0 or int(offsets[-1]) != seq_len:
+            raise ValueError(
+                f"offsets must run 0 to x's sequence axis of {seq_len}; got "
+                f"{int(offsets[0])} to {int(offsets[-1])}"
+            )
+        per_seq = -(-lengths // self.chunk_size)
+        implied = int(per_seq.sum())
+        if chunks != implied:
+            raise ValueError(
+                f"indices holds {chunks} chunks but offsets imply {implied} for "
+                f"chunk_size={self.chunk_size}"
+            )
+        # The kernel reads the chunk each row names, in range or not.
+        seq_ids, chunk_ids = indices[:, 0].long(), indices[:, 1]
+        if int(seq_ids.min()) < 0 or int(seq_ids.max()) >= per_seq.shape[0]:
+            raise ValueError(
+                f"indices names a sequence outside offsets' {per_seq.shape[0]} sequences"
+            )
+        if not bool(((chunk_ids >= 0) & (chunk_ids < per_seq[seq_ids])).all()):
+            raise ValueError("indices names a chunk its sequence does not have")
+        # A repeat would emit one chunk twice and drop another.
+        chunk_base = per_seq.cumsum(0) - per_seq
+        if int(torch.unique(chunk_base[seq_ids] + chunk_ids).numel()) != chunks:
+            raise ValueError("indices must name each chunk offsets implies exactly once")
 
 
 def _device_index(tensor: torch.Tensor) -> int | None:
@@ -209,11 +385,11 @@ class _AvgPoolFwdOpBase(Op):
     """
 
     ndim: ClassVar[int]
-    #: Average pooling has one output; the registration below reads this.
+    # Average pooling has one output; the registration below reads this.
     _returns_indices: ClassVar[bool] = False
 
-    #: This op's operator, and its name; both set by the registrations at the bottom of
-    #: this module, one per concrete op class.
+    # This op's operator, and its name; both set by the registrations at the bottom of
+    # this module, one per concrete op class.
     _wrapped: ClassVar[Any]
     compile_op_names: ClassVar[Tuple[str, ...]] = ()
 
@@ -289,7 +465,7 @@ class _AvgPoolFwdOpBase(Op):
     def _use_spatial_fast_path(self) -> bool:
         # Strict 1d/3d policy: an explicit generic-kernel override opts out of
         # the spatial fast path unless the spatial kernel is also explicit.
-        # AvgPool2dFwdOp overrides this with its laxer historical policy.
+        # AvgPool2dFwdOp overrides this with a laxer 2d policy.
         return (
             not self.ceil_mode
             and self.count_include_pad
@@ -529,8 +705,8 @@ class AvgPool2dFwdOp(_AvgPoolFwdOpBase):
         }
 
     def _use_spatial_fast_path(self) -> bool:
-        # Laxer historical 2d policy: an explicit generic-kernel override does
-        # not opt out of the spatial fast path (asymmetric with 1d/3d).
+        # Laxer 2d policy: an explicit generic-kernel override does not opt out
+        # of the spatial fast path (asymmetric with 1d/3d).
         return (
             not self.ceil_mode
             and self.count_include_pad
@@ -593,8 +769,8 @@ class _MaxPoolFwdOpBase(Op):
     _kernel_slot: ClassVar[str] = ""
     _returns_indices: ClassVar[bool] = False
 
-    #: This op's operator, and its name; both set by the registrations at the bottom of
-    #: this module, one per concrete op class.
+    # This op's operator, and its name; both set by the registrations at the bottom of
+    # this module, one per concrete op class.
     _wrapped: ClassVar[Any]
     compile_op_names: ClassVar[Tuple[str, ...]] = ()
 
@@ -1258,8 +1434,8 @@ class _AdaptivePool2dFwdOpBase(Op):
     _kernel_slot: ClassVar[str] = ""
     _returns_indices: ClassVar[bool] = False
 
-    #: This op's operator, and its name; both set by the registrations at the bottom of
-    #: this module, one per concrete op class.
+    # This op's operator, and its name; both set by the registrations at the bottom of
+    # this module, one per concrete op class.
     _wrapped: ClassVar[Any]
     compile_op_names: ClassVar[Tuple[str, ...]] = ()
 

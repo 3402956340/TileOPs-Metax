@@ -32,7 +32,7 @@
 
 - Roofline `vars` maps variable names to Python expressions over tensor shapes and params. Required for arbitrary-rank ops.
 
-- `status` is required: `implemented` or `spec-only`.
+- `status` is required: `implemented` or `spec-only`. A new entry lands as `spec-only` whatever existing code claims, and the PR that flips it to `implemented` changes `status` and the `source.*` pointers only — an entry needing spec edits to match the implementation is reverse-engineering from code, and those fields are re-derived from `ref_api` in their own PR.
 
 - `torch_compile_fullgraph`: literal `true` only; omit for no promise; invalid on `spec-only`. Declare only ops with a registered cold `fullgraph=True` compile test. Semantics: [manifest.md](../../docs/design/manifest.md#torch_compile_fullgraph).
 
@@ -49,6 +49,12 @@
 - The validator parses `shape_rules` and checks where names appear. It does not evaluate them, does not enumerate ways to call the op, and does not stop a call that passes half of a co-occurring group — the op's `forward` raises for that, naming the group.
 
 - Tensor layout defaults to contiguous row-major. Non-default needs an explicit `layout` field; `shape` dim names reflect memory order.
+
+- **Authoring an entry from its reference.** `signature.{inputs,outputs,params,shape_rules,dtype_combos}` and `roofline.{flops,bytes,vars}` are derived from `ref_api`'s documentation and rewritten whenever that entry is re-derived. `family`, `ref_api`, `workloads`, `status` and every `source.*` field are curated by hand and survive a re-derivation untouched.
+
+- **Reading a reference signature.** A reference Tensor parameter becomes a `signature.inputs` entry in positional order; a non-Tensor parameter becomes a `signature.params` entry with `type` and `default`; the return becomes `signature.outputs`. Names match the reference verbatim. Exclude `float64` and `complex32` / `complex64` / `complex128` from every declared dtype set — TileOPs is GPU-only.
+
+- **Resolving `source.op` and `source.kernel`.** Look them up by class, not by filename: several ops routinely share one file (`SumFwdOp` and `MeanFwdOp` both live in `src/tileops/ops/reduction/reduce.py`). Scan `src/tileops/ops/**/*.py` for `class <op_name>(`, then read that file's imports for the `Kernel` subclass and scan `src/tileops/kernels/**/*.py` the same way. A kernel-less op sets `source.kernel` to `source.op`. Both values are written distribution-relative, with the leading `src/` removed.
 
 - `source.kernel_map`, `source.test` and `source.bench` are discoverability pointers: they name where the current implementation, test and benchmark live, and are retargeted whenever those move. `source.kernel` and `source.op` are contract — they say where the op is *defined*, written as the path inside the distribution because the manifest ships in the wheel and must not name a path absent there; on disk they resolve under `src/`.
 

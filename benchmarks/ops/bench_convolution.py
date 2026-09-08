@@ -5,8 +5,8 @@ are loaded from the ops manifest (``src/tileops/manifest/convolution.yaml``);
 FLOP/byte counts come from each op's ``eval_roofline()`` via
 :class:`ManifestBenchmark`.
 
-One ``test_*_bench`` per op, so the validator's L4 AST check can tie each
-``load_workloads("<OpName>")`` call to its manifest entry. A row passes bias
+One ``test_*_bench`` per op, so every op this file is declared the benchmark
+of records a row of its own. A row passes bias
 when it declares ``bias_shape``.
 
 Every row is timed against flag_gems' Triton convolutions, ``F.convNd`` eager
@@ -15,7 +15,7 @@ inductor.
 """
 
 import functools
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 import pytest
@@ -41,22 +41,10 @@ _TUNE = True
 _FLAGGEMS_CONV = {1: "conv1d", 2: "conv2d", 3: "conv3d"}
 
 # Triton and cuDNN sum the same products in a different order, so agreement is
-# relative to the output scale: over the 13 manifest workloads on an H200, flag_gems
-# lands within 0.25 of cuDNN where |ref| reaches 564.
+# relative to the output scale: across the manifest's workloads flag_gems lands
+# within a fraction of cuDNN where the reference reaches the hundreds.
 _BASELINE_RTOL = 2e-2
 _BASELINE_ATOL = 2e-2
-
-
-class ConvWorkload:
-    """Minimal shape/dtype descriptor for the convolution family.
-
-    Holds ``shape`` and ``dtype`` so :class:`ManifestBenchmark` can call
-    ``op.eval_roofline()`` after ``forward()`` has bound the dynamic vars.
-    """
-
-    def __init__(self, shape: tuple[int, ...], dtype: torch.dtype):
-        self.shape = shape
-        self.dtype = dtype
 
 
 @dataclass(frozen=True)
@@ -72,9 +60,6 @@ class ConvCase:
     groups: int
     dtype: torch.dtype
     with_bias: bool
-
-    def as_record(self) -> dict:
-        return asdict(self)
 
 
 def _conv_args(w: dict, dtype: torch.dtype, kernel_keys: tuple[str, ...]) -> tuple:
@@ -230,9 +215,8 @@ def _run_conv(
 ) -> None:
     """Profile op against flag_gems and torch on the same inputs, recording all.
 
-    One caller per manifest op, so each keeps a literal
-    ``ManifestBenchmark(<op name>, ...)`` the manifest validator matches
-    statically.
+    One caller per manifest op, so every op the manifest declares this file for
+    records a row of its own.
     """
     inputs = _conv_inputs(
         case.input_shape,
@@ -283,7 +267,6 @@ def _run_conv(
             "torch": baseline,
             TORCH_COMPILE_TAG: compiled_reference(baseline),
         },
-        case.as_record(),
         static_weight=static_weight,
     )
 
@@ -293,7 +276,6 @@ def _profile_conv(
     bm: ManifestBenchmark,
     inputs: tuple[torch.Tensor, ...],
     baselines: dict[str, Callable],
-    params: dict,
     *,
     static_weight: bool = False,
 ) -> None:
@@ -319,24 +301,19 @@ def _profile_conv(
                 **{tag: bind_static_weight(fn) for tag, fn in baselines.items()},
             },
             x,
-            record_as=op,
-            params=params,
         )
         return
 
-    bm.compare({"tileops": op, **baselines}, *inputs, record_as=op, params=params)
+    bm.compare({"tileops": op, **baselines}, *inputs)
 
 
-# Conv1d
-
-_CONV1D_OP = "Conv1dFwdOp"
 _CONV1D_KERNEL_KEYS = ("kW",)
 
 
 @pytest.mark.parametrize(
     "case",
     workload_params(
-        load_workloads(_CONV1D_OP),
+        load_workloads(Conv1dFwdOp),
         functools.partial(_conv_args, kernel_keys=_CONV1D_KERNEL_KEYS),
         smoke_first=True,
     ),
@@ -349,20 +326,17 @@ def test_conv1d_bench(case: ConvCase) -> None:
         groups=case.groups,
         tune=_TUNE,
     )
-    bm = ManifestBenchmark(_CONV1D_OP, op, ConvWorkload(case.input_shape, case.dtype))
+    bm = ManifestBenchmark(op, case)
     _run_conv(op, bm, F.conv1d, case, rank=1, with_bias=case.with_bias, static_weight=True)
 
 
-# Conv2d
-
-_CONV2D_OP = "Conv2dFwdOp"
 _CONV2D_KERNEL_KEYS = ("kH", "kW")
 
 
 @pytest.mark.parametrize(
     "case",
     workload_params(
-        load_workloads(_CONV2D_OP),
+        load_workloads(Conv2dFwdOp),
         functools.partial(_conv_args, kernel_keys=_CONV2D_KERNEL_KEYS),
         smoke_first=True,
     ),
@@ -375,20 +349,17 @@ def test_conv2d_bench(case: ConvCase) -> None:
         groups=case.groups,
         tune=_TUNE,
     )
-    bm = ManifestBenchmark(_CONV2D_OP, op, ConvWorkload(case.input_shape, case.dtype))
+    bm = ManifestBenchmark(op, case)
     _run_conv(op, bm, F.conv2d, case, rank=2, with_bias=case.with_bias)
 
 
-# Conv3d
-
-_CONV3D_OP = "Conv3dFwdOp"
 _CONV3D_KERNEL_KEYS = ("kD", "kH", "kW")
 
 
 @pytest.mark.parametrize(
     "case",
     workload_params(
-        load_workloads(_CONV3D_OP),
+        load_workloads(Conv3dFwdOp),
         functools.partial(_conv_args, kernel_keys=_CONV3D_KERNEL_KEYS),
         smoke_first=True,
     ),
@@ -401,5 +372,5 @@ def test_conv3d_bench(case: ConvCase) -> None:
         groups=case.groups,
         tune=_TUNE,
     )
-    bm = ManifestBenchmark(_CONV3D_OP, op, ConvWorkload(case.input_shape, case.dtype))
+    bm = ManifestBenchmark(op, case)
     _run_conv(op, bm, F.conv3d, case, rank=3, with_bias=case.with_bias)

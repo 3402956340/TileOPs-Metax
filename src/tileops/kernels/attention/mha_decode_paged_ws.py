@@ -32,30 +32,28 @@ import tilelang.language as T
 import torch
 from tilelang.layout import make_swizzled_layout
 
+from tileops.kernels.constants import LOG2E
 from tileops.kernels.kernel_base import Kernel
 
 from .call_spec import paged_decode_ws_region
 
 __all__ = ["MHADecodePagedWsKernel"]
 
-#: log2(e): the softmax runs on exp2, which is one instruction.
-LOG2E = 1.44269504
-
 WARP = 32
-#: Warps in the consumer group. One warp group of each role, 256 threads: two
-#: consumer groups deadlock the block-wide sync the layout pass inserts.
+# Warps in the consumer group. One warp group of each role, 256 threads: two
+# consumer groups deadlock the block-wide sync the layout pass inserts.
 CONS_WARPS = 4
 CONS = CONS_WARPS * WARP
 PROD = 128
-#: Named barrier the consumer group uses on its own, never block-wide.
+# Named barrier the consumer group uses on its own, never block-wide.
 _MERGE_BARRIER = 1
-#: Blocks to aim the split count at, so one wave covers the device.
+# Blocks to aim the split count at, so one wave covers the device.
 _TARGET_BLOCKS = 128
-#: Finite stand-in for -inf in the running max, so a fully masked tile rescales
-#: by exactly one instead of evaluating exp2(-inf - -inf).
+# Finite stand-in for -inf in the running max, so a fully masked tile rescales
+# by exactly one instead of evaluating exp2(-inf - -inf).
 _NEG_FLOOR = -1.0e38
-#: What an empty split publishes as its log-sum-exp: finite, so the cross-split
-#: merge gives it weight exp2(_EMPTY_LSE - peak) = 0 rather than 0 * NaN.
+# What an empty split publishes as its log-sum-exp: finite, so the cross-split
+# merge gives it weight exp2(_EMPTY_LSE - peak) = 0 rather than 0 * NaN.
 _EMPTY_LSE = -1.0e30
 
 
@@ -74,8 +72,8 @@ def _mha_decode_paged_ws_kernel(
     scale = dim**-0.5 * LOG2E
     accum = "float"
     num_pages = (seqlen_kv + page_size - 1) // page_size
-    #: Head-vector elements a lane owns. The dot product is a whole warp wide,
-    #: so this is what makes the shuffle chain exactly five steps.
+    # Head-vector elements a lane owns. The dot product is a whole warp wide,
+    # so this is what makes the shuffle chain exactly five steps.
     vec = dim // WARP
 
     @tilelang.jit(**_jit_kwargs())
@@ -356,9 +354,6 @@ def _(
     return torch.empty_like(Q)
 
 
-# Kernel class
-
-
 class MHADecodePagedWsKernel(Kernel):
     """Hopper paged MHA decode: hand-written warp specialization, no MMA."""
 
@@ -429,10 +424,9 @@ class MHADecodePagedWsKernel(Kernel):
     def default_config(self) -> dict:
         """Aim the grid at one wave, then take the tallest tile that fits.
 
-        Measured on H200: the split count that puts roughly ``_TARGET_BLOCKS``
-        blocks on the device wins across all four manifest shapes, and among the
-        tile heights that then cover a split, the tallest is at worst within
-        noise of the best.
+        The split count that puts roughly ``_TARGET_BLOCKS`` blocks on the device
+        wins across the manifest's shapes, and among the tile heights that then
+        cover a split, the tallest is at worst within noise of the best.
         """
         work_items = max(1, self.batch * self.heads)
         num_split = max(1, min(_TARGET_BLOCKS // work_items, self.seqlen_kv))

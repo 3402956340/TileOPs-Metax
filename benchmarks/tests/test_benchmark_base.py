@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from benchmarks.benchmark_base import BenchmarkBase, workloads_to_params
+from benchmarks.benchmark_base import BenchmarkBase, ManifestBenchmark, workloads_to_params
 from benchmarks.timing import (
     Sample,
     Trace,
@@ -20,6 +20,7 @@ from benchmarks.timing import (
     _OffThreadLaunchError,
     bench_kernel,
 )
+from tileops.manifest import load_workloads
 
 
 @pytest.mark.smoke
@@ -44,6 +45,14 @@ def test_workloads_to_params_include_extra_propagates_dim():
         assert isinstance(extra, dict)
     # A workload with no extras must yield an empty dict, not a missing slot.
     assert any(p.values[2] == {} for p in triples)
+
+
+def test_an_op_class_names_its_own_workloads():
+    """A caller holding the Op class does not have to repeat its name as a string."""
+    from tileops.ops.reduction.reduce import SumFwdOp
+
+    assert load_workloads(SumFwdOp) == load_workloads("SumFwdOp")
+    assert workloads_to_params(SumFwdOp) == workloads_to_params("SumFwdOp")
 
 
 def test_no_bench_reaches_its_gradients_through_the_autograd_engine():
@@ -72,7 +81,7 @@ def test_no_bench_reaches_its_gradients_through_the_autograd_engine():
 def test_multi_input_op_raises_keyerror():
     """Multi-input ops (q/k/v) raise instead of binding a wrong tensor."""
     with pytest.raises(KeyError, match="exactly one manifest tensor input"):
-        workloads_to_params("GroupedQueryAttentionFwdOp")
+        workloads_to_params("GroupedQueryAttentionDenseFwdOp")
 
 
 def _kernel(start_ns: int, end_ns: int, correlation_id: int = 0) -> dict:
@@ -186,7 +195,7 @@ def test_a_phase_that_lost_records_is_measured_again(monkeypatch):
     requested_bytes = []
     monkeypatch.setattr(_bench_meta, "attribution_retries", None, raising=False)
 
-    def fake_collect(run_one, n_repeat, prepare_one, buffer_bytes=0):
+    def fake_collect(run_one, n_repeat, prepare_one, buffer_bytes=0, count_copies=False):
         requested_bytes.append(buffer_bytes)
         return traces.pop(0)
 
@@ -203,7 +212,7 @@ def test_a_call_that_launched_nothing_does_not_spend_the_retries(monkeypatch):
     """Nothing discarded means re-measuring cannot help, so it fails on sight."""
     attempts = []
 
-    def fake_collect(run_one, n_repeat, prepare_one, buffer_bytes=0):
+    def fake_collect(run_one, n_repeat, prepare_one, buffer_bytes=0, count_copies=False):
         attempts.append(buffer_bytes)
         return Trace([], {}, 0)
 
@@ -299,6 +308,26 @@ def test_native_cupti_failure_fails_closed_by_default(monkeypatch):
 
 @pytest.mark.smoke
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_a_copy_counts_only_where_the_case_asks_for_copies():
+    """A copy counts as device work only where the case asks, and is reported otherwise."""
+    x = torch.empty(8 * 1024 * 1024, device="cuda", dtype=torch.float16)
+
+    def clone_then_scale():
+        y = x.clone()
+        y.mul_(2)
+        return y
+
+    left_out = bench_kernel(clone_then_scale)
+    if _bench_meta.timing != "cupti":
+        pytest.skip("copy attribution requires CUPTI timing")
+    assert all(s.n_kernels == 1 and s.uncounted_copy_ms > 0 for s in left_out)
+
+    counted = bench_kernel(clone_then_scale, count_copies=True)
+    assert all(s.n_kernels == 2 and s.uncounted_copy_ms == 0 for s in counted)
+
+
+@pytest.mark.smoke
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_kernel_runtime_error_propagates():
     """Genuine RuntimeErrors must reach the caller, not the fallback path."""
 
@@ -307,3 +336,24 @@ def test_kernel_runtime_error_propagates():
 
     with pytest.raises(RuntimeError, match="kernel failure"):
         bench_kernel(boom)
+
+
+class SumFwdOp:
+    """Stands in for the manifest op of that name; only the class name is read."""
+
+
+class NotAManifestOp:
+    """A wrapper of the kind a benchmark must not report under."""
+
+
+@pytest.mark.smoke
+def test_manifest_benchmark_takes_its_name_from_the_op():
+    """The report name is the op's class, so it cannot disagree with what ran."""
+    assert ManifestBenchmark(SumFwdOp(), object()).op_name == "SumFwdOp"
+
+
+@pytest.mark.smoke
+def test_manifest_benchmark_refuses_an_op_the_manifest_does_not_declare():
+    """A wrapper or a subclass would report numbers under a name no spec knows."""
+    with pytest.raises(KeyError, match="NotAManifestOp"):
+        ManifestBenchmark(NotAManifestOp(), object())

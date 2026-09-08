@@ -55,12 +55,9 @@ def fused_prepare_compute_w_u_tl(
             u: T.Tensor([batch, head, seq_len, dim_v], dtype),
         ):
             with T.Kernel(batch, head, seq_len // block_C, threads=threads) as (bid, hid, by):
-                # Shared buffers
                 k_shared = T.alloc_shared([block_C, dim_k], dtype)
                 v_shared = T.alloc_shared([block_C, dim_v], dtype)
                 beta_shared = T.alloc_shared([block_C], accum_dtype)
-                S_shared = T.alloc_shared([block_C, block_C], accum_dtype)
-                P_shared = T.alloc_shared([block_C, block_C], accum_dtype)
                 # After Neumann, P is dead: reuse it as k_beta/v_beta when BC==DK==DV (MACA 64KB smem).
                 k_beta_shared = (
                     P_shared
@@ -72,13 +69,14 @@ def fused_prepare_compute_w_u_tl(
                     if (block_C == dim_k and dim_k == dim_v)
                     else T.alloc_shared([block_C, dim_v], accum_dtype)
                 )
+                S_shared = T.alloc_shared([block_C, block_C], accum_dtype)
+                P_shared = T.alloc_shared([block_C, block_C], accum_dtype)
                 # Fragments (fp32 accumulators)
                 gram_frag = T.alloc_fragment([block_C, block_C], accum_dtype)
                 temp_frag = T.alloc_fragment([block_C, block_C], accum_dtype)
                 w_frag = T.alloc_fragment([block_C, dim_k], accum_dtype)
                 u_frag = T.alloc_fragment([block_C, dim_v], accum_dtype)
 
-                # Load inputs
                 T.copy(
                     k[bid, hid, by * block_C : (by + 1) * block_C, :], k_shared, disable_tma=True
                 )

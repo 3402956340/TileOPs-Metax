@@ -4,8 +4,8 @@ Workload shapes, dtypes, layouts, and roofline formulas are loaded from the
 ops manifest (``src/tileops/manifest/position_encoding.yaml``); nothing about a
 workload is hard-coded here.
 
-One ``test_*_bench`` per op, so the validator's L4 AST check can tie each
-``load_workloads("<OpName>")`` call to its manifest entry.
+One ``test_*_bench`` per op, so every op this file is declared the benchmark
+of records a row of its own.
 
 Baselines build their cos/sin tables outside the timed window, so only the
 rotation itself is measured.
@@ -122,7 +122,6 @@ def _profile_rope(
 ) -> None:
     """Profile op and the torch rotation baseline on the same input."""
     x = torch.randn(shape, device="cuda", dtype=dtype)
-    params = {"shape": shape, "dtype": dtype, "layout": layout}
 
     seq_len = shape[0] if layout == "1d" else shape[1]
     cos, sin = _rope_tables(seq_len, shape[-1], dtype)
@@ -139,19 +138,15 @@ def _profile_rope(
             TORCH_COMPILE_TAG: compiled_reference(baseline_fn),
         },
         x,
-        record_as=op,
-        params=params,
     )
 
 
 # Per-op tests — one block per manifest entry.
 
-_NEOX_OP = "RopeNeoxFwdOp"
-
 
 @pytest.mark.parametrize(
     "shape, dtype, layout",
-    workload_params(load_workloads(_NEOX_OP), _layout_args, smoke_first=True),
+    workload_params(load_workloads(RopeNeoxFwdOp), _layout_args, smoke_first=True),
 )
 def test_rope_neox_bench(
     shape: tuple[int, ...],
@@ -159,16 +154,13 @@ def test_rope_neox_bench(
     layout: str,
 ) -> None:
     op = RopeNeoxFwdOp(layout=layout, base=_BASE)
-    bm = ManifestBenchmark(_NEOX_OP, op, RopeWorkload(shape, dtype))
+    bm = ManifestBenchmark(op, RopeWorkload(shape, dtype))
     _profile_rope(op, bm, shape, dtype, layout)
-
-
-_NON_NEOX_OP = "RopeNonNeoxFwdOp"
 
 
 @pytest.mark.parametrize(
     "shape, dtype, layout",
-    workload_params(load_workloads(_NON_NEOX_OP), _layout_args, smoke_first=True),
+    workload_params(load_workloads(RopeNonNeoxFwdOp), _layout_args, smoke_first=True),
 )
 def test_rope_non_neox_bench(
     shape: tuple[int, ...],
@@ -176,16 +168,13 @@ def test_rope_non_neox_bench(
     layout: str,
 ) -> None:
     op = RopeNonNeoxFwdOp(layout=layout, base=_BASE)
-    bm = ManifestBenchmark(_NON_NEOX_OP, op, RopeWorkload(shape, dtype))
+    bm = ManifestBenchmark(op, RopeWorkload(shape, dtype))
     _profile_rope(op, bm, shape, dtype, layout)
-
-
-_LLAMA31_OP = "RopeLlama31FwdOp"
 
 
 @pytest.mark.parametrize(
     "shape, dtype, layout",
-    workload_params(load_workloads(_LLAMA31_OP), _layout_args, smoke_first=True),
+    workload_params(load_workloads(RopeLlama31FwdOp), _layout_args, smoke_first=True),
 )
 def test_rope_llama31_bench(
     shape: tuple[int, ...],
@@ -193,16 +182,13 @@ def test_rope_llama31_bench(
     layout: str,
 ) -> None:
     op = RopeLlama31FwdOp(layout=layout, base=_BASE)
-    bm = ManifestBenchmark(_LLAMA31_OP, op, RopeWorkload(shape, dtype))
+    bm = ManifestBenchmark(op, RopeWorkload(shape, dtype))
     _profile_rope(op, bm, shape, dtype, layout)
-
-
-_YARN_OP = "RopeYarnFwdOp"
 
 
 @pytest.mark.parametrize(
     "shape, dtype, layout",
-    workload_params(load_workloads(_YARN_OP), _layout_args, smoke_first=True),
+    workload_params(load_workloads(RopeYarnFwdOp), _layout_args, smoke_first=True),
 )
 def test_rope_yarn_bench(
     shape: tuple[int, ...],
@@ -210,16 +196,13 @@ def test_rope_yarn_bench(
     layout: str,
 ) -> None:
     op = RopeYarnFwdOp(layout=layout, base=_BASE)
-    bm = ManifestBenchmark(_YARN_OP, op, RopeWorkload(shape, dtype))
+    bm = ManifestBenchmark(op, RopeWorkload(shape, dtype))
     _profile_rope(op, bm, shape, dtype, layout)
-
-
-_LONGROPE_OP = "RopeLongRopeFwdOp"
 
 
 @pytest.mark.parametrize(
     "shape, dtype, layout",
-    workload_params(load_workloads(_LONGROPE_OP), _layout_args, smoke_first=True),
+    workload_params(load_workloads(RopeLongRopeFwdOp), _layout_args, smoke_first=True),
 )
 def test_rope_longrope_bench(
     shape: tuple[int, ...],
@@ -227,16 +210,13 @@ def test_rope_longrope_bench(
     layout: str,
 ) -> None:
     op = RopeLongRopeFwdOp(layout=layout, base=_BASE)
-    bm = ManifestBenchmark(_LONGROPE_OP, op, RopeWorkload(shape, dtype))
+    bm = ManifestBenchmark(op, RopeWorkload(shape, dtype))
     _profile_rope(op, bm, shape, dtype, layout)
-
-
-_POSITION_IDS_OP = "RopeNeoxPositionIdsFwdOp"
 
 
 @pytest.mark.parametrize(
     "shape, dtype, max_position",
-    workload_params(load_workloads(_POSITION_IDS_OP), _position_ids_args, smoke_first=True),
+    workload_params(load_workloads(RopeNeoxPositionIdsFwdOp), _position_ids_args, smoke_first=True),
 )
 def test_rope_neox_position_ids_bench(
     shape: tuple[int, int, int],
@@ -255,8 +235,7 @@ def test_rope_neox_position_ids_bench(
     )
 
     op = RopeNeoxPositionIdsFwdOp(max_position=max_position, base=_BASE)
-    bm = ManifestBenchmark(_POSITION_IDS_OP, op, RopeWorkload(shape, dtype))
-    params = {"shape": shape, "dtype": dtype, "max_position": max_position}
+    bm = ManifestBenchmark(op, RopeWorkload(shape, dtype))
 
     cos, sin = _rope_tables(max_position, head_dim, dtype)
 
@@ -265,8 +244,8 @@ def test_rope_neox_position_ids_bench(
         return _rotate(t, cos[idx].unsqueeze(1), sin[idx].unsqueeze(1))
 
     # vllm rotates in fp32 and rounds once, the reference in the storage dtype, so they
-    # agree to one rounding step: over the manifest's rows on an H200, max |Δ| 0.0039
-    # in fp16 and 0.0156 in bf16.
+    # agree to one rounding step of the storage dtype, which is what the default
+    # tolerances allow.
     check_fn, check_args = _vllm_rope(x, position_ids, head_dim, cos, sin)
     torch.testing.assert_close(
         check_fn(*check_args).view(x.shape),
@@ -285,6 +264,4 @@ def test_rope_neox_position_ids_bench(
         },
         x,
         position_ids,
-        record_as=op,
-        params=params,
     )

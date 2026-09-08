@@ -16,6 +16,7 @@ import contextlib
 import ctypes
 import logging
 import os
+import statistics
 import sys
 import threading
 from typing import Any, Callable, NamedTuple, Optional
@@ -48,9 +49,9 @@ _CUPTI = None
 _COLLECTOR_ACTIVE = False
 _CALLBACKS_REGISTERED = False
 # Whatever CUPTI does with a buffer between handing it back and asking for the next one
-# scales with its size and runs on this thread, inside a timed call. On a three-kernel
-# call whose kernels occupy 19.1 us: 8 MB stalls 23 of 60 iterations past 200 us, 32 MB
-# 30 of 60, 256 KB none. Only latency_ms picks it up; the records are the same.
+# scales with its size and runs on this thread, inside a timed call, so a buffer of a
+# few megabytes stalls iterations of a short call. Only latency_ms picks the stall up;
+# the records are the same either way.
 _BUFFER_BYTES = 256 * 1024
 _BUFFER_ALIGN = 8
 # What the next buffer request answers with. A phase that lost records raises it for
@@ -179,19 +180,34 @@ def _buffer_completed(records) -> None:
                     "correlation_id": int(record.correlation_id),
                 }
             )
+        elif kind == int(cupti.ActivityKind.MEMCPY):
+            _KERNELS.append(
+                {
+                    "name": "memcpy",
+                    "start_ns": int(record.start),
+                    "end_ns": int(record.end),
+                    "correlation_id": int(record.correlation_id),
+                    "is_copy": True,
+                }
+            )
         elif kind == int(cupti.ActivityKind.EXTERNAL_CORRELATION):
             _ITERATION_OF[int(record.correlation_id)] = int(record.external_id)
         # Launch-API records are collected only so CUPTI emits the correlation above.
 
 
 def _trace_launches_only(cupti) -> None:
-    """Silence every traced API except the ones that launch kernels.
+    """Silence every traced API except the ones that issue the work being timed.
 
     Tracing all of them costs ~15 records per iteration instead of one, and only a launch
     carries the correlation id a kernel needs. Graph launches count: a replayed graph's
     kernels are unattributable without ``cudaGraphLaunch`` / ``cuGraphLaunch``. Must run
     after ``activity_enable``, which resets the per-API filter -- measured, not assumed.
+
+    The memcpy APIs are traced whether or not the case counts copies: a copy activity
+    carries the correlation id of the call that issued it, and without that id a copy can
+    neither be counted nor reported as uncounted.
     """
+    issuers = ("Launch", "Memcpy")
     for toggle, cbids in (
         (cupti.activity_enable_runtime_api, cupti.runtime_api_trace_cbid),
         (cupti.activity_enable_driver_api, cupti.driver_api_trace_cbid),
@@ -201,7 +217,7 @@ def _trace_launches_only(cupti) -> None:
             if name.startswith("_") or not isinstance(cbid, int):
                 continue
             try:
-                toggle(int(cbid), 1 if "Launch" in name else 0)
+                toggle(int(cbid), 1 if any(word in name for word in issuers) else 0)
             except Exception:  # noqa: BLE001, S112
                 # The enums carry sentinels (INVALID, SIZE) that CUPTI refuses.
                 continue
@@ -214,15 +230,15 @@ def _phase_session(buffer_bytes: int = _BUFFER_BYTES):
     if _COLLECTOR_ACTIVE:
         raise RuntimeError("CUPTI collector is already active")
     cupti = _load_cupti()
-    # Kernels, the launches that carry their correlation ids, and the records mapping
-    # those ids to the pushed iteration index. No other kind: a workspace memset or a
-    # staging copy is not the arithmetic being timed.
-    kinds = (
+    # Copies are always collected and counted only where the case asks, since only the
+    # case knows whether a copy is the arithmetic.
+    kinds = [
         cupti.ActivityKind.CONCURRENT_KERNEL,
         cupti.ActivityKind.EXTERNAL_CORRELATION,
         cupti.ActivityKind.RUNTIME,
         cupti.ActivityKind.DRIVER,
-    )
+        cupti.ActivityKind.MEMCPY,
+    ]
     previous_bytes = _buffer_bytes
     try:
         if not _CALLBACKS_REGISTERED:
@@ -325,7 +341,16 @@ class Sample(NamedTuple):
     latency_ms: float
     """Earliest kernel start to latest kernel end. Includes gaps the host caused."""
     n_kernels: int | None
-    """Kernels attributed to the call, or None when the timer cannot see them."""
+    """Kernels attributed to the call, or None when the timer cannot see them.
+
+    A copy counts as one where the case asked for copies; see ``count_copies``.
+    """
+    uncounted_copy_ms: float = 0.0
+    """Device time in copies the call issued and this case left out of the reading.
+
+    Zero for a case that counts copies, and for one that issues none. Anything else is
+    a reading that omits work: see ``count_copies``.
+    """
 
 
 def _kernel_span_us(kernels: list[dict]) -> float:
@@ -365,13 +390,19 @@ def _attributed_samples(
     iteration_of: dict[int, int],
     n_repeat: int,
     dropped: Optional[int] = 0,
-) -> list["Sample"]:
+    count_copies: bool = False,
+) -> list[Sample]:
     """Return one Sample per iteration.
 
     A kernel belongs to the iteration whose correlation id it carries, so a call whose
     kernel count varies between iterations is measured rather than rejected. Both ways
     of coming up short -- an unclaimed kernel, an iteration with none -- can also mean
     the record was taken and then discarded, which is what ``dropped`` distinguishes.
+
+    A device-to-device copy the call issued is device work like any other. Where the case
+    does not count copies it is left out of ``device_busy_ms`` and reported in
+    ``uncounted_copy_ms``, so a call that computes part of its result with a copy is
+    visibly reading faster than it is rather than silently.
     """
     claimed: dict[int, list[dict]] = {}
     orphans = []
@@ -384,6 +415,20 @@ def _attributed_samples(
             orphans.append(kernel)
         else:
             claimed.setdefault(iteration, []).append(kernel)
+
+    uncounted: dict[int, float] = {}
+    if not count_copies:
+        for iteration, group in list(claimed.items()):
+            copies = [k for k in group if k.get("is_copy")]
+            if not copies:
+                continue
+            uncounted[iteration] = _kernel_busy_us(copies) * 1e-3
+            kept = [k for k in group if not k.get("is_copy")]
+            # An iteration that only copied has nothing left to time.
+            if kept:
+                claimed[iteration] = kept
+            else:
+                del claimed[iteration]
 
     unmeasured = [i for i in range(n_repeat) if i not in claimed]
     if orphans or unmeasured:
@@ -418,6 +463,7 @@ def _attributed_samples(
             device_busy_ms=_kernel_busy_us(claimed[i]) * 1e-3,
             latency_ms=_kernel_span_us(claimed[i]) * 1e-3,
             n_kernels=len(claimed[i]),
+            uncounted_copy_ms=uncounted.get(i, 0.0),
         )
         for i in range(n_repeat)
     ]
@@ -427,6 +473,7 @@ def _collect_attributed(
     run_one: Callable[[int], None],
     n_repeat: int,
     prepare_one: Callable[[int], None],
+    count_copies: bool = False,
 ) -> list[Sample]:
     """Collect one fully attributed phase, re-measuring what CUPTI loses.
 
@@ -443,6 +490,7 @@ def _collect_attributed(
                 trace.iteration_of,
                 n_repeat,
                 trace.dropped,
+                count_copies,
             )
         except _CUPTIRecordsLostError as exc:
             _bench_meta.attribution_retries = attempt + 1
@@ -590,6 +638,15 @@ def _capture_bench_meta() -> dict:
     }
 
 
+def median_busy_ms(samples: "list[Sample]") -> float:
+    """The device-busy figure a report publishes for a run: the median sample.
+
+    One definition, so a baseline that ranks candidates on this number and the
+    row that reports it cannot drift apart.
+    """
+    return statistics.median(s.device_busy_ms for s in samples)
+
+
 def bench_kernel(
     fn: Callable,
     args: tuple[Any, ...] = (),
@@ -597,6 +654,7 @@ def bench_kernel(
     repeat_ms: float = REPEAT_MS,
     max_iters: int = _MAX_ITERS,
     min_iters: int = _MIN_ITERS,
+    count_copies: bool = False,
 ) -> list[Sample]:
     """Time *fn* through CUPTI, one :class:`Sample` per iteration.
 
@@ -608,6 +666,11 @@ def bench_kernel(
     A phase whose records CUPTI discarded is measured again; attribution otherwise
     fails closed unless
     ``TILEOPS_ALLOW_CUDA_EVENTS_FALLBACK=1``.
+
+    ``count_copies`` adds device-to-device copies to what is attributed, for a row whose
+    implementations compute part of the result with one. It is off by default because a
+    staging copy is not the arithmetic being timed; turn it on for every tag in a row or
+    for none, since the two sides are otherwise read off different instruments.
     """
     if not isinstance(args, tuple):
         raise TypeError(
@@ -658,7 +721,7 @@ def bench_kernel(
 
     try:
         with _native_output_suppressor():
-            samples = _collect_attributed(_run, n_repeat, _prepare_iteration)
+            samples = _collect_attributed(_run, n_repeat, _prepare_iteration, count_copies)
         _bench_meta.timing = "cupti"
     except (_CUPTIAttributionError, CUPTIError) as exc:
         if isinstance(exc, CUPTIError) and not _torch_profiler_failed:

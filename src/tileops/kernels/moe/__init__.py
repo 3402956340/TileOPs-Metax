@@ -1,3 +1,4 @@
+from .call_spec import MGroupedGemmCall, PostPermuteCall, PrePermuteCall
 from .fused_topk import FusedTopKKernel
 from .moe_grouped_gemm_nopad import MoeGroupedGemmNopadKernel
 from .moe_grouped_gemm_persistent_3wg_fused_act import (
@@ -8,20 +9,23 @@ from .moe_grouped_gemm_persistent_fused_act_maca import (
 )
 from .moe_grouped_gemm_separate_act import MoeGroupedGemmSeparateActKernel
 from .permute_align import MoePermuteAlignKernel
-from .permute_nopad import MoePermuteNopadKernel
+from .permute_contiguous import MoePrePermuteContiguousKernel
 from .shared_expert_mlp import SharedExpertMLPKernel
 from .shared_expert_mlp_maca import SharedExpertMLPMACAKernel
 from .unpermute import MoeUnpermuteKernel
 
 __all__ = [
     "FusedTopKKernel",
+    "MGroupedGemmCall",
     "MoeGroupedGemmNopadKernel",
     "MoeGroupedGemmPersistent3WGFusedActKernel",
     "MoeGroupedGemmPersistentFusedActMACAKernel",
     "MoeGroupedGemmSeparateActKernel",
     "MoePermuteAlignKernel",
-    "MoePermuteNopadKernel",
+    "MoePrePermuteContiguousKernel",
     "MoeUnpermuteKernel",
+    "PostPermuteCall",
+    "PrePermuteCall",
     "SharedExpertMLPKernel",
     "SharedExpertMLPMACAKernel",
 ]

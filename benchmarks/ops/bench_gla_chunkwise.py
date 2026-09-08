@@ -25,9 +25,6 @@ from tileops.manifest import load_workloads
 from tileops.ops import GLABwdOp, GLAFwdOp
 from workloads.linear_attention import GLAChunkwiseWorkload
 
-_FWD_OP_NAME = "GLAFwdOp"
-_BWD_OP_NAME = "GLABwdOp"
-
 
 def _gla_args(workload: dict) -> tuple[int, int, int, int, int, int, bool]:
     """Constructor arguments for one manifest workload row.
@@ -54,12 +51,9 @@ def _gla_bwd_args(workload: dict) -> tuple[int, int, int, int, int, int]:
     return batch, seq_len, heads, dim_k, workload["v_shape"][3], workload.get("chunk_size", 64)
 
 
-# Forward benchmark
-
-
 @pytest.mark.parametrize(
     "batch, seq_len, heads, dim_k, dim_v, chunk_size, has_initial_state, dtype, tune",
-    workload_params(load_workloads(_FWD_OP_NAME), then_dtype(_gla_args, tune=False)),
+    workload_params(load_workloads(GLAFwdOp), then_dtype(_gla_args, tune=False)),
 )
 def test_gla_fwd_bench(
     batch: int,
@@ -80,7 +74,7 @@ def test_gla_fwd_bench(
     # --- TileOPs ---
     scale = dim_k**-0.5
     op = GLAFwdOp(chunk_size=chunk_size, scale=scale, tune=tune)
-    bm = ManifestBenchmark(_FWD_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
     functors = {"tileops": op.forward}
 
     # --- FLA ---
@@ -91,10 +85,7 @@ def test_gla_fwd_bench(
 
     functors["fla"] = (fla_fwd, ())
 
-    bm.compare(functors, *inputs, record_as=op, params=locals())
-
-
-# Backward benchmark
+    bm.compare(functors, *inputs)
 
 
 @pytest.mark.xfail(
@@ -104,7 +95,7 @@ def test_gla_fwd_bench(
 )
 @pytest.mark.parametrize(
     "batch, seq_len, heads, dim_k, dim_v, chunk_size, dtype, tune",
-    workload_params(load_workloads(_BWD_OP_NAME), then_dtype(_gla_bwd_args, tune=False)),
+    workload_params(load_workloads(GLABwdOp), then_dtype(_gla_bwd_args, tune=False)),
 )
 def test_gla_bwd_bench(
     batch: int,
@@ -134,7 +125,7 @@ def test_gla_bwd_bench(
     dht = torch.zeros(B, H, K, V, device="cuda", dtype=torch.float32)
 
     bwd_op = GLABwdOp(chunk_size=BC, scale=scale, tune=tune)
-    bm = ManifestBenchmark(_BWD_OP_NAME, bwd_op, test)
+    bm = ManifestBenchmark(bwd_op, test)
     functors = {"tileops": (bwd_op.forward, (q, k, v, g, h, do, dht))}
 
     # --- FLA: the backward node, called directly ---
@@ -154,7 +145,4 @@ def test_gla_bwd_bench(
 
     functors["fla"] = (fla_bwd, ())
 
-    bm.compare(functors, record_as=bwd_op, params=locals())
-
-
-# Combined fwd+bwd benchmark
+    bm.compare(functors)

@@ -25,7 +25,12 @@ from benchmarks.benchmark_base import (
     workload_params,
 )
 from tileops.manifest import load_workloads
-from tileops.ops import GatedDeltaNetBHTDFwdOp, GatedDeltaNetBTHDFwdOp, GatedDeltaNetBwdOp
+from tileops.ops import (
+    GatedDeltaNetAutogradOp,
+    GatedDeltaNetBHTDFwdOp,
+    GatedDeltaNetBTHDFwdOp,
+    GatedDeltaNetBwdOp,
+)
 from workloads.linear_attention import GatedDeltaNetFwdWorkload
 
 
@@ -38,14 +43,6 @@ def _to_fla_layout(q, k, v, g, beta):
         g.permute(0, 2, 1).contiguous(),
         beta.permute(0, 2, 1).contiguous(),
     )
-
-
-# Forward benchmark
-
-
-_FWD_OP_NAME = "GatedDeltaNetBTHDFwdOp"
-_BHTD_FWD_OP_NAME = "GatedDeltaNetBHTDFwdOp"
-_BWD_OP_NAME = "GatedDeltaNetBwdOp"
 
 
 def _gdn_bhtd_args(workload: dict) -> tuple[int, int, int, int, int, int]:
@@ -64,7 +61,7 @@ def _gdn_bthd_args(workload: dict) -> tuple[int, int, int, int, int, int]:
 
 @pytest.mark.parametrize(
     "batch, heads, seq_len, dim_k, dim_v, chunk_size, dtype, tune",
-    workload_params(load_workloads(_FWD_OP_NAME), then_dtype(_gdn_bthd_args, tune=False)),
+    workload_params(load_workloads(GatedDeltaNetBTHDFwdOp), then_dtype(_gdn_bthd_args, tune=False)),
 )
 def test_gated_deltanet_vs_fla_fwd(
     batch: int,
@@ -83,17 +80,17 @@ def test_gated_deltanet_vs_fla_fwd(
     bthd = _to_fla_layout(q, k, v, g, beta)
 
     op = GatedDeltaNetBTHDFwdOp(chunk_size=chunk_size, tune=tune)
-    bm = ManifestBenchmark(_FWD_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
 
     def fla_fwd():
         return chunk_gated_delta_rule(*bthd, scale=1.0)
 
-    bm.compare({"tileops": (op, bthd), "fla": (fla_fwd, ())}, record_as=op, params=locals())
+    bm.compare({"tileops": (op, bthd), "fla": (fla_fwd, ())})
 
 
 @pytest.mark.parametrize(
     "batch, heads, seq_len, dim_k, dim_v, chunk_size, dtype, tune",
-    workload_params(load_workloads(_BHTD_FWD_OP_NAME), then_dtype(_gdn_bhtd_args, tune=False)),
+    workload_params(load_workloads(GatedDeltaNetBHTDFwdOp), then_dtype(_gdn_bhtd_args, tune=False)),
 )
 def test_gated_deltanet_bhtd_vs_fla_fwd(
     batch: int,
@@ -111,20 +108,17 @@ def test_gated_deltanet_bhtd_vs_fla_fwd(
     bthd = _to_fla_layout(*inputs)
 
     op = GatedDeltaNetBHTDFwdOp(chunk_size=chunk_size, tune=tune)
-    bm = ManifestBenchmark(_BHTD_FWD_OP_NAME, op, test)
+    bm = ManifestBenchmark(op, test)
 
     def fla_fwd():
         return chunk_gated_delta_rule(*bthd, scale=1.0)
 
-    bm.compare({"tileops": (op, inputs), "fla": (fla_fwd, ())}, record_as=op, params=locals())
-
-
-# Backward benchmark
+    bm.compare({"tileops": (op, inputs), "fla": (fla_fwd, ())})
 
 
 @pytest.mark.parametrize(
     "batch, heads, seq_len, dim_k, dim_v, chunk_size, dtype, tune",
-    workload_params(load_workloads(_BWD_OP_NAME), then_dtype(_gdn_bhtd_args, tune=False)),
+    workload_params(load_workloads(GatedDeltaNetBwdOp), then_dtype(_gdn_bhtd_args, tune=False)),
 )
 def test_gated_deltanet_vs_fla_bwd(
     batch: int,
@@ -151,7 +145,7 @@ def test_gated_deltanet_vs_fla_bwd(
     _o, S_fwd, _Aw, _Au = fwd_op.forward(q, k, v, g, beta)
 
     bwd_op = GatedDeltaNetBwdOp(chunk_size=BC, tune=tune)
-    bm = ManifestBenchmark(_BWD_OP_NAME, bwd_op, test)
+    bm = ManifestBenchmark(bwd_op, test)
     functors = {"tileops": bwd_op.forward}
 
     # --- FLA (BTHK layout) ---
@@ -172,4 +166,36 @@ def test_gated_deltanet_vs_fla_bwd(
         return fla_backward(do_fla, None)
 
     functors["fla"] = (fla_bwd, ())
-    bm.compare(functors, do, q, k, v, g, beta, S_fwd, record_as=bwd_op, params=locals())
+    bm.compare(functors, do, q, k, v, g, beta, S_fwd)
+
+
+@pytest.mark.parametrize(
+    "batch, heads, seq_len, dim_k, dim_v, chunk_size, dtype, tune",
+    workload_params(
+        load_workloads(GatedDeltaNetAutogradOp), then_dtype(_gdn_bhtd_args, tune=False)
+    ),
+)
+def test_gated_deltanet_vs_fla_autograd(
+    batch: int,
+    heads: int,
+    seq_len: int,
+    dim_k: int,
+    dim_v: int,
+    chunk_size: int,
+    dtype: torch.dtype,
+    tune: bool,
+) -> None:
+    test = GatedDeltaNetFwdWorkload(batch, heads, seq_len, dim_k, dim_v, chunk_size, dtype)
+
+    inputs = test.gen_inputs()
+
+    op = GatedDeltaNetAutogradOp(chunk_size=chunk_size, tune=tune)
+    bm = ManifestBenchmark(op, test)
+
+    scale = dim_k**-0.5
+    fla_inputs = _to_fla_layout(*inputs)
+
+    def fla_fwd():
+        return chunk_gated_delta_rule(*fla_inputs, scale=scale)
+
+    bm.compare({"tileops": op, "fla": (fla_fwd, ())}, *inputs)

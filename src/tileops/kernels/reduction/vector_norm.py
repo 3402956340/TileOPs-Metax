@@ -3,12 +3,13 @@
 Computes vector norms along the last dimension:
   - l1: sum(|x|)
   - l2: sqrt(sum(x^2))
-  - inf: max(|x|)
+  - inf: max(|x|), reduced over IEEE bit patterns as int32 so a row holding NaN
+    norms to NaN without a second look at the input
 
 Operates on raw 2D (M, N) tensors; the kernel handles 256-element alignment
 padding internally via masked loads with zero identity values.
 
-Output dtype matches input dtype; internal computation in fp32.
+Output dtype matches input dtype; l1 and l2 compute in fp32.
 """
 
 import functools
@@ -25,6 +26,9 @@ from tileops.kernels.reduction._primitives import (
     BlockConfigPlanner,
     align_up,
     device_smem_budget,
+    edge_axis_plan,
+    edge_axis_split,
+    reduce_down_rows,
     restore_reduced,
     rows_for_axes,
     tune_by_forward,
@@ -38,96 +42,85 @@ _VECTOR_NORM_KINDS = {"l1", "l2", "inf"}
 # Vector norm kernel
 
 
-@functools.lru_cache(maxsize=32)
-def _vector_norm_kernel(M: int, N: int, op_kind: str, dtype: str):
-    """Build a TileLang l1/l2/inf norm kernel.
+# Dtype of the fragment each kind reduces. ``inf`` reduces IEEE bit patterns as int32:
+# ``T.abs`` clears the sign bit, non-negative patterns sort like their floats, and every
+# NaN pattern outranks +inf's, so one integer max yields the norm and reports NaN.
+_WORK_DTYPE = {"l1": "float32", "l2": "float32", "inf": "int32"}
 
-    Computes vector norms along the last dimension:
-      - l1: reduce_sum(|x|)
-      - l2: sqrt(reduce_sum(x^2))
-      - inf: reduce_max(|x|)
+
+@T.macro
+def _prepared(x, row, col, in_bounds, op_kind: str):
+    """One element, transformed into what *op_kind* reduces, or its identity."""
+    value = T.if_then_else(in_bounds, T.cast(x[row, col], "float32"), T.cast(0.0, "float32"))
+    if op_kind == "l1":
+        return T.abs(value)
+    if op_kind == "l2":
+        return value * value
+    return T.reinterpret(T.abs(value), "int32")
+
+
+@T.macro
+def _finished(accumulated, op_kind: str, dtype: str):
+    """The accumulator, in the output dtype."""
+    if op_kind == "inf":
+        return T.cast(T.reinterpret(accumulated, "float32"), dtype)
+    return T.cast(accumulated, dtype)
+
+
+@functools.lru_cache(maxsize=32)
+def _vector_norm_kernel(M: int, N: int, op_kind: str, dtype: str, partial: bool = False):
+    """Build a TileLang l1/l2/inf norm kernel.
 
     Args:
         M: Number of rows (product of all leading dimensions).
         N: Original hidden dimension (last dim, before padding).
         op_kind: One of "l1", "l2", "inf".
         dtype: TileLang dtype string (e.g. "float16", "bfloat16", "float32").
+        partial: Write fp32 partials for an outer pass — no l2 sqrt, no cast
+            to the storage dtype. ``inf`` partials stay NaN-carrying values.
 
     Returns:
         A TileLang JIT-compiled kernel factory accepting (block_m, threads).
     """
     N_padded = align_up(N, DEFAULT_ALIGNMENT)
     _needs_pad = N_padded != N
+    work_dtype = _WORK_DTYPE[op_kind]
+    out_dtype = "float32" if partial else dtype
 
     @tilelang.jit(out_idx=[1])
     def _func(block_m, threads):
         @T.prim_func
         def main(
             x: T.Tensor[(M, N), dtype],
-            out: T.Tensor[(M,), dtype],
+            out: T.Tensor[(M,), out_dtype],
         ):
             with T.Kernel(T.ceildiv(M, block_m), threads=threads) as pid_m:
-                x_f32 = T.alloc_fragment((block_m, N_padded), "float32")
-                transformed = T.alloc_fragment((block_m, N_padded), "float32")
-                acc = T.alloc_fragment((block_m,), "float32")
-                out_local = T.alloc_fragment((block_m,), dtype)
+                work = T.alloc_fragment((block_m, N_padded), work_dtype)
+                acc = T.alloc_fragment((block_m,), work_dtype)
+                out_local = T.alloc_fragment((block_m,), out_dtype)
 
-                if _needs_pad:
-                    for i in T.serial(block_m):
-                        for j in T.Parallel(N_padded):
-                            x_f32[i, j] = T.if_then_else(
-                                T.And(pid_m * block_m + i < M, j < N),
-                                T.cast(x[pid_m * block_m + i, j], "float32"),
-                                T.cast(0.0, "float32"),
-                            )
-                else:
-                    # Optimization: fused load and cast - load directly to fp32 fragment
-                    # This saves one intermediate buffer copy
-                    # Need to guard M-dimension tail when M % block_m != 0
-                    if M % block_m != 0:
-                        for i in T.serial(block_m):
-                            for j in T.Parallel(N_padded):
-                                x_f32[i, j] = T.if_then_else(
-                                    pid_m * block_m + i < M,
-                                    T.cast(x[pid_m * block_m + i, j], "float32"),
-                                    T.cast(0.0, "float32"),
-                                )
-                    else:
-                        for i in T.serial(block_m):
-                            for j in T.Parallel(N_padded):
-                                x_f32[i, j] = T.cast(x[pid_m * block_m + i, j], "float32")
+                # Loaded straight into the working fragment, with no staging buffer.
+                for i in T.serial(block_m):
+                    for j in T.Parallel(N_padded):
+                        if _needs_pad:
+                            in_bounds = T.And(pid_m * block_m + i < M, j < N)
+                        else:
+                            in_bounds = pid_m * block_m + i < M
+                        work[i, j] = _prepared(x, pid_m * block_m + i, j, in_bounds, op_kind)
 
                 if op_kind == "l1":
-                    # l1 norm: sum(|x|)
-                    for i in T.serial(block_m):
-                        for j in T.Parallel(N_padded):
-                            transformed[i, j] = T.abs(x_f32[i, j])
-                    T.reduce_sum(transformed, acc, dim=1)
+                    T.reduce_sum(work, acc, dim=1)
                 elif op_kind == "l2":
-                    # l2 norm: sqrt(sum(x^2))
-                    # Optimization B: inline square computation to potentially reduce memory traffic
-                    for i in T.serial(block_m):
-                        for j in T.Parallel(N_padded):
-                            val = x_f32[i, j]
-                            transformed[i, j] = val * val
-                    T.reduce_sum(transformed, acc, dim=1)
-                    for i in T.Parallel(block_m):
-                        acc[i] = T.sqrt(acc[i])
+                    T.reduce_sum(work, acc, dim=1)
+                    if not partial:
+                        for i in T.Parallel(block_m):
+                            acc[i] = T.sqrt(acc[i])
                 else:
-                    # inf norm: max(|x|)
-                    # Note: T.reduce_max does not propagate NaN.
-                    # NaN handling is done at the Op layer (InfNormFwdOp)
-                    # by detecting NaN rows and patching the output.
-                    for i in T.serial(block_m):
-                        for j in T.Parallel(N_padded):
-                            transformed[i, j] = T.abs(x_f32[i, j])
-                    T.reduce_max(transformed, acc, dim=1)
+                    T.reduce_max(work, acc, dim=1)
 
-                # Cast back to output dtype
                 for i in T.Parallel(block_m):
-                    out_local[i] = T.cast(acc[i], dtype)
+                    out_local[i] = _finished(acc[i], op_kind, out_dtype)
 
-                # Write output
                 T.copy(out_local, out[pid_m * block_m])
 
         return main
@@ -136,73 +129,63 @@ def _vector_norm_kernel(M: int, N: int, op_kind: str, dtype: str):
 
 
 @functools.lru_cache(maxsize=32)
-def _vector_norm_kernel_tiled(M: int, N: int, op_kind: str, dtype: str, tile_n: int):
+def _vector_norm_kernel_tiled(
+    M: int, N: int, op_kind: str, dtype: str, tile_n: int, partial: bool = False
+):
     """Build a tiled TileLang l1/l2/inf norm kernel.
 
     Iterates over the reduction dimension in chunks of ``tile_n`` columns,
     avoiding TileLang's single-fragment column limit at 32768 columns.
+    ``partial`` writes fp32 partials for an outer pass, as in
+    ``_vector_norm_kernel``.
     """
     N_padded = align_up(N, DEFAULT_ALIGNMENT)
     num_tiles = (N_padded + tile_n - 1) // tile_n
+    work_dtype = _WORK_DTYPE[op_kind]
+    out_dtype = "float32" if partial else dtype
 
     @tilelang.jit(out_idx=[1])
     def _func(block_m, threads):
         @T.prim_func
         def main(
             x: T.Tensor[(M, N), dtype],
-            out: T.Tensor[(M,), dtype],
+            out: T.Tensor[(M,), out_dtype],
         ):
             with T.Kernel(T.ceildiv(M, block_m), threads=threads) as pid_m:
-                x_f32 = T.alloc_fragment((block_m, tile_n), "float32")
-                transformed = T.alloc_fragment((block_m, tile_n), "float32")
-                acc = T.alloc_fragment((block_m,), "float32")
-                tile_acc = T.alloc_fragment((block_m,), "float32")
-                out_local = T.alloc_fragment((block_m,), dtype)
+                work = T.alloc_fragment((block_m, tile_n), work_dtype)
+                acc = T.alloc_fragment((block_m,), work_dtype)
+                tile_acc = T.alloc_fragment((block_m,), work_dtype)
+                out_local = T.alloc_fragment((block_m,), out_dtype)
 
-                T.fill(acc, 0.0)
+                # Zero is every kind's identity; for inf it is +0.0's bit pattern.
+                T.fill(acc, 0)
 
                 for t in T.Serial(num_tiles):
                     for i in T.serial(block_m):
                         for j in T.Parallel(tile_n):
-                            x_f32[i, j] = T.if_then_else(
+                            work[i, j] = _prepared(
+                                x,
+                                pid_m * block_m + i,
+                                t * tile_n + j,
                                 T.And(pid_m * block_m + i < M, t * tile_n + j < N),
-                                T.cast(
-                                    x[pid_m * block_m + i, t * tile_n + j],
-                                    "float32",
-                                ),
-                                T.cast(0.0, "float32"),
+                                op_kind,
                             )
 
-                    if op_kind == "l1":
-                        for i in T.serial(block_m):
-                            for j in T.Parallel(tile_n):
-                                transformed[i, j] = T.abs(x_f32[i, j])
-                        T.reduce_sum(transformed, tile_acc, dim=1)
-                        for i in T.Parallel(block_m):
-                            acc[i] = acc[i] + tile_acc[i]
-                    elif op_kind == "l2":
-                        for i in T.serial(block_m):
-                            for j in T.Parallel(tile_n):
-                                transformed[i, j] = x_f32[i, j] * x_f32[i, j]
-                        T.reduce_sum(transformed, tile_acc, dim=1)
-                        for i in T.Parallel(block_m):
-                            acc[i] = acc[i] + tile_acc[i]
-                    else:
-                        # Note: T.reduce_max does not propagate NaN.
-                        # NaN handling remains in the Op layer.
-                        for i in T.serial(block_m):
-                            for j in T.Parallel(tile_n):
-                                transformed[i, j] = T.abs(x_f32[i, j])
-                        T.reduce_max(transformed, tile_acc, dim=1)
+                    if op_kind == "inf":
+                        T.reduce_max(work, tile_acc, dim=1)
                         for i in T.Parallel(block_m):
                             acc[i] = T.max(acc[i], tile_acc[i])
+                    else:
+                        T.reduce_sum(work, tile_acc, dim=1)
+                        for i in T.Parallel(block_m):
+                            acc[i] = acc[i] + tile_acc[i]
 
-                if op_kind == "l2":
+                if op_kind == "l2" and not partial:
                     for i in T.Parallel(block_m):
                         acc[i] = T.sqrt(acc[i])
 
                 for i in T.Parallel(block_m):
-                    out_local[i] = T.cast(acc[i], dtype)
+                    out_local[i] = _finished(acc[i], op_kind, out_dtype)
 
                 T.copy(out_local, out[pid_m * block_m])
 
@@ -211,7 +194,41 @@ def _vector_norm_kernel_tiled(M: int, N: int, op_kind: str, dtype: str, tile_n: 
     return _func
 
 
-# VectorNormKernel class
+@functools.lru_cache(maxsize=32)
+def _inf_merge_kernel(A: int, B: int, out_dtype: str, threads: int):
+    """Merge fp32 abs-max partials down the lead axis over IEEE bit patterns.
+
+    A plain float max drops NaN; comparing the partials' non-negative bit
+    patterns as int32 keeps it, exactly like the rows pass. One thread owns a
+    kept column, so every step of the walk is one coalesced pass.
+    """
+
+    @tilelang.jit(out_idx=[1])
+    def _func():
+        @T.prim_func
+        def main(
+            partials: T.Tensor[(A, B), "float32"],  # noqa: F821
+            out: T.Tensor[(B,), out_dtype],
+        ):
+            with T.Kernel(T.ceildiv(B, threads), threads=threads) as pid_b:
+                tx = T.get_thread_binding()
+                acc = T.alloc_local((1,), "int32")
+
+                acc[0] = 0
+                with T.If(pid_b * threads + tx < B):  # noqa: SIM117
+                    with T.Then():
+                        for a in T.serial(A):
+                            acc[0] = T.max(
+                                acc[0],
+                                T.reinterpret(partials[a, pid_b * threads + tx], "int32"),
+                            )
+                        out[pid_b * threads + tx] = T.cast(
+                            T.reinterpret(acc[0], "float32"), out_dtype
+                        )
+
+        return main
+
+    return _func
 
 
 class VectorNormKernel(Kernel):
@@ -222,14 +239,15 @@ class VectorNormKernel(Kernel):
     abs+max (inf). Uses an N-tiled fallback for long rows that exceed
     TileLang's single-fragment column limit.
 
-    Output dtype matches input dtype; internal computation in fp32.
+    Output dtype matches input dtype. l1 and l2 accumulate in fp32; ``inf`` reduces
+    int32 bit patterns, which is what carries NaN.
 
     ``forward`` takes the tensor the op declares and reduces *reduce_axes* of it; the
     permute to rows and the shape of the result are this kernel's business.
 
-    A row holding a NaN norms to NaN, matching ``torch.linalg.vector_norm``. The prim_func
-    drops NaN values, so the ``inf`` kind patches those rows here — the compensation
-    belongs to the implementation that needs it.
+    A row holding a NaN norms to NaN, matching ``torch.linalg.vector_norm``. The ``inf``
+    kind gets that from its reducer, so no pass over the input beyond the reduction
+    itself decides it.
 
     Args:
         M: Rows the reduction leaves.
@@ -324,13 +342,38 @@ class VectorNormKernel(Kernel):
         """
         self._require_cuda(x=x)
         in_shape = tuple(x.shape)
+        k, j = edge_axis_split(x.ndim, self.reduce_axes)
+        if k:
+            y = self._norm_edge_axes(x, k, j)
+            return restore_reduced(y, in_shape, self.reduce_axes, self.keepdim)
         rows = rows_for_axes(x, self.reduce_axes)
         y = self._norm_rows(rows)
-        if self.op_kind == "inf":
-            nan_rows = rows.isnan().any(dim=-1)
-            if nan_rows.any():
-                y[nan_rows] = float("nan")
         return restore_reduced(y, in_shape, self.reduce_axes, self.keepdim)
+
+    def _norm_edge_axes(self, x: torch.Tensor, k: int, j: int) -> torch.Tensor:
+        """Norm a prefix and a suffix of the axes without permuting the tensor.
+
+        Two passes in the tensor's own layout: the trailing axes reduce as
+        contiguous rows into fp32 partials, then the leading axes fold down the
+        columns of those partials. ``l2`` takes its square root and ``inf`` its
+        NaN-carrying bit-pattern max at the fold.
+        """
+        lead, kept, trail, planner, cfg = edge_axis_plan(
+            tuple(x.shape), k, j, self._elem_bytes, self._smem_budget
+        )
+        dtype_str = self.dtype_to_str(self.dtype)
+        if planner.needs_tiling:
+            stage = _vector_norm_kernel_tiled(
+                lead * kept, trail, self.op_kind, dtype_str, cfg["tile_n"], partial=True
+            )
+        else:
+            stage = _vector_norm_kernel(lead * kept, trail, self.op_kind, dtype_str, partial=True)
+        partials = stage(cfg["block_m"], cfg["threads"])(x.reshape(lead * kept, trail))
+        partials = partials.reshape(lead, kept)
+        if self.op_kind == "inf":
+            return _inf_merge_kernel(lead, kept, dtype_str, DEFAULT_THREADS)()(partials)
+        epilogue = "sqrt" if self.op_kind == "l2" else ""
+        return reduce_down_rows(partials, "sum", "float32", dtype_str, 0.0, epilogue)
 
     def _norm_rows(self, x: torch.Tensor) -> torch.Tensor:
         """Norm the trailing axis of an ``(M, N)`` buffer."""

@@ -20,6 +20,7 @@ $[C \\times L]$ layout. ``L = N * prod(spatial)`` must be divisible by the kerne
 (chosen automatically by the kernel's default_config).
 """
 
+import math
 from typing import ClassVar, Dict, Optional, Tuple
 
 import torch
@@ -62,7 +63,6 @@ class BatchNormFwdOp(Op):
 
     """
 
-    #: The operator this op registers; a test asserts the graph holds nothing else.
     compile_op_names: ClassVar[Tuple[str, ...]] = ("tileops::norm_batch_norm_fwd",)
 
     def __init__(
@@ -134,7 +134,13 @@ class BatchNormFwdOp(Op):
         if x.dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"x.dtype must be float32, float16, or bfloat16, got {x.dtype}")
         C = x.shape[1]
-        return C, x.numel() // C, x.dtype
+        L = x.numel() // C
+        if self.training and L == 1:
+            # Bessel's correction divides by L - 1. torch refuses the same call.
+            raise ValueError(
+                f"Expected more than 1 value per channel when training, got input size {x.shape}"
+            )
+        return C, L, x.dtype
 
     @staticmethod
     def _validate_channel_tensor(
@@ -182,17 +188,23 @@ class BatchNormFwdOp(Op):
         stats = (running_mean, running_var)
         running_mean, running_var = (stat.contiguous() for stat in stats)
 
+        spatial = math.prod(x.shape[2:])
+
         # ``training`` decides which implementation serves the call, so it belongs in the
         # key; both are fetched under one name, which is what a target is asked to serve.
         slot = "fwd_train_kernel" if self.training else "fwd_infer_kernel"
         kernel = self.get_or_build_kernel(
             "batch_norm_fwd",
             (x, running_mean, running_var, weight, bias),
-            key=(C, L, dtype, self.training),  # this instance's in-tree cache key
+            # Both paths index the caller's layout, so the spatial extent
+            # changes the kernel that is built.
+            key=(C, L, dtype, self.training, spatial),  # this instance's in-tree cache key
             build=lambda: (
-                self.kernel_map[slot](C, L, dtype, self.eps, self.momentum, tune=self.tune)
+                self.kernel_map[slot](
+                    C, L, dtype, self.eps, self.momentum, tune=self.tune, S=spatial
+                )
                 if self.training
-                else self.kernel_map[slot](C, L, dtype, self.eps, tune=self.tune)
+                else self.kernel_map[slot](C, L, dtype, self.eps, tune=self.tune, S=spatial)
             ),
         )
         self.kernel = kernel
@@ -253,7 +265,6 @@ class BatchNormBwdOp(Op):
 
     """
 
-    #: The operator this op registers; a test asserts the graph holds nothing else.
     compile_op_names: ClassVar[Tuple[str, ...]] = ("tileops::norm_batch_norm_bwd",)
 
     def __init__(

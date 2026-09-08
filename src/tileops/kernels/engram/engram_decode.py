@@ -99,7 +99,6 @@ def _engram_decode_kernel(batch, d_mem, d, max_conv_len, conv_kernel_size, dilat
                 vhat_local = T.alloc_fragment((d_padded,), accum_dtype)
                 conv_out = T.alloc_fragment((d_padded,), accum_dtype)
 
-                # 2D fragments for T.reduce_sum
                 hsq_2d = T.alloc_fragment((1, d_padded), accum_dtype)
                 ksq_2d = T.alloc_fragment((1, d_padded), accum_dtype)
                 vsq_2d = T.alloc_fragment((1, d_padded), accum_dtype)

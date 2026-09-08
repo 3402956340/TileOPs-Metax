@@ -8,6 +8,7 @@ import torch
 
 from tileops.kernels.kernel_base import Kernel
 from tileops.kernels.mamba.cb_producer import CBProducerKernel
+from tileops.perf.profile import tensor_core_roof
 
 from .._validation import check_tensor_shape
 from ..op_base import Op
@@ -51,7 +52,6 @@ class CBProducerFwdOp(Op):
         self.d_state = d_state
         self.tune = tune
 
-        # Use standard Op dispatch pattern
         self.dispatch_kernel(kernel_map)
 
     def _get_kernel(self, inputs: "tuple[torch.Tensor | None, ...]", dtype: torch.dtype) -> Kernel:
@@ -106,3 +106,7 @@ class CBProducerFwdOp(Op):
         C_mat = C_mat.contiguous()
         B_mat = B_mat.contiguous()
         return self._get_kernel((C_mat, B_mat), C_mat.dtype)(C_mat, B_mat)
+
+    def compute_roof(self) -> str:
+        """FLOPs are matmul contractions; priced on tensor cores."""
+        return tensor_core_roof(self.dtype)

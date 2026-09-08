@@ -49,8 +49,8 @@ def pytest_make_parametrize_id(config, val, argname):
     return None
 
 
-# Set by the recorder, not measurements.
-_NOT_A_MEASUREMENT = frozenset({"tag", "op", "op_module"})
+# What a row carries besides its measurements.
+_NOT_A_MEASUREMENT = frozenset({"tag", "op", "op_module", "ops", "params", "run_config", "result"})
 
 
 def _prop(value) -> str:
@@ -75,7 +75,8 @@ def _emit(item, tag: str, entry: dict) -> None:
     here. Hand-listing them is how the report came to publish a quantity the
     benchmark had stopped comparing.
     """
-    for key, value in entry.items():
+    measurements = {**entry["result"], "dtype": entry.get("dtype")}
+    for key, value in measurements.items():
         if key in _NOT_A_MEASUREMENT or value is None:
             continue
         item.user_properties.append((f"{tag}_{key}", _prop(value)))
@@ -165,6 +166,11 @@ def pytest_runtest_call(item):
 
         if tileops_entry:
             item.user_properties.append(("op", tileops_entry["op"]))
+            # Every op this case benchmarked, for the coverage gate: one case
+            # may time more than one, and the row properties above describe
+            # only the first.
+            benchmarked = sorted({e["op"] for e in entries if e["tag"].startswith("tileops")})
+            item.user_properties.append(("ops", ",".join(benchmarked)))
             if "op_module" in tileops_entry:
                 item.user_properties.append(("op_module", tileops_entry["op_module"]))
             tag = tileops_entry["tag"]
@@ -184,8 +190,8 @@ def pytest_runtest_call(item):
                 continue
             # Ratios compare device_busy_ms: two implementations need not have
             # the same number of gaps between kernels.
-            tl = tileops_entry.get("device_busy_ms", 0)
-            bl = be.get("device_busy_ms", 0)
+            tl = tileops_entry["result"].get("device_busy_ms", 0)
+            bl = be["result"].get("device_busy_ms", 0)
             if tl > 0 and bl > 0:
                 item.user_properties.append((f"{tag}_ratio", f"{bl / tl:.4f}"))
                 if idx == 0:

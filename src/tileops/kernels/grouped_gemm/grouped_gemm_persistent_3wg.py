@@ -52,13 +52,13 @@ _DEFAULT_CONFIG = {
     "num_stages": 3,
     "threads": 384,
     # Threadblock swizzle: group this many consecutive m-tiles so concurrent
-    # CTAs in a wave share B[e] columns in L2. 8 is the robust Triton-standard
-    # default (~5% over 1 on compute-bound MoE shapes); autotune sweeps it.
+    # CTAs in a wave share B[e] columns in L2. 8 is the Triton-standard default;
+    # autotune sweeps it.
     "group_size_m": 8,
 }
 
-#: For shapes whose groups hold fewer rows than a default tile: shorter block, shorter
-#: pipeline. ``_config.rows_per_group_regime`` says which shapes those are.
+# For shapes whose groups hold fewer rows than a default tile: shorter block, shorter
+# pipeline. ``_config.rows_per_group_regime`` says which shapes those are.
 _DECODE_CONFIG = {
     "block_m": 64,
     "block_n": 256,

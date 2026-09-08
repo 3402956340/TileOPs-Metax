@@ -4,8 +4,8 @@ Workload shapes and dtypes come from the ops manifest; roofline FLOP and
 byte counts come from each op's ``eval_roofline()`` via
 :class:`ManifestBenchmark`.
 
-One ``test_*_bench`` per op, so the validator's L4 AST check can tie each
-``load_workloads("<OpName>")`` call to its manifest entry.
+One ``test_*_bench`` per op, so every op this file is declared the benchmark
+of records a row of its own.
 """
 
 import pytest
@@ -31,9 +31,8 @@ from workloads.engram import (
 _TUNE = True
 
 
-_ENGRAM_GATE_CONV_FWD_OP = "EngramGateConvFwdOp"
 _ENGRAM_GATE_CONV_FWD_PARAMS = workload_params(
-    load_workloads(_ENGRAM_GATE_CONV_FWD_OP),
+    load_workloads(EngramGateConvFwdOp),
     fields("M", "seq_len", "d", "dtype"),
     smoke_first=True,
 )
@@ -45,7 +44,7 @@ def test_engram_gate_conv_fwd_bench(M, seq_len, d, dtype):
     inputs = test.gen_inputs()
 
     op = EngramGateConvFwdOp(M, seq_len, d, tune=_TUNE)
-    bm = ManifestBenchmark(_ENGRAM_GATE_CONV_FWD_OP, op, test)
+    bm = ManifestBenchmark(op, test)
 
     bm.compare(
         {
@@ -54,14 +53,11 @@ def test_engram_gate_conv_fwd_bench(M, seq_len, d, dtype):
             TORCH_COMPILE_TAG: compiled_reference(test.ref_program),
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )
 
 
-_ENGRAM_GATE_CONV_BWD_OP = "EngramGateConvBwdOp"
 _ENGRAM_GATE_CONV_BWD_PARAMS = workload_params(
-    load_workloads(_ENGRAM_GATE_CONV_BWD_OP),
+    load_workloads(EngramGateConvBwdOp),
     fields("M", "seq_len", "d", "dtype"),
     smoke_first=True,
 )
@@ -73,7 +69,7 @@ def test_engram_gate_conv_bwd_bench(M, seq_len, d, dtype):
     inputs = test.gen_inputs()
 
     op = EngramGateConvBwdOp(M, seq_len, d, tune=_TUNE)
-    bm = ManifestBenchmark(_ENGRAM_GATE_CONV_BWD_OP, op, test)
+    bm = ManifestBenchmark(op, test)
 
     @torch.enable_grad()
     def ref_with_grad(*args):
@@ -86,14 +82,11 @@ def test_engram_gate_conv_bwd_bench(M, seq_len, d, dtype):
             TORCH_COMPILE_TAG: compiled_reference(ref_with_grad),
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )
 
 
-_ENGRAM_DECODE_OP = "EngramDecodeFwdOp"
 _ENGRAM_DECODE_PARAMS = workload_params(
-    load_workloads(_ENGRAM_DECODE_OP),
+    load_workloads(EngramDecodeFwdOp),
     fields("batch", "d_mem", "d", "max_conv_len", "conv_kernel_size", "dilation", "dtype"),
     smoke_first=True,
 )
@@ -116,7 +109,7 @@ def test_engram_decode_bench(batch, d_mem, d, max_conv_len, conv_kernel_size, di
         dilation,
         tune=_TUNE,
     )
-    bm = ManifestBenchmark(_ENGRAM_DECODE_OP, op, test)
+    bm = ManifestBenchmark(op, test)
 
     bm.compare(
         {
@@ -125,6 +118,4 @@ def test_engram_decode_bench(batch, d_mem, d, max_conv_len, conv_kernel_size, di
             TORCH_COMPILE_TAG: compiled_reference(test.ref_program),
         },
         *inputs,
-        record_as=op,
-        params=locals(),
     )
