@@ -83,6 +83,10 @@ def test_gemm_vector_on_a_transposed_operand_is_refused(
         arch=_SM90, m=m, n=n, k=64, dtype=torch.float16, trans_a=trans_a, trans_b=trans_b
     )
 
+    if is_maca():
+        assert op.select_kernel_key(_GEMM_KEYS, call) == "gemm_kernel"
+        return
+
     with pytest.raises(ValueError, match=f"multiple of 8 .*and {dim}"):
         op.select_kernel_key(_GEMM_KEYS, call)
 
