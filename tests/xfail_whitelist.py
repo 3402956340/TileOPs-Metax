@@ -114,9 +114,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/ops/test_family_dispatch.py::test_gemm_vector_on_a_transposed_operand_is_refused[rhs-col-trans-a]",
             "tests/ops/test_gemm.py::test_gemm_kernel_tune_falls_back_to_default",
             "tests/ops/test_kernel_selection.py::test_paged_decode_dispatch_is_unchanged[bs1-fp16]",
-            "tests/ops/test_moe_staged_contracts.py::test_public_ops_build_complete_calls_before_selection",
-            "tests/ops/test_moe_staged_contracts.py::test_staged_wiring_builds_all_family_calls_without_an_executable_candidate",
-            "tests/ops/test_moe_staged_contracts.py::test_injected_candidate_uses_common_selection_and_call_spec_cache",
         ),
     ),
     (
