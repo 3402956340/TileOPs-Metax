@@ -110,8 +110,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/ops/test_convolution.py::test_conv2d[smoke-bf16-3x3]",
             "tests/ops/test_convolution.py::test_conv2d[full-bf16-3x3-s2]",
             "tests/ops/test_convolution.py::test_conv2d[full-bf16-1x1]",
-            "tests/ops/test_family_dispatch.py::test_gemm_vector_on_a_transposed_operand_is_refused[lhs-row-trans-a]",
-            "tests/ops/test_family_dispatch.py::test_gemm_vector_on_a_transposed_operand_is_refused[rhs-col-trans-a]",
             "tests/ops/test_gemm.py::test_gemm_kernel_tune_falls_back_to_default",
             "tests/ops/test_kernel_selection.py::test_paged_decode_dispatch_is_unchanged[bs1-fp16]",
             "tests/ops/test_moe_staged_contracts.py::test_public_ops_build_complete_calls_before_selection",
