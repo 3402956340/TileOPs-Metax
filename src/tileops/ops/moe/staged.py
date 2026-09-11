@@ -11,7 +11,7 @@ from tileops.kernels.moe import MoePrePermuteContiguousKernel, MoeUnpermuteKerne
 from tileops.kernels.moe.call_spec import MGroupedGemmCall, PostPermuteCall, PrePermuteCall
 from tileops.ops.compile_boundary import get_instance
 from tileops.ops.op_base import Op
-from tileops.utils import get_sm_version, is_h200
+from tileops.utils import get_sm_version, is_h200, is_maca
 
 from ..elementwise import SiluAndMulFwdOp
 from .contracts import (
@@ -278,7 +278,11 @@ class MoeGroupedGemmFwdOp(_StagedOpBase):
         arch = get_sm_version(device.index)
         if scales is not None:
             raise ValueError("NoScaleComputeSpec forbids scales")
-        if arch != 90 or a.dtype is not torch.bfloat16 or b.dtype is not torch.bfloat16:
+        if (
+            (arch != 90 and not is_maca())
+            or a.dtype is not torch.bfloat16
+            or b.dtype is not torch.bfloat16
+        ):
             raise ValueError("NoScale currently supports only SM90 BF16 operands")
         output_shape = (*a.shape[:-1], b.shape[1])
         if out is not None and not out.is_contiguous():
