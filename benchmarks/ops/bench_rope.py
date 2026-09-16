@@ -30,6 +30,7 @@ from tileops.ops.rope import (
     RopeNonNeoxFwdOp,
     RopeYarnFwdOp,
 )
+from tileops.utils import is_maca
 
 # Bench-local: manifest workload entries carry no ``base``; the ops and the
 # baseline both use the manifest signature default (``base: 10000.0``).
@@ -242,6 +243,20 @@ def test_rope_neox_position_ids_bench(
     def baseline_fn(t: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
         idx = pos.long()
         return _rotate(t, cos[idx].unsqueeze(1), sin[idx].unsqueeze(1))
+
+    # The MACA runner has no vLLM package. Other RoPE benches already time only
+    # torch-ref / torch-compile.
+    if is_maca():
+        bm.compare(
+            {
+                "tileops": op,
+                "torch-ref": baseline_fn,
+                TORCH_COMPILE_TAG: compiled_reference(baseline_fn),
+            },
+            x,
+            position_ids,
+        )
+        return
 
     # vllm rotates in fp32 and rounds once, the reference in the storage dtype, so they
     # agree to one rounding step of the storage dtype, which is what the default
