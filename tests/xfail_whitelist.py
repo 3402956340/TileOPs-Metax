@@ -23,15 +23,8 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         _COMPILATION_FAILURE,
         (
-            "tests/ops/test_gemm.py::test_gemm_fp8[smoke-fp8-e4m3-per-tensor]",
-            "tests/ops/test_gemm.py::test_gemm_fp8[smoke-fp8-e4m3-block128]",
-            "tests/ops/test_gemm.py::test_gemm_fp8[full-fp8-e4m3-block128-large-m]",
-            "tests/ops/test_gemm.py::test_gemm_fp8[full-fp8-e4m3-per-tensor-small-m-bias]",
-            "tests/ops/test_gemm.py::test_gemm_fp8[full-fp8-e4m3-per-tensor-gemv]",
             "tests/ops/test_gemm.py::test_gemm_fp8[full-fp8-e4m3-block128-split-k]",
             "tests/ops/test_gemm.py::test_gemm_fp8[full-fp8-e4m3-per-tensor-split-k-bias]",
-            "tests/ops/test_gemm.py::test_gemm_fp8_block128_single_k_block_uses_block_kernel",
-            "tests/ops/test_gemm.py::test_gemm_fp8_revalidates_cached_signature_dtypes",
             "tests/ops/test_compile_boundary.py::test_a_cold_op_traces_fullgraph_and_matches_eager[gemm-fp8]",
             "tests/ops/test_compile_boundary.py::test_a_cold_op_traces_fullgraph_and_matches_eager[gla-bwd]",
             "tests/ops/test_compile_boundary.py::test_a_cold_op_traces_fullgraph_and_matches_eager[deltanet-fwd]",
