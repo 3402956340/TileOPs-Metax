@@ -117,10 +117,7 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (
         _NUMERICAL_MISMATCH,
-        (
-            "tests/ops/test_topk_selector.py::test_topk_selector_op[4-256-1024-1-32-float32-int32-False]",
-            "tests/ops/test_topk_selector.py::test_topk_selector_op[8-512-2048-1-64-float32-int32-False]",
-        ),
+        (),
     ),
     (
         _CI_EXPECTATION_MISMATCH,

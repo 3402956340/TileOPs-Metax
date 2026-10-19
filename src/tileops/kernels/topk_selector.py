@@ -8,6 +8,7 @@ import tilelang.language as T
 import torch
 
 from tileops.kernels.kernel_base import Kernel
+from tileops.utils import is_maca
 
 __all__ = ["TopkSelectorKernel"]
 
@@ -31,6 +32,8 @@ def convert_to_uint32(x):
 
 @functools.lru_cache(maxsize=32)
 def _topk_selector_kernel(batch, seq_len, seq_len_kv, kv_group, topk, in_dtype, out_dtype):
+    maca = is_maca()
+
     @tilelang.jit(
         out_idx=[1],
         pass_configs={
@@ -110,21 +113,36 @@ def _topk_selector_kernel(batch, seq_len, seq_len_kv, kv_group, topk, in_dtype, 
                         T.atomic_add(s_histogram[inval_int16], 1)
                 T.sync_threads()
 
-                # cumsum
-                if tx < RADIX:
+                # MACA partial barrier is a no-op. CUDA keeps the named barrier.
+                if maca:
                     for i in T.serial(8):
                         offset = 1 << i
-                        T.sync_threads(3, RADIX)
+                        T.sync_threads()
                         if tx < RADIX - offset:
                             l_val = s_histogram[tx] + s_histogram[tx + offset]
-                        T.sync_threads(3, RADIX)
+                        T.sync_threads()
                         if tx < RADIX - offset:
                             s_histogram[tx] = l_val
-
-                    # find threshold bin id
-                    T.sync_threads(3, RADIX)
-                    if s_histogram[tx] > l_new_topk and s_histogram[tx + 1] <= l_new_topk:
+                    T.sync_threads()
+                    if (
+                        tx < RADIX
+                        and s_histogram[tx] > l_new_topk
+                        and s_histogram[tx + 1] <= l_new_topk
+                    ):
                         s_threshold_bin_id[0] = tx
+                else:
+                    if tx < RADIX:
+                        for i in T.serial(8):
+                            offset = 1 << i
+                            T.sync_threads(3, RADIX)
+                            if tx < RADIX - offset:
+                                l_val = s_histogram[tx] + s_histogram[tx + offset]
+                            T.sync_threads(3, RADIX)
+                            if tx < RADIX - offset:
+                                s_histogram[tx] = l_val
+                        T.sync_threads(3, RADIX)
+                        if s_histogram[tx] > l_new_topk and s_histogram[tx + 1] <= l_new_topk:
+                            s_threshold_bin_id[0] = tx
                 T.sync_threads()
                 l_threshold_bin_id = s_threshold_bin_id[0]
                 l_new_topk = l_new_topk - s_histogram[l_threshold_bin_id + 1]
@@ -185,21 +203,36 @@ def _topk_selector_kernel(batch, seq_len, seq_len_kv, kv_group, topk, in_dtype, 
                             )
                             T.atomic_add(s_histogram[l_bin_id32], 1)
                     T.sync_threads()
-                    # cumsum
-                    if tx < RADIX:
+                    # MACA partial barrier is a no-op. CUDA keeps the named barrier.
+                    if maca:
                         for i in T.serial(8):
                             offset = 1 << i
-                            T.sync_threads(3, RADIX)
+                            T.sync_threads()
                             if tx < RADIX - offset:
                                 l_val = s_histogram[tx] + s_histogram[tx + offset]
-                            T.sync_threads(3, RADIX)
+                            T.sync_threads()
                             if tx < RADIX - offset:
                                 s_histogram[tx] = l_val
-
-                        # find threshold bin id
-                        T.sync_threads(3, RADIX)
-                        if s_histogram[tx] > l_new_topk and s_histogram[tx + 1] <= l_new_topk:
+                        T.sync_threads()
+                        if (
+                            tx < RADIX
+                            and s_histogram[tx] > l_new_topk
+                            and s_histogram[tx + 1] <= l_new_topk
+                        ):
                             s_threshold_bin_id[0] = tx
+                    else:
+                        if tx < RADIX:
+                            for i in T.serial(8):
+                                offset = 1 << i
+                                T.sync_threads(3, RADIX)
+                                if tx < RADIX - offset:
+                                    l_val = s_histogram[tx] + s_histogram[tx + offset]
+                                T.sync_threads(3, RADIX)
+                                if tx < RADIX - offset:
+                                    s_histogram[tx] = l_val
+                            T.sync_threads(3, RADIX)
+                            if s_histogram[tx] > l_new_topk and s_histogram[tx + 1] <= l_new_topk:
+                                s_threshold_bin_id[0] = tx
                     T.sync_threads()
 
                     l_threshold_bin_id = s_threshold_bin_id[0]
