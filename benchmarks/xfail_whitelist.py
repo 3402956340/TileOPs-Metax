@@ -228,14 +228,7 @@ _MACA_XFAIL_PREFIX_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (
         _UNSUPPORTED_RUNTIME,
-        (
-            "benchmarks/ops/bench_moe_staged.py::test_moe_grouped_gemm_bench[deepseek-v3-decode-gate-up-bfloat16]",
-            "benchmarks/ops/bench_moe_staged.py::test_moe_grouped_gemm_bench[deepseek-v3-decode-down-bfloat16]",
-            "benchmarks/ops/bench_moe_staged.py::test_moe_grouped_gemm_bench[deepseek-v3-prefill-down-bfloat16]",
-            "benchmarks/ops/bench_moe_staged.py::test_moe_grouped_gemm_bench[deepseek-v3-prefill-gate-up-fused-bfloat16]",
-            "benchmarks/ops/bench_moe_staged.py::test_moe_expert_mlp_bench[qwen3-235b-decode-bfloat16]",
-            "benchmarks/ops/bench_moe_staged.py::test_moe_expert_mlp_bench[qwen3-235b-prefill-bfloat16]",
-        ),
+        (),
     ),
 )
 

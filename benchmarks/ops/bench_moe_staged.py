@@ -24,6 +24,7 @@ from tileops.ops.moe import (
     MoePrePermuteFwdOp,
 )
 from tileops.ops.moe.contracts import layout_from_preset
+from tileops.utils import is_maca
 from workloads.moe import (
     MoeExpertMLPStagedWorkload,
     MoeGroupedGemmStagedWorkload,
@@ -180,6 +181,16 @@ def test_moe_grouped_gemm_bench(a_shape, b_shape, layout_args, activation, dtype
     torch._assert_async(op.layout_guard(a, b, metadata))
     ref = workload.ref_program(a, b, metadata)
     _assert_valid_rows_match(op(a, b, metadata), ref, workload.valid_rows)
+    # MetaX torch exposes the symbol, but grouped mm is not implemented.
+    if is_maca():
+        # FIXME(staged-rollout): this row records no baseline.
+        #
+        # Broken invariant: every benchmark records >=1 non-tileops baseline.
+        # Why: torch._grouped_mm is the comparison for this row, and on MACA it
+        #   raises "grouped mm is not supported on your system".
+        # Cleanup: time torch._grouped_mm once MACA implements it.
+        benchmark.compare({"tileops": op}, a, b, metadata)
+        return
 
     b_kn = b.transpose(1, 2).contiguous()
 
@@ -214,6 +225,25 @@ def test_moe_expert_mlp_bench(x_shape, w_gate_up_shape, w_down_shape, layout_arg
     benchmark = ManifestBenchmark(op, workload)
     ref = workload.ref_program(x, w_gate_up, w_down, metadata)
     _assert_valid_rows_match(op(x, w_gate_up, w_down, metadata), ref, workload.valid_rows)
+    # MetaX torch exposes the symbol, but grouped mm is not implemented.
+    if is_maca():
+        segment_gemm = _flashinfer_segment_gemm(metadata)
+        silu_and_mul = flashinfer_op("activation.silu_and_mul")
+
+        def _flashinfer_mlp(x_, w_gate_up_, w_down_, _ends):
+            return segment_gemm(silu_and_mul(segment_gemm(x_, w_gate_up_)), w_down_)
+
+        _assert_valid_rows_match(
+            _flashinfer_mlp(x, w_gate_up, w_down, metadata), ref, workload.valid_rows
+        )
+        benchmark.compare(
+            {"tileops": op, "flashinfer-segment-mlp": _flashinfer_mlp},
+            x,
+            w_gate_up,
+            w_down,
+            metadata,
+        )
+        return
 
     gate_up_kn = w_gate_up.transpose(1, 2).contiguous()
     down_kn = w_down.transpose(1, 2).contiguous()
