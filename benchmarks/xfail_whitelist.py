@@ -211,7 +211,7 @@ _MACA_XFAIL_PREFIX_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (
         _UNSUPPORTED_ARCHITECTURE,
-        ("benchmarks/ops/bench_gated_deltanet.py::test_gated_deltanet_dense_prefill_bench[",),
+        (),
     ),
     (
         _OUT_OF_MEMORY,
