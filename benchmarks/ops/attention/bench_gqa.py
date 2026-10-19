@@ -32,7 +32,7 @@ from tileops.ops import (
     GroupedQueryAttentionPrefillPagedWithKVCacheFwdOp,
     GroupedQueryAttentionPrefillVarlenFwdOp,
 )
-from tileops.utils import get_sm_version
+from tileops.utils import get_sm_version, is_maca
 from workloads.attention.gqa import (
     GQAPrefillPagedWithKVCacheFwdWorkload,
     GQAPrefillVarlenFwdWorkload,
@@ -184,6 +184,10 @@ def _flashinfer_gqa_dense_decode(
     batch, _, heads, dim = q.shape
     heads_kv = k.shape[2]
     if batch == 1:
+        # Tensor-core batch-1 decode JIT-compiles FA2 single-prefill. On MACA
+        # that build fails inside FlashInfer (produce_kv template mismatch).
+        if is_maca():
+            return None
         try:
             from flashinfer.decode import single_decode_with_kv_cache
         except ImportError:
