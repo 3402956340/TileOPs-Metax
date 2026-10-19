@@ -473,7 +473,7 @@ def test_gqa_decode_tuned_split_count_tracks_runtime_sequence(monkeypatch) -> No
         1024,
         dim,
         dtype=torch.float16,
-        config={"block_H": 64, "block_N": 64, "num_split": 32, "num_stages": 2, "threads": 128},
+        config={"block_H": 64, "block_N": 64, "num_split": 32, "num_stages": 1, "threads": 128},
     )
 
     calls: list[tuple[str, int]] = []
