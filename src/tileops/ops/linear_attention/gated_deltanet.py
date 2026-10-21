@@ -5,9 +5,13 @@ import torch
 
 from tileops.backend import Target
 from tileops.kernels.kernel_base import Entry, Kernel
-from tileops.kernels.linear_attention import GatedDeltaNetDensePrefillFwdKernel
+from tileops.kernels.linear_attention import (
+    GatedDeltaNetDensePrefillFwdKernel,
+    GatedDeltaNetDensePrefillFwdMACAKernel,
+)
 from tileops.perf.formulas import gated_deltanet_fwd_roofline
 from tileops.perf.profile import tensor_core_roof
+from tileops.utils import is_maca
 
 from ..op_base import Op
 
@@ -92,7 +96,12 @@ class GatedDeltaNetFwdOp(Op):
 
     @property
     def default_kernel_map(self) -> Dict[str, Kernel]:
-        return {"gated_deltanet_dense_prefill": GatedDeltaNetDensePrefillFwdKernel}
+        kernel_cls = (
+            GatedDeltaNetDensePrefillFwdMACAKernel
+            if is_maca()
+            else GatedDeltaNetDensePrefillFwdKernel
+        )
+        return {"gated_deltanet_dense_prefill": kernel_cls}
 
     def entry_for(self, role: str, call: tuple) -> Entry:
         """Build the one migrated in-tree specialization for this call."""

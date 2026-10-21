@@ -15,6 +15,7 @@ from .deltanet_recurrence import (
 from .gated_deltanet import (
     GatedDeltaNetBwdKernel,
     GatedDeltaNetDensePrefillFwdKernel,
+    GatedDeltaNetDensePrefillFwdMACAKernel,
     GatedDeltaNetFwdKernel,
     GatedDeltaNetFwdProductionKernel,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "GatedDeltaNetDecodeKernel",
     "GatedDeltaNetDecodeRawCudaFlaStyleKernel",
     "GatedDeltaNetDensePrefillFwdKernel",
+    "GatedDeltaNetDensePrefillFwdMACAKernel",
     "GatedDeltaNetFwdKernel",
     "GatedDeltaNetFwdProductionKernel",
 ]
