@@ -7,7 +7,7 @@ import torch
 
 from tileops.kernels.kernel_base import Entry, Kernel
 from tileops.trace import trace
-from tileops.utils import get_sm_count, str2dtype
+from tileops.utils import get_sm_count, is_maca, str2dtype
 
 from .call_spec import GemmCall
 from .heuristics import (
@@ -120,6 +120,8 @@ class _GemmFp8Kernel(Kernel):
         It loads through TMA, and its epilogue releases a ring slot the mainloop
         named, so it needs at least one K-tile. The fallback carries neither.
         """
+        if is_maca():
+            return "MACA codegen does not lower this kernel's mbarrier init"
         if dtype != torch.float8_e4m3fn:
             return f"the warp-specialized FP8 kernel is e4m3-only, got {dtype}"
         if k == 0:
@@ -230,7 +232,7 @@ class _GemmFp8Kernel(Kernel):
             "block_m": 128,
             "block_n": 128,
             "block_k": 128,
-            "num_stages": 3,
+            "num_stages": 1,
             "threads": 256,
         }
 

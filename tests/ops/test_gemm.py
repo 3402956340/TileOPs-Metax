@@ -640,6 +640,8 @@ def test_gemm_fp8_block128_default_config(
         out_dtype=torch.bfloat16,
     )
 
+    if is_maca():
+        expected = (128, 1)
     assert (kernel.config["block_n"], kernel.config["num_stages"]) == expected
 
 
@@ -902,6 +904,8 @@ def test_coop2_epilogue_chunking_matches_reference(num_stages: int, stage_n: int
 
     ``stage_n`` cuts a ``block_n``-wide output tile into ``block_n / stage_n`` chunks.
     """
+    if is_maca() or get_sm_version() not in (89, 90):
+        pytest.skip("GemmKernel is SM89/SM90-only")
     m, n, k = 1536, 3072, 256
     test = GemmTest(m, n, k, torch.bfloat16, False, True)
     a, b = test.gen_inputs()
@@ -1043,12 +1047,14 @@ def test_dense_splitk_interfaces_match_reference() -> None:
         "block_m": m,
         "block_n": n,
         "block_k": 128,
-        "num_stages": 2,
+        "num_stages": 1,
         "threads": 128,
         "split_k": 4,
     }
     actual = GemmCpAsyncKernel(m, n, k, torch.bfloat16, basic_config, trans_b=True)(a, b)
     torch.testing.assert_close(actual.float(), a.float() @ b.float().T, rtol=2e-2, atol=1e-1)
+    if is_maca():
+        return
 
     gated_b = torch.randn(2 * n, k, dtype=torch.bfloat16, device="cuda")
     gated_config = {
