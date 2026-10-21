@@ -17,6 +17,7 @@ from .dense_entry import dense_sliding_window_entry, dense_ws_entry
 from .online_softmax import make_apply_softcap
 
 __all__ = [
+    "GQADenseMacaKernel",
     "GQADenseWsKernel",
     "GQADenseSlidingWindowKernel",
 ]
@@ -35,7 +36,6 @@ _COMPILE_FLAGS = [
     "-U__CUDA_NO_HALF_CONVERSIONS__",
     "-U__CUDA_NO_HALF2_OPERATORS__",
     "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-    "--expt-relaxed-constexpr",
     "--expt-extended-lambda",
     "-DNDEBUG",
 ]
@@ -731,6 +731,137 @@ class GQADenseWsKernel(Kernel):
         if self.rope is not None:
             q, k = self.rope(q, k, rope_cos, rope_sin)
         return self.kernel(q, k, v)
+
+
+class GQADenseMacaKernel(Kernel):
+    """Dense prefill on MACA: the existing BSHD ``T.gemm`` program, no mbarrier.
+
+    ``GQADenseWsKernel`` lowers ``T.alloc_barrier`` to ``ptx_init_barrier_thread_count``,
+    which MACA codegen does not emit. Sequence extents stay in the identity because
+    ``_gqa_prefill_fwd_run`` compiles them into the program.
+    """
+
+    supported_archs: list[int] = [80, 89]
+
+    @classmethod
+    def applies(cls, call) -> bool:
+        return dense_ws_region(call)
+
+    @classmethod
+    def entry_for(cls, call) -> Entry:
+        args = dict(
+            batch=call.batch,
+            heads=call.heads,
+            heads_kv=call.heads_kv,
+            seq_len_q=call.max_seqlen_q,
+            seq_len_kv=call.seqlen_kv,
+            dim=call.dim,
+            is_causal=call.is_causal,
+            dtype=call.dtype,
+            sm_scale=call.sm_scale,
+            softcap=call.softcap,
+            fuse_rope=call.fuse_rope,
+            max_position=call.max_position if call.max_position is not None else 1,
+            rotary_dim=call.rotary_dim if call.rotary_dim is not None else 0,
+            rope_layout=call.rope_layout,
+            device_index=call.device.index if call.device is not None else None,
+            tune=call.tune,
+        )
+        return tuple(args.values()), lambda: cls(**args)
+
+    def __init__(
+        self,
+        batch: int,
+        heads: int,
+        heads_kv: int,
+        seq_len_q: int,
+        seq_len_kv: int,
+        dim: int,
+        is_causal: bool,
+        dtype: torch.dtype,
+        sm_scale: Optional[float] = None,
+        softcap: float = 0.0,
+        config: Optional[dict] = None,
+        tune: bool = False,
+        *,
+        fuse_rope: bool = False,
+        max_position: int = 1,
+        rotary_dim: int = 0,
+        rope_layout: str = "neox",
+        device_index: Optional[int] = None,
+    ) -> None:
+        super().__init__(device_index=device_index)
+        self.batch = batch
+        self.heads = heads
+        self.heads_kv = heads_kv
+        self.seq_len_q = seq_len_q
+        self.seq_len_kv = seq_len_kv
+        self.dim = dim
+        self.is_causal = is_causal
+        self.dtype = dtype
+        self.sm_scale = dim**-0.5 if sm_scale is None else sm_scale
+        self.softcap = softcap
+        self.rope = make_dense_qk_rope_preprocessor(
+            fuse_rope=fuse_rope,
+            batch=batch,
+            heads=heads,
+            heads_kv=heads_kv,
+            seq_len_q=seq_len_q,
+            seq_len_kv=seq_len_kv,
+            dim=dim,
+            max_position=max_position,
+            rotary_dim=rotary_dim,
+            rope_layout=rope_layout,
+            dtype=self.dtype_str,
+        )
+        self.init_config(config, tune)
+
+    @property
+    def default_config(self) -> dict:
+        return {
+            "block_m": 32,
+            "block_n": 64 if self.dim <= 128 else 32,
+            "num_stages": 1,
+            "threads": 128,
+        }
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        q_scale: Optional[torch.Tensor] = None,
+        k_scale: Optional[torch.Tensor] = None,
+        v_scale: Optional[torch.Tensor] = None,
+        rope_cos: Optional[torch.Tensor] = None,
+        rope_sin: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        from .gqa_fwd import _gqa_prefill_fwd_run
+
+        self._require_cuda(q=q, k=k, v=v)
+        del q_scale, k_scale, v_scale
+        if self.rope is not None:
+            q, k = self.rope(q, k, rope_cos, rope_sin)
+        output, _ = _gqa_prefill_fwd_run(
+            self.batch,
+            self.heads,
+            self.heads_kv,
+            self.seq_len_q,
+            self.seq_len_kv,
+            self.dim,
+            self.is_causal,
+            self.sm_scale,
+            self.softcap,
+            self.dtype_str,
+            self.config["block_m"],
+            self.config["block_n"],
+            self.config["num_stages"],
+            self.config["threads"],
+            q,
+            k,
+            v,
+        )
+        return output
 
 
 # Dense sliding-window attention.

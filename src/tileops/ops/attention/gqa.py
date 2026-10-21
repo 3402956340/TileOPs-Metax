@@ -17,6 +17,7 @@ from tileops.kernels.attention import (
     GQADecodePagedMACAKernel,
     GQADenseFP8DecodeKernel,
     GQADenseFP8Kernel,
+    GQADenseMacaKernel,
     GQADenseSlidingWindowKernel,
     GQADenseWsKernel,
     GQAPrefillPagedWithFP8KVCacheFwdKernel,
@@ -307,6 +308,7 @@ class GroupedQueryAttentionDenseFwdOp(Op):
     def default_kernel_map(self) -> Dict[str, Kernel]:
         return {
             "gqa_dense": GQADenseWsKernel,
+            "gqa_dense_maca": GQADenseMacaKernel,
             "gqa_dense_decode": GQADecodeKernel,
             "gqa_dense_decode_bs1": GQADecodeBs1Kernel,
             "gqa_dense_fp8": GQADenseFP8Kernel,
