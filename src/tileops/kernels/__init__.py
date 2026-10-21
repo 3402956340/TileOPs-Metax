@@ -61,7 +61,11 @@ if TYPE_CHECKING:  # type checkers and IDEs do not run __getattr__
         GemmTmaKernel,
         GemvKernel,
     )
-    from .gemm_maca import GemmMACAKernel
+    from .gemm_maca import (
+        GemmMACAKernel,
+        GemvMACAKernel,
+        SmallBatchGemmMACAKernel,
+    )
     from .grouped_gemm import (
         GroupedGemmKernel,
         GroupedGemmPersistentKernel,
@@ -197,6 +201,8 @@ _LAZY = {
     "GemmTmaKernel": ".gemm",
     "GemvKernel": ".gemm",
     "GemmMACAKernel": ".gemm_maca",
+    "GemvMACAKernel": ".gemm_maca",
+    "SmallBatchGemmMACAKernel": ".gemm_maca",
     "GroupConv1dKernel": ".convolution",
     "GroupConv2dKernel": ".convolution",
     "GroupConv3dKernel": ".convolution",
