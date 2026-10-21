@@ -111,7 +111,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/ops/test_gemm.py::test_dense_splitk_interfaces_match_reference",
             "tests/ops/test_gemm.py::test_coop2_epilogue_chunking_matches_reference[3-0]",
             "tests/ops/test_gemm.py::test_coop2_epilogue_chunking_matches_reference[4-128]",
-            "tests/ops/attention/test_gqa.py::test_gqa_decode_tuned_split_count_tracks_runtime_sequence",
             "tests/ops/test_fused_moe_experts.py::TestFusedMoEExpertsFwdOp::test_small_route_dispatch_replays_in_cuda_graph",
         ),
     ),
