@@ -44,7 +44,6 @@ _MACA_XFAIL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/ops/test_compile_boundary.py::test_the_traced_graph_holds_only_this_ops_operator[gla-bwd]",
             "tests/ops/test_compile_boundary.py::test_the_traced_graph_holds_only_this_ops_operator[deltanet-fwd]",
             "tests/ops/test_compile_boundary.py::test_the_traced_graph_holds_only_this_ops_operator[deltanet-bwd]",
-            "tests/ops/test_moe_compile.py::test_leaf_op_owns_its_graph_nodes[staged_grouped_gemm_masked]",
             "tests/ops/test_deltanet_chunkwise_bwd.py::test_deltanet_bwd[2-64-2-64-64-32-dtype0-False]",
             "tests/ops/test_deltanet_chunkwise_bwd.py::test_deltanet_bwd[2-64-2-64-64-32-dtype1-False]",
             "tests/ops/test_deltanet_chunkwise_bwd.py::test_deltanet_bwd[2-64-2-64-64-32-dtype2-False]",

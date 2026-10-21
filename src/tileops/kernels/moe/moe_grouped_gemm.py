@@ -15,23 +15,28 @@ __all__ = ["MoeGroupedGemmKernel", "MoeGroupedGemmMACAAdapter"]
 
 
 class MoeGroupedGemmMACAAdapter(Kernel):
-    """Adapt staged physical-end metadata to the MACA grouped-GEMM kernel."""
+    """Serve tight physical-psum and masked grouped GEMM on MACA."""
 
     supported_archs: list[int] = [80, 89, 90]
 
     @classmethod
     def applies(cls, call) -> bool:
-        return (
+        contiguous = (
             call.kind == "contiguous"
             and call.packing == "tight"
             and call.metadata_kind == "physical_psum"
+            and call.activation in (None, "silu_and_mul", "gelu_and_mul")
+        )
+        masked = call.kind == "masked" and call.activation is None
+        return (
+            (contiguous or masked)
             and call.ab_dtype in (torch.bfloat16, torch.float16)
             and call.cd_dtype == call.ab_dtype
-            and call.activation in (None, "silu_and_mul", "gelu_and_mul")
         )
 
     def __init__(self, call) -> None:
         super().__init__()
+        self.kind = call.kind
         self.numel = call.m
         self.num_experts = call.num_groups
         self.n = call.n // 2 if call.activation is not None else call.n
@@ -51,6 +56,18 @@ class MoeGroupedGemmMACAAdapter(Kernel):
         )
 
     def forward(self, a, b, layout_metadata, *, out=None):
+        if self.kind == "masked":
+            # masked_m[g] is the valid row count from row 0 of that expert's slab.
+            counts = layout_metadata
+            result = a.new_empty((self.num_experts, a.shape[1], self.n))
+            for i in range(self.num_experts):
+                rows = int(counts[i])
+                if rows:
+                    result[i, :rows] = a[i, :rows] @ b[i].transpose(0, 1)
+            if out is not None:
+                out.copy_(result)
+                return out
+            return result
         # physical_psum stores cumulative expert ends; MACA expects sizes/offsets.
         ends = layout_metadata.to(torch.int64)
         starts = torch.cat((ends.new_zeros(1), ends[:-1]))
